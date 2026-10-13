@@ -13,10 +13,10 @@ function ShippedPluginPage() { return <div data-shipped-plugins>插件</div> }
 
 /**
  * The shell renders one keyed main panel — `activePanelId ?? 'conversation'` —
- * and the Team is one of those panels: the sidebar rail's Team row selects it and
- * the mode follows the selection. A global panel the Human selected owns the
- * column until that row takes it back, and a restored Team mode yields to a panel
- * that was already selected when the page loaded.
+ * and the Team is one of those panels: the Team entry at the sidebar's foot
+ * selects it and the mode follows the selection. A global panel the Human
+ * selected owns the column until that entry takes it back, and a restored Team
+ * mode yields to a panel that was already selected when the page loaded.
  */
 describe('Team mode and the shell main panel', () => {
   it('yields a restored Team mode to a global panel already selected at mount', async () => {
@@ -27,14 +27,14 @@ describe('Team mode and the shell main panel', () => {
     expect(b.panelInfo.getSnapshot().activePanelId).toBe('plugins')
   })
 
-  it('takes the column back from a global panel when the rail row selects the Team', async () => {
+  it('takes the column back from a global panel when the Team entry selects its panel', async () => {
     const b = await runtimeWithTeam({})
     b.runtime.slots.register({ name: 'main', key: 'plugins' }, ShippedPluginPage as never)
     await act(async () => { b.selectPanel('plugins') })
     expect(await b.view.findByText('插件')).toBeTruthy()
 
-    // The rail row is the shell's own button: it selects the panel, and the mode
-    // is what follows.
+    // The entry is the shell's own button in the sidebar's foot: it selects the
+    // panel, and the mode is what follows.
     fireEvent.click(b.view.getByRole('button', { name: '团队' }))
 
     await waitFor(() => expect(b.panelInfo.getSnapshot().activePanelId).toBe('agent-team'))
@@ -50,8 +50,9 @@ describe('Team mode and the shell main panel', () => {
 
     fireEvent.click(b.view.getByRole('button', { name: '# engineering' }))
 
-    // A Team destination is not a panel: the rail keeps saying which destination
-    // the column belongs to while the Team's own pages move underneath it.
+    // A Team destination is not a panel: the selection keeps saying which
+    // destination the column belongs to while the Team's own pages move
+    // underneath it.
     await waitFor(() => expect(b.view.findByRole('heading', { name: '# engineering' })).toBeTruthy())
     expect(b.panelInfo.getSnapshot().activePanelId).toBe('agent-team')
     expect(b.runtime.ctx.teamNavigation.getSnapshot().mode).toBe('team')

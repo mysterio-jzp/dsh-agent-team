@@ -255,11 +255,12 @@
   white-space: nowrap;
 }
 
-/* ---- The reply action ------------------------------------------------- */
-/* Trails the bubble on the identity line's own height, so it never shifts a
-   row. It follows the shipped reveal convention exactly: hidden only where a
-   pointer can actually hover, which keeps it reachable on touch (no hover to
-   reveal it) and by keyboard (`:focus-within`). */
+/* ---- The row actions -------------------------------------------------- */
+/* Copy and the quote trail the bubble on the identity line's own height, so
+   neither ever shifts a row. They follow the shipped reveal convention
+   exactly: hidden only where a pointer can actually hover, which keeps them
+   reachable on touch (no hover to reveal them) and by keyboard
+   (`:focus-within`). */
 .messageActions {
   align-items: center;
   display: flex;
@@ -293,6 +294,17 @@
 .messageAction:focus-visible {
   outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: 1px;
+}
+/* The copy confirmation is stated, not drawn: an `aria-label` names the button
+   whatever its visible label says, so the swap to "Copied" is silent to a
+   screen reader and this live region is where it is announced once. */
+.messageActionStatus {
+  clip: rect(0 0 0 0);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
 }
 
 /* ---- 「有人@我」 ------------------------------------------------------ */
@@ -673,6 +685,7 @@
   padding: 0 4px;
 }
 
+/* The reader's own handle is the one chip they need to find without reading:
    every other chip stays business, so a second family is what separates "this
    one is you" from "someone was named". Success carries "for you" without the
    alarm of the error and warn families, which mean a failure and a caution. */

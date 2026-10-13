@@ -180,24 +180,6 @@ export function humanMentionHandle(humanName: string): MentionHandle {
 }
 
 /**
- * Whether one Message's body itself spells a handle of the reader: the same
- * shared scan the mention chips render by, so the card's "mentioned you" says
- * what the words say. This is deliberately not the delivery set — a Thread
- * delivers to its Human without ever naming them, and a delivery is not a
- * mention, so a delivery-based answer would light the card on Messages that
- * never addressed the reader.
- *
- * The question is about the reader and nobody else, so the scan runs over the
- * reader's own handles rather than over the Message's mentioned Members: naming
- * someone else is the one thing that must never raise this. An unknown reader
- * is named by nothing.
- */
-export function bodyMentionsHuman(body: string, humanName: string | undefined): boolean {
-  if (humanName === undefined) return false
-  return scanBodyHandles(body, mentionHandlesOf(humanMentionHandle(humanName)).handles).length > 0
-}
-
-/**
  * One mentioned Member as a Message renders them: the display name the seat
  * prints, plus every older handle that still addresses the same person. A
  * rename must not orphan the mentions written before it — the bodies say
@@ -355,22 +337,6 @@ export function formatMessageTime(occurredAt: string, now = new Date()): string 
   if (sameDay) return `${pad(at.getHours())}:${pad(at.getMinutes())}`
   const absolute = formatAbsoluteTime(occurredAt)
   return at.getFullYear() === now.getFullYear() ? absolute.slice(5) : absolute
-}
-
-/**
- * Clock-only label for one Message instant, with no date at all. The avatar
- * seat a continuation row draws its time in is 28px wide and does not clip, so
- * the date forms `formatMessageTime` returns — 57px within the year and 87px
- * across it, measured in the shipped stack — would paint over the words beside
- * them. The seat states the time of day; the date is stated once per run by the
- * identity line that opens it and once per day by the separator above it, and
- * the precise instant stays available on the row's `title`. Callers that have
- * room for a date keep using `formatMessageTime`.
- */
-export function formatClockTime(occurredAt: string): string {
-  const at = new Date(occurredAt)
-  if (Number.isNaN(at.getTime())) return ''
-  return `${pad(at.getHours())}:${pad(at.getMinutes())}`
 }
 
 /**

@@ -1,12 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import type { AgentTeamChannelRef, AgentTeamMemberId, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
 import { zh } from '../src/client/locales.ts'
 import type { TeamConversationProps } from '../src/client/slots.ts'
 import { rememberResolvedThreadRef, type ResolvedThreadRef } from '../src/client/refs.ts'
 import { TeamMessage } from '../src/client/TeamMessage.tsx'
-import { formatAbsoluteTime, formatClockTime, formatMessageTime } from '../src/client/team-formatters.ts'
 
 const t = ((key: keyof typeof zh, params?: Record<string, string | number>) => {
   let value: string = zh[key]
@@ -504,5 +503,28 @@ describe('TeamMessage reply quote and action', () => {
     rerender(<TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="可以" t={t} />)
     expect(container.querySelector('[data-message-actions]')).toBeNull()
     expect(container.querySelector('[data-replying-to]')).toBeNull()
+  })
+
+  it('copies the stored Markdown body and states the confirmation once', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    try {
+      const { container, getByRole } = render(
+        <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body={'**加粗** 的原文'}
+          messageRef={'message:abc' as never} onReply={() => {}} t={t} />,
+      )
+      // The button's own name comes from its `aria-label`, so the visible swap
+      // below is silent to a screen reader: the live region is what says it.
+      const status = container.querySelector('[role="status"]')!
+      expect(status.textContent).toBe('')
+      fireEvent.click(getByRole('button', { name: '复制这条消息' }))
+      await waitFor(() => { expect(status.textContent).toBe('已复制') })
+      // The body travels as the stored Markdown, never as the rendered text: a
+      // reader pasting an Agent's answer elsewhere wants the source.
+      expect(writeText).toHaveBeenCalledWith('**加粗** 的原文')
+      expect(container.querySelector('[data-copy-message]')!.textContent).toBe('已复制')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+    }
   })
 })

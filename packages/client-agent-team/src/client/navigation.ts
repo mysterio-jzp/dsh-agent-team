@@ -6,9 +6,9 @@ import type { AgentTeamChannelRef, AgentTeamTaskRef, AgentTeamThreadRef } from '
 export type TeamMode = 'conversation' | 'team'
 
 /**
- * The global panel the Team is entered as, addressed by the sidebar's panel
- * rail. Team mode and this panel selection are one fact: the rail's row selects
- * it and the mode follows (see the panel-ownership effect in `index.ts`).
+ * The global panel the Team is entered as, selected by the entry at the
+ * sidebar's foot. Team mode and this panel selection are one fact: the entry
+ * selects it and the mode follows (see the panel-ownership effect in `index.ts`).
  */
 export const TEAM_PANEL_ID = 'agent-team' as MainPanelId
 

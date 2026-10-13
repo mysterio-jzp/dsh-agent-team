@@ -1,19 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
-import { IconChevronLeftOutlineRegular, IconUserOutlineRegular, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconUserOutlineRegular, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamSettingsProps } from './slots.ts'
 import { TeamMemberRow } from './TeamMemberRow.tsx'
 import membersCss from './members.module.css'
 import css from './team.module.css'
 
-type TeamMembersActionProps = Pick<TeamSettingsProps, 'wide' | 'leaveTeam' | 'loadMemberGroups' | 't'>
+type TeamMembersActionProps = Pick<TeamSettingsProps, 'wide' | 'loadMemberGroups' | 't'>
 
-/**
- * The Team sidebar's own foot: the way back to the conversation, then the
- * roster. Both are the mode's global actions — the panel rail above holds the
- * destination this mode is entered as, and this row hands the column back to an
- * ordinary conversation.
- */
-export function TeamMembersAction({ wide, leaveTeam, loadMemberGroups, t }: TeamMembersActionProps) {
+export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActionProps) {
   const [panelOpen, setPanelOpen] = useState(false)
   const [groups, setGroups] = useState<Awaited<ReturnType<typeof loadMemberGroups>>>([])
   const [loading, setLoading] = useState(false)
@@ -42,20 +36,12 @@ export function TeamMembersAction({ wide, leaveTeam, loadMemberGroups, t }: Team
 
   return (
     <>
-      <div className={wide ? css.settingsStack : `${css.settingsStack} ${css.rail}`}>
-        <Tooltip label={t('backToConversations')} delayMs={500} disabled={wide}>
-          <button type="button" className={wide ? css.settingsAction : `${css.settingsAction} ${css.rail}`} aria-label={t('backToConversations')} data-team-action="leave" onClick={leaveTeam}>
-            <IconChevronLeftOutlineRegular size={wide ? 16 : 18} />
-            {wide && <span>{t('backToConversations')}</span>}
-          </button>
-        </Tooltip>
-        <Tooltip label={t('members')} delayMs={500} disabled={wide}>
-          <button ref={triggerRef} type="button" className={wide ? css.settingsAction : `${css.settingsAction} ${css.rail}`} aria-label={t('members')} aria-haspopup="dialog" onClick={openMembers}>
-            <IconUserOutlineRegular size={wide ? 16 : 18} />
-            {wide && <span>{t('members')}</span>}
-          </button>
-        </Tooltip>
-      </div>
+      <Tooltip label={t('members')} delayMs={500} disabled={wide}>
+        <button ref={triggerRef} type="button" className={wide ? css.settingsAction : `${css.settingsAction} ${css.rail}`} aria-label={t('members')} aria-haspopup="dialog" onClick={openMembers}>
+          <IconUserOutlineRegular size={wide ? 16 : 18} />
+          {wide && <span>{t('members')}</span>}
+        </button>
+      </Tooltip>
       <Modal open={panelOpen} onClose={closeMembers} title={t('members')} closeLabel={t('close')} contentClassName={membersCss.body!}>
         <div ref={contentRef} className={membersCss.content} tabIndex={-1}>
           {loading && <p className={membersCss.state} role="status">{t('loadingAgents')}</p>}

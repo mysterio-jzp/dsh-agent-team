@@ -1,5 +1,5 @@
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { MarkdownText, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { MarkdownText, Modal, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { AgentTeamChannelRef, AgentTeamMemberId, AgentTeamMessageAttachment, AgentTeamMessageRef, AgentTeamTaskRef, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
@@ -55,19 +55,6 @@ export interface TeamMessageProps {
   /** Continuation rows that carry their own footer chip render the time so the
       hairline-separated entry stays self-identifying. */
   readonly showGroupedTime?: boolean
-  /** This row's actions are open on a surface without hover; the hosting page
-   * owns the flag so only one row can hold it. */
-  readonly cardOpen?: boolean
-  /** Opens or closes this row's actions; absent surfaces offer none. */
-  readonly onToggleCard?: ((messageRef: AgentTeamMessageRef) => void) | undefined
-  /**
-   * Whether this surface offers the row's actions at all — copy, and the
-   * reader's own mention notice. Absent, the surface offers them exactly when it
-   * offers a quote, which is how a row without this prop has always behaved.
-   * It is separate because withholding quotes is a policy about one action, and
-   * it must not take the others with it.
-   */
-  readonly rowActions?: boolean
   readonly attachments?: readonly AgentTeamMessageAttachment[] | undefined
   /** The Human's uploaded avatar; only the Human's own row draws it, and absent
    * or undecodable bytes draw the initial on the business-tinted chip. */
@@ -159,6 +146,20 @@ export const TeamMessage = memo(function TeamMessage({ senderName, memberId, hum
   // from the body alone; the toggle itself is per-mount view state nothing
   // persists.
   const [expanded, setExpanded] = useState(false)
+  // Copy feedback is per row and self-clearing: the label states success for a
+  // moment, then goes back to naming the action.
+  const [copied, setCopied] = useState(false)
+  useEffect(() => {
+    if (!copied) return
+    const timer = setTimeout(() => { setCopied(false) }, 1200)
+    return () => { clearTimeout(timer) }
+  }, [copied])
+  // The body travels as the stored Markdown, never as the rendered text: a
+  // reader pasting an Agent's answer somewhere else wants the source it was
+  // written in, not the styling this page gave it.
+  const copyMessage = useCallback((): void => {
+    void writeClipboard(body).then(accepted => { if (accepted) setCopied(true) })
+  }, [body])
   const clampable = shouldClampMessage(displayBody)
   const clamped = clampable && !expanded
   const markdownRef = useRef<HTMLDivElement>(null)
@@ -236,15 +237,20 @@ export const TeamMessage = memo(function TeamMessage({ senderName, memberId, hum
                 {occurredAt !== undefined && <span className={css.messageTime}>{formatMessageTime(occurredAt)}</span>}
               </div>
             )}
-            {/* The action rides the identity line, next to the author it acts
-                on. Positioning it against the row's edge instead would strand
-                it at the far end of the column, because a bubble is only as
+            {/* The actions ride the identity line, next to the author they act
+                on. Positioning them against the row's edge instead would strand
+                them at the far end of the column, because a bubble is only as
                 wide as its own content. */}
             {onReply !== undefined && <div className={css.messageActions} data-message-actions="">
+              <button type="button" className={css.messageAction} data-copy-message="" onClick={copyMessage}
+                aria-label={t?.('copyMessageLabel') ?? 'Copy this message'}>
+                {copied ? (t?.('copiedMessage') ?? 'Copied') : (t?.('copyMessage') ?? 'Copy')}
+              </button>
               <button type="button" className={css.messageAction} onClick={() => { if (messageRef !== undefined) onReply(messageRef) }}
                 aria-label={t?.('replyToMessage') ?? 'Reply to this message'}>
                 {t?.('replyMessage') ?? 'Reply'}
               </button>
+              <span className={css.messageActionStatus} role="status" aria-live="polite">{copied ? (t?.('copiedMessage') ?? 'Copied') : ''}</span>
             </div>}
           </div>
         )}

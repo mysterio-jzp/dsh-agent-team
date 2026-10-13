@@ -64,7 +64,7 @@ async function bench(persisted: string | null = null) {
   slots.register({ name: 'sidebar', children: {
     'sidebar.workspaces': { kind: 'single', scope: 'root' },
     'sidebar.settings': { kind: 'single', scope: 'root' },
-    'sidebar.panellist': { kind: 'list', scope: 'root' },
+    'sidebar.footer.action': { kind: 'list', scope: 'root' },
   } } as never, root)
   slots.register({ name: 'sidebar.workspaces', priority: 0 }, root)
   slots.register({ name: 'sidebar.settings', priority: 0 }, root)
@@ -92,7 +92,7 @@ describe('Team Client slot takeover', () => {
     // beside the shipped conversation seat the mode shadows when it opens.
     expect(slots.entriesOfSlot('main')).toHaveLength(2)
     expect(slots.entriesOfSlot('sidebar.settings')).toHaveLength(1)
-    expect(slots.entries('sidebar.panellist')).toHaveLength(1)
+    expect(slots.entries('sidebar.footer.action')).toHaveLength(1)
 
     ctx.teamNavigation.actions().enterTeam()
     expect(slots.entries('sidebar.workspaces')).toHaveLength(2)
@@ -107,7 +107,7 @@ describe('Team Client slot takeover', () => {
     expect(slots.entries('sidebar.settings')).toHaveLength(1)
 
     await fiber.dispose()
-    expect(slots.entries('sidebar.panellist')).toHaveLength(0)
+    expect(slots.entries('sidebar.footer.action')).toHaveLength(0)
     expect(slots.spec('sidebar.workspaces.directoryFlow')).toBeUndefined()
   })
 
@@ -137,7 +137,7 @@ describe('Team Client slot takeover', () => {
     expect(slots.entries('sidebar.workspaces')).toHaveLength(1)
     expect(slots.entries('main')).toHaveLength(1)
     expect(slots.entries('sidebar.settings')).toHaveLength(1)
-    expect(slots.entries('sidebar.panellist')).toHaveLength(0)
+    expect(slots.entries('sidebar.footer.action')).toHaveLength(0)
   })
 
   it('mounts Team shadows immediately when persisted mode is Team', async () => {
@@ -190,11 +190,11 @@ describe('Team Client slot takeover', () => {
     expect(slots.entriesOfSlot('sidebar.workspaces')[0]!.options.priority).toBe(-100)
     expect(slots.entriesOfSlot('sidebar.settings')[0]!.options.priority).toBe(-100)
 
-    // The Team foot's wrapped leave closes the Member view, clears the panel,
-    // and restores the Human's original session before deregistering the chrome.
-    const foot = slots.entriesOfSlot('sidebar.settings').find(entry => entry.options.priority === -100)!
-    const footActions = (foot.inject as () => Record<string, unknown>)()
-    ;(footActions.leaveTeam as () => void)()
+    // The entry's wrapped leave closes the Member view, clears the panel, and
+    // restores the Human's original session before deregistering the chrome.
+    const entry = slots.entriesOfSlot('sidebar.footer.action')[0]!
+    const entryActions = (entry.inject as () => Record<string, unknown>)()
+    ;(entryActions.leaveTeam as () => void)()
 
     expect(uiWorkspace.openSession).toHaveBeenLastCalledWith('session:human-origin')
     expect(ctx.teamNavigation.getSnapshot()).toEqual({ mode: 'conversation', workspaceId: 'workspace:one' })

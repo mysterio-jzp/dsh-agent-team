@@ -297,31 +297,27 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const teamCurrentPage = page.locator('[data-slot="sidebar.workspaces"] [aria-current="page"]')
 
   expect(scaffold.ctx.clientModules.graph().entries.some(entry => entry.id === '@contexera/dsh-agent-team')).toBe(true)
-  // The Team entry is the sidebar rail's own row: the same list as the shipped
-  // global panels, one row below the plugin page's, at the same height.
-  const panelRail = page.locator('nav[class*="panelList"]')
-  const pluginsTrigger = panelRail.getByRole('button', { name: '插件' })
-  const teamTrigger = panelRail.getByRole('button', { name: '团队', exact: true })
+  // The Team entry is a row at the sidebar's foot, directly above the shipped
+  // Settings row: entering the mode is selecting the Team panel, and the same
+  // row then carries the way back.
+  const teamTrigger = page.getByRole('button', { name: '团队', exact: true })
   const settingsTrigger = page.getByRole('button', { name: '设置' })
-  const [teamBox, pluginsBox, settingsBox] = await Promise.all([teamTrigger.boundingBox(), pluginsTrigger.boundingBox(), settingsTrigger.boundingBox()])
+  const [teamBox, settingsBox] = await Promise.all([teamTrigger.boundingBox(), settingsTrigger.boundingBox()])
   expect(teamBox).not.toBeNull()
-  expect(pluginsBox).not.toBeNull()
   expect(settingsBox).not.toBeNull()
-  expect(teamBox!.height).toBeCloseTo(pluginsBox!.height, 0)
-  expect(teamBox!.y).toBeCloseTo(pluginsBox!.y + pluginsBox!.height + 4, 0)
   await teamTrigger.click()
-  // The mode's foot takes the settings seat, and that seat is bottom-anchored:
-  // the roster row keeps the y the shipped Settings row had, and the way back
-  // to the conversation stands directly above it.
+  // The mode keeps the settings seat for the roster alone: 「成员」 stands where
+  // the shipped Settings row stood, and the way back to the conversation is the
+  // entry above it, wearing the geometry it had before the mode.
   const conversationTrigger = page.getByRole('button', { name: '对话' })
   const membersTrigger = page.getByRole('button', { name: '成员' })
   const [conversationBox, membersTriggerBox] = await Promise.all([conversationTrigger.boundingBox(), membersTrigger.boundingBox()])
   expect(conversationBox).not.toBeNull()
   expect(membersTriggerBox).not.toBeNull()
+  expect(conversationBox!.y).toBeCloseTo(teamBox!.y, 0)
+  expect(conversationBox!.height).toBeCloseTo(teamBox!.height, 0)
   expect(membersTriggerBox!.y).toBeCloseTo(settingsBox!.y, 0)
   expect(membersTriggerBox!.height).toBeCloseTo(settingsBox!.height, 0)
-  expect(conversationBox!.height).toBeCloseTo(settingsBox!.height, 0)
-  expect(conversationBox!.y).toBeCloseTo(membersTriggerBox!.y - conversationBox!.height - 8, 0)
   const newSessionButtons = page.locator('button[aria-label="新建会话"]')
   const newSessionButton = page.locator('button[class*="newSession"][aria-label="新建会话"]')
   const brandButton = page.locator('button[class*="brand"][aria-label="新建会话"]')
@@ -2103,11 +2099,11 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.getByRole('button', { name: '对话' }).click()
   await expect.poll(() => page.locator('[data-team-channel]').count()).toBe(0)
 
-  // The shipped global panel rail holds the Team row beside the Plugins one while
-  // it is up: it addresses the profile, and Team mode stands it down with the
-  // rest of the shell chrome — the reader is already on the Team page, and the
-  // mode's own foot row is the way out. It is present in the DOM on both sides,
-  // visible only on one.
+  // The shipped global panel rail holds the Plugins row while it is up: it
+  // addresses the profile, and Team mode stands it down with the rest of the
+  // shell chrome — the reader is already on the Team page, whose entry sits at
+  // the sidebar's foot. It is present in the DOM on both sides, visible only on
+  // one.
   const globalPanelsNav = page.locator('nav[class*="panelList"]')
   await expect.poll(() => globalPanelsNav.count()).toBe(1)
   await expect.poll(() => globalPanelsNav.isVisible()).toBe(true)
@@ -2125,16 +2121,17 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.screenshot({ path: join(UI01_SHOTS, 'plugin-list-artwork.png'), fullPage: true })
 
   // The plugin page lists this very bundle under a matching name ("智能体团队"),
-  // so the Team row is addressed exactly while that page is on screen.
-  const enterTeamKeyboard = globalPanelsNav.getByRole('button', { name: '团队', exact: true })
+  // and the Team entry keeps its seat at the sidebar's foot while that page is on
+  // screen, so the entry is addressed exactly from here.
+  const enterTeamKeyboard = page.getByRole('button', { name: '团队', exact: true })
   await enterTeamKeyboard.focus()
   await expect.poll(() => enterTeamKeyboard.evaluate(element => element === document.activeElement)).toBe(true)
   await enterTeamKeyboard.press('Enter')
   await expect.poll(() => page.getByRole('button', { name: '成员', exact: true }).count()).toBe(1)
   await page.getByRole('heading', { name: '# delivery' }).waitFor()
   // The selected plugin page is unmounted rather than sitting behind the Team
-  // seat, the rail stands down with the mode (its own Team row included), and the
-  // mode's foot row is what carries the leave action.
+  // seat, the rail stands down with the mode, and the entry at the foot is what
+  // carries the leave action.
   await expect.poll(() => page.getByRole('button', { name: '对话', exact: true }).getAttribute('data-team-action')).toBe('leave')
   await expect.poll(() => pluginPanel.count()).toBe(0)
   await expect.poll(() => globalPanelsNav.count()).toBe(1)
