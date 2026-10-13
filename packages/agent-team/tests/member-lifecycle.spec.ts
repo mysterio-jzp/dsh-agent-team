@@ -1479,71 +1479,6 @@ describe('Agent Team Member lifecycle', () => {
     expect(hints).toHaveLength(1)
   })
 
-  it('wakes an idle Member with a direct mention body and source', async () => {
-    const adapter = new ScriptedAdapter()
-    const { ctx, workspaceId } = await realHarness(adapter)
-    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('top-level-wake-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
-    const builder = await ctx.agentTeam.addMember({ requestId: requestId('top-level-wake-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
-    const committed = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('top-level-wake'), workspaceId, channelRef: channel.channel.channelRef,
-      body: 'Please investigate the top-level wake path', recipients: [builder.status.member.memberId] })
-    expect(committed.kind).toBe('committed')
-    expect(adapter.requests).toHaveLength(0)
-
-    adapter.enqueue(textResponse('I will inspect the mentioned Task.'))
-    if (committed.kind !== 'committed') throw new Error(`expected committed top-level mention, received ${committed.kind}`)
-    expect(ctx.agentTeam.inboxForAgent(agent, { workspaceId })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1,
-      items: [expect.objectContaining({ task: expect.objectContaining({ taskRef: committed.task!.taskRef }), directCount: 1 })] })
-    await agent.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const request = JSON.stringify(adapter.requests[0]!.messages)
-    expect(request).toContain('Direct Team mention')
-    expect(request).toContain('Please investigate the top-level wake path')
-    // The rendered sender line, not the 'member:human' ids elsewhere in the request.
-    expect(request).toContain('From: human')
-    expect(request).toContain(committed.task!.taskRef)
-    // The notification states the absolute commit instant in UTC+8.
-    expect(request).toContain('Occurred at: ')
-    expect(request).toMatch(/Occurred at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00/)
-  })
-
-  it('delivers an agent-created top-level mention to the mentioned Member', async () => {
-    const adapter = new ScriptedAdapter()
-    const { ctx, workspaceId } = await realHarness(adapter)
-    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('peer-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
-    const starter = await ctx.agentTeam.addMember({ requestId: requestId('peer-starter'), workspaceId, handle: 'starter', description: 'Starts work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const peer = await ctx.agentTeam.addMember({ requestId: requestId('peer-peer'), workspaceId, handle: 'peer', description: 'Peers in', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const starterAgent = ctx.agents.get(starter.status.member.sessionId)!
-    const peerAgent = ctx.agents.get(peer.status.member.sessionId)!
-    let callNumber = 0
-    const call = async (name: string, args: unknown) => {
-      const result = await ctx.tools.execute({ signal: new AbortController().signal,
-        callId: ToolCallId(`peer-mention-${++callNumber}`), name, arguments: args, agent: starterAgent })
-      if (result.isError) throw new Error(result.error.message)
-      return result.value as Record<string, any>
-    }
-
-    const started = await call('team_message', { action: 'start', channelRef: channel.channel.channelRef,
-      body: '@peer please verify the export path' })
-    expect(started).toMatchObject({ kind: 'committed' })
-
-    expect(ctx.agentTeam.inboxForAgent(peerAgent, { workspaceId })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1,
-      items: [expect.objectContaining({ thread: expect.objectContaining({ threadRef: started.threadRef }), directCount: 1 })] })
-    expect(ctx.agentTeam.inboxForAgent(peerAgent, { workspaceId }).items[0]!.task).toBeUndefined()
-
-    adapter.enqueue(textResponse('I will verify the export path.'))
-    await peerAgent.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const request = JSON.stringify(adapter.requests[0]!.messages)
-    expect(request).toContain('Direct Team mention')
-    expect(request).toContain('@peer please verify the export path')
-    expect(request).toContain('starter')
-    expect(request).toContain(started.threadRef)
-    expect(request).not.toContain('Task undefined')
-    expect(request).toContain('relevant workspace and threadRef')
-    expect(request).toMatch(/Occurred at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00/)
-  })
-
   it('resolves what a reply answers from outside the reader window, once per read', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
@@ -1621,6 +1556,70 @@ describe('Agent Team Member lifecycle', () => {
     expect(request).toContain(`[${anchor.message.messageRef}]`)
   })
 
+  it('wakes an idle Member with a direct mention body and source', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('top-level-wake-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('top-level-wake-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const committed = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('top-level-wake'), workspaceId, channelRef: channel.channel.channelRef,
+      body: 'Please investigate the top-level wake path', recipients: [builder.status.member.memberId] })
+    expect(committed.kind).toBe('committed')
+    expect(adapter.requests).toHaveLength(0)
+
+    adapter.enqueue(textResponse('I will inspect the mentioned Task.'))
+    if (committed.kind !== 'committed') throw new Error(`expected committed top-level mention, received ${committed.kind}`)
+    expect(ctx.agentTeam.inboxForAgent(agent, { workspaceId })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1,
+      items: [expect.objectContaining({ task: expect.objectContaining({ taskRef: committed.task!.taskRef }), directCount: 1 })] })
+    await agent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    const request = JSON.stringify(adapter.requests[0]!.messages)
+    expect(request).toContain('Direct Team mention')
+    expect(request).toContain('Please investigate the top-level wake path')
+    // The rendered sender line, not the 'member:human' ids elsewhere in the request.
+    expect(request).toContain('From: human')
+    expect(request).toContain(committed.task!.taskRef)
+    // The notification states the absolute commit instant in UTC+8.
+    expect(request).toContain('Occurred at: ')
+    expect(request).toMatch(/Occurred at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00/)
+  })
+
+  it('delivers an agent-created top-level mention to the mentioned Member', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('peer-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const starter = await ctx.agentTeam.addMember({ requestId: requestId('peer-starter'), workspaceId, handle: 'starter', description: 'Starts work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const peer = await ctx.agentTeam.addMember({ requestId: requestId('peer-peer'), workspaceId, handle: 'peer', description: 'Peers in', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const starterAgent = ctx.agents.get(starter.status.member.sessionId)!
+    const peerAgent = ctx.agents.get(peer.status.member.sessionId)!
+    let callNumber = 0
+    const call = async (name: string, args: unknown) => {
+      const result = await ctx.tools.execute({ signal: new AbortController().signal,
+        callId: ToolCallId(`peer-mention-${++callNumber}`), name, arguments: args, agent: starterAgent })
+      if (result.isError) throw new Error(result.error.message)
+      return result.value as Record<string, any>
+    }
+
+    const started = await call('team_message', { action: 'start', channelRef: channel.channel.channelRef,
+      body: '@peer please verify the export path' })
+    expect(started).toMatchObject({ kind: 'committed' })
+
+    expect(ctx.agentTeam.inboxForAgent(peerAgent, { workspaceId })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1,
+      items: [expect.objectContaining({ thread: expect.objectContaining({ threadRef: started.threadRef }), directCount: 1 })] })
+    expect(ctx.agentTeam.inboxForAgent(peerAgent, { workspaceId }).items[0]!.task).toBeUndefined()
+
+    adapter.enqueue(textResponse('I will verify the export path.'))
+    await peerAgent.whenIdle()
+    expect(adapter.requests).toHaveLength(1)
+    const request = JSON.stringify(adapter.requests[0]!.messages)
+    expect(request).toContain('Direct Team mention')
+    expect(request).toContain('@peer please verify the export path')
+    expect(request).toContain('starter')
+    expect(request).toContain(started.threadRef)
+    expect(request).not.toContain('Task undefined')
+    expect(request).toContain('relevant workspace and threadRef')
+    expect(request).toMatch(/Occurred at: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+08:00/)
+  })
   it('bounds automatic direct context while retaining omitted Messages in durable Inbox', async () => {
     const adapter = new GatedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)

@@ -370,7 +370,7 @@ describe('Team conversation surfaces', () => {
     const quoteButton = (body: string) => {
       const row = Array.from(timeline.querySelectorAll('article')).find(candidate => candidate.textContent?.includes(body))
       if (row === undefined) throw new Error(`no Message row for ${body}`)
-      return within(row).getByRole('button', { name: '引用这条消息' })
+      return within(row).getByRole('button', { name: '回复这条消息' })
     }
 
     // Quoting an Agent is a delivery, and the composer states it exactly once:
@@ -935,7 +935,7 @@ describe('Team conversation surfaces', () => {
     }
   })
 
-  it('states a continuation row\u2019s time under the pointer, with no line of its own', async () => {
+  it('states a real waiting gap on its own boundary line, and none inside one turn', async () => {
     const b = await runtimeWithTeam()
     fireEvent.click(b.view.getByRole('button', { name: '团队' }))
     fireEvent.click(await b.view.findByRole('button', { name: '新建频道' }))
@@ -966,21 +966,21 @@ describe('Team conversation surfaces', () => {
     } } as never))
     const row = (ref: string) => document.querySelector(`[data-message-ref="${ref}"]`)
 
-    // A real waiting gap states nothing of its own in a Thread: the flow keeps
-    // its spacing and the row states its own instant under the pointer.
+    // A real waiting gap states its own instant on the boundary line that
+    // separates the two turns — the reader is told how long the turn waited,
+    // where the wait happened.
     historyWith([turn('message:a', '先做一半', '2026-08-21T09:10:00.000Z', 3), turn('message:b', '再做一半', '2026-08-21T09:20:00.000Z', 4)])
     b.publishChannelUpdate()
     await waitFor(() => expect(row('message:b')).not.toBeNull())
-    expect(document.querySelector('[role="separator"]')).toBeNull()
-    const gapTime = row('message:b')!.querySelector('[data-gutter-time]')!.textContent
-    expect(gapTime).toBeTruthy()
+    const gapDivider = document.querySelector('[role="separator"][data-side]')
+    expect(gapDivider).not.toBeNull()
+    expect(gapDivider!.querySelector('time')?.textContent).toBeTruthy()
 
-    // The same pair inside one turn's flow: the same one statement, from the
-    // same seat, and still no line.
+    // The same pair inside one turn's flow — two minutes apart — earns no
+    // boundary at all, so the line the first case stated is gone.
     historyWith([turn('message:a', '先做一半', '2026-08-21T09:19:00.000Z', 3), turn('message:b', '再做一半', '2026-08-21T09:21:00.000Z', 4)])
     b.publishChannelUpdate()
-    await waitFor(() => expect(row('message:b')!.querySelector('[data-gutter-time]')!.textContent).not.toBe(gapTime))
-    expect(document.querySelector('[role="separator"]')).toBeNull()
+    await waitFor(() => expect(document.querySelector('[role="separator"][data-side]')).toBeNull())
 
     await b.runtime.dispose()
   })
@@ -1242,7 +1242,7 @@ describe('Team conversation surfaces', () => {
     await b.runtime.dispose()
   })
 
-  it('states a wide same-sender gap in the row itself, not on a line', async () => {
+  it('states a wide same-sender gap on its own boundary line', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true, seededMessages: [
       { body: 'burst one', occurredAt: '2026-08-21T09:00:00.000Z' },
       { body: 'burst two', occurredAt: '2026-08-21T09:01:00.000Z' },
@@ -1251,20 +1251,18 @@ describe('Team conversation surfaces', () => {
     fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
     expect(await b.view.findByText('later publication')).toBeTruthy()
     // Only the two-hour gap earns a boundary, the one-minute burst stays one
-    // run, and the boundary is bare: the instant lives in the seat of the row
-    // it separates.
-    const rowOf = (body: string) => b.view.getByText(body).closest('article')
-    const channelDividers = b.view.getAllByRole('separator')
+    // run, and the boundary states the instant it separates.
+    const channelDividers = b.view.container.querySelectorAll('[role="separator"][data-side]')
     expect(channelDividers).toHaveLength(1)
-    expect(channelDividers[0]!.querySelector('time')).toBeNull()
-    expect(rowOf('later publication')!.querySelector('[data-gutter-time]')?.textContent).toBeTruthy()
+    expect(channelDividers[0]!.querySelector('time')?.textContent).toBeTruthy()
 
     fireEvent.click(b.view.getAllByRole('button', { name: '打开 Task #1' })[0]!)
     expect(await b.view.findByRole('heading', { name: 'Task #1' })).toBeTruthy()
-    // The Thread reads as one flow: whatever boundary this page keeps states no
-    // instant, and the two-hour gap shows up only where the reader points.
-    expect(rowOf('later publication')!.querySelector('[data-gutter-time]')?.textContent).toBeTruthy()
-    for (const separator of b.view.queryAllByRole('separator')) expect(separator.querySelector('time')).toBeNull()
+    // The Thread reads as one flow, and every boundary it keeps states the
+    // instant it separates.
+    const threadDividers = b.view.container.querySelectorAll('[role="separator"][data-side]')
+    expect(threadDividers.length).toBeGreaterThan(0)
+    for (const separator of threadDividers) expect(separator.querySelector('time')?.textContent).toBeTruthy()
     await b.runtime.dispose()
   })
 

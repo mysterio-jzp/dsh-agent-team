@@ -339,6 +339,7 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
     <div className={css.card} data-team-composer>
       {confirmation !== undefined && <p className={css.confirmation} role="status">{confirmation}</p>}
       {replyTo !== undefined && <div className={css.replyBanner} data-reply-banner="">
+        <span className={css.replyBannerBar} aria-hidden="true" />
         <span className={css.replyBannerBody}>
           <span className={css.replyBannerAuthor}>{t('replyingTo', { name: replyTo.senderName })}</span>
           <span className={css.replyBannerText}>{replyTo.excerpt}</span>

@@ -1,5 +1,5 @@
 import {
-  SettingsFormModel, settingsTextField,
+  SettingsFormModel, settingsTextField, type SettingsFieldSpec,
   type SettingsFieldState, type SettingsFormActions, type SettingsFormPathOp, type SettingsFormScope,
   type SettingsFormScopeSnapshot, type SettingsFormShell,
 } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -29,15 +29,34 @@ const FIELD_PATHS = {
   apiBase: [JUDGE_GROUP, 'apiBase'],
   model: [JUDGE_GROUP, 'model'],
   apiKey: [JUDGE_GROUP, 'apiKey'],
+  // The reply switch is a row-level setting, not part of the judge's group:
+  // it decides a collaboration affordance, not an endpoint.
+  replyEnabled: ['replyEnabled'],
 } as const
+
+/**
+ * The reply switch as the staged form sees it. The stored value is a boolean
+ * while the model stages text, so this maps between the two; an absent value
+ * means the Host default, which is on.
+ */
+const REPLY_ENABLED_FIELD: SettingsFieldSpec = {
+  field: 'replyEnabled',
+  format: value => value === false ? 'off' : 'on',
+  parse: text => ({ kind: 'set', value: text === 'on' }),
+}
 
 /** One control this page owns. */
 export type TeamJudgeField = keyof typeof FIELD_PATHS
 
-/** The Team row's settings section as this form edits it: the judge's group. */
+/**
+ * The Team row's settings section as this form edits it: the judge's group plus
+ * the row-level switch that gates quote-replies.
+ */
 export interface TeamJudgeSection {
   /** The judge's endpoint configuration. */
   readonly jev?: unknown
+  /** Whether the Team offers quote-replies; absent means the Host default, which is on. */
+  readonly replyEnabled?: unknown
 }
 
 /**
@@ -52,15 +71,16 @@ function flatten(layer: unknown): Record<string, unknown> | undefined {
   if (layer === null || typeof layer !== 'object') return undefined
   const flat: Record<string, unknown> = {}
   for (const [field, path] of Object.entries(FIELD_PATHS) as [TeamJudgeField, readonly string[]][]) {
-    // Each control's own path is walked from the layer's root rather than
-    // assuming the layer is the group itself.
+    // Each control's own path is walked from the layer's root, because this
+    // page owns both fields inside the judge group and one on the row itself;
+    // assuming a single group silently dropped the row-level control.
     let node: unknown = layer
     for (const key of path) {
       node = node === null || typeof node !== 'object' ? undefined : (node as Record<string, unknown>)[key]
       if (node === undefined) break
     }
-    // Only `undefined` is absent: an empty string is a value this page reads
-    // back rather than a missing one.
+    // Only `undefined` is absent: a stored `false` is a value this page reads
+    // back, and dropping it would show the switch as on when it is off.
     if (node !== undefined) flat[field] = node
   }
   return flat
@@ -130,6 +150,7 @@ export class TeamJudgeForm {
     this.model = new SettingsFormModel<Record<string, unknown>>(this.scope, [
       settingsTextField('apiBase'),
       settingsTextField('model'),
+      REPLY_ENABLED_FIELD,
     ], [{
       field: 'apiKey',
       // The literal never rides a response, so a draft is only ever what the
@@ -150,6 +171,23 @@ export class TeamJudgeForm {
   /** Stage a draft, reset a field, save every staged edit, or discard them. */
   actions(): SettingsFormActions {
     return { ...this.model.actions(), save: () => { void this.save() } }
+  }
+
+  /**
+   * Turn quote-replies on or off.
+   *
+   * Written at once rather than staged, for the same reason `clearKey` is: a
+   * switch that waits for a Save reads as broken, and the reply affordance is
+   * gated on the Host's answer, which this write moves immediately.
+   * @param enabled - whether the Team offers quote-replies.
+   * @returns whether the Host accepted the write.
+   */
+  async setReplyEnabled(enabled: boolean): Promise<boolean> {
+    try {
+      return await this.section.mutate([{ op: 'set', path: [...FIELD_PATHS.replyEnabled], value: enabled }])
+    } catch {
+      return false
+    }
   }
 
   /**

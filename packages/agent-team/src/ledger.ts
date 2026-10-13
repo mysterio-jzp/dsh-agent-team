@@ -4159,7 +4159,6 @@ export class AgentTeamLedger {
     if (parent.threadRef !== threadRef) throw new Error(`reply target '${ref}' belongs to another Thread`)
     return parent
   }
-
   /**
    * Merge the `@Handle` mentions authored in `body` into an explicit recipient
    * set. Body mentions are the primary channel now: an Agent has no recipient

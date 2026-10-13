@@ -155,7 +155,18 @@ export interface MentionSegment {
  */
 export const HUMAN_MEMBER_ID = 'member:human' as AgentTeamMemberId
 
-/** The Human's handle before they could rename themselves; the Host keeps it as an alias. */
+/**
+ * Whether one Message's structured mention facts name the Human reader. This is
+ * the Host's delivery fact rather than a scan of the body, so a bubble marked
+ * by it is exactly one whose mention reached the reader. A Message never
+ * mentions its own author, so a Human-authored Message can never qualify.
+ */
+export function mentionsHuman(mentions: readonly AgentTeamMemberId[]): boolean {
+  return mentions.includes(HUMAN_MEMBER_ID)
+}
+
+/**
+ * The Human's handle before they could rename themselves; the Host keeps it as an alias. */
 export const HUMAN_HISTORIC_HANDLE = 'human'
 
 /**

@@ -26,16 +26,9 @@
 - 草稿缓存：draft/recipients 不在页面局部。它们按 `channel:<channelRef>` / `thread:<threadRef>` 键存放。每 Client 上下文存一份 `TeamDraftStore`（`drafts.ts`）。它用单一 localStorage 键 `dsh.agent-team.drafts.v1`，写穿持久化，按 savedAt 淘汰最旧 ~50 条。切换视图或刷新后草稿与收件人原样恢复。发送提交成功即清除对应键，失败保留。Composer 挂载收敛会剔除不再匹配文本/已失效的收件人。Channel 的「作为任务」意图不进入草稿缓存：默认关闭，成功提交后再次复位关闭。
 - taskless Thread 的「转为任务」是 Human-only durable mutation，不做乐观 overlay。成功后重新读取 Thread 与补充 Channel/Member 投影；unread/stale fence 时保留 Host 返回错误并重新读取相关事实。
 
-## 引用一条 Message
-Thread 里的一条 Message，可以通过「选中它所回答的那条 Message」来回答。这个入口无条件存在：回复动作、已存的引用行与 composer 引用条是同一个功能，Host 一律完整提供，没有哪个表面需要先问一句「引用是否可用」。
+选中要回答的 Message 会把目标说两遍，而且两处都必须看得见：Message 本身加一圈描边，composer 里出现一条引用条，写明父消息并引用它的第一行，旁边紧跟取消。描边用 ring 而不是填充，理由与「有人@我」的标记相同 —— 气泡的材质不能随状态改变。引用条落在 composer 卡片内部、输入框上方，因此目标与草稿被读成一个动作；取消会同时清掉引用条与描边。
 
-选中一条 Message 时，目标在读者正在看的两处同时被说明。该行**保持**指针刚刚给它的那层扁平交互底色，因此指针移开后选择依然可见；composer 里出现一条引用条，写明父消息及其第一行，旁边紧跟取消，取消会同时清掉两者。引用条落在 composer 卡片内部、输入框上方，目标与草稿因此被读成一个动作。它不重复声明投递：被引用者与其它收件人一样并入同一行「将通知」，因为引用像 mention 一样投递，而一次投递只读一遍。
-
-有一个作者永远不进这一行：Host 既不投递给 Human（Human 直接读 Thread，没有可投递的 Session），也不投递给消息作者本人。所以被引用的 Human、以及读者引用自己消息时的那位作者，在投递发生之前就已从收件人集合里去掉。这一行陈述的是**将要发生什么**，而不是选中了什么，因此它对这次投递保持沉默，而不是把读者自己念回给读者看，说成那个会收到通知的人。
-
-发送时带上父消息的 ref，Host 因此记录这条引用并向父消息作者送达。发送成功会清掉目标，切换 Thread 同样会清掉，所以过期的引用永远不会跟着下一次 Enter 一起出去。
-
-时间线里，这条引用领在它所归属的 Message 之前，用的就是读者已经熟悉的 Markdown 引用形式。那是 2px 竖线后一行安静文字，写明作者与父消息第一行，整行都是跳回原文的入口。它是指向原文的把手而不是副本 —— 长父消息不会被粘贴第二遍，引用也不可能与它指向的 Message 不一致。composer 的引用条与它是同一种对象、同一种语言，这正是两者能被读成同一句话的原因。
+发送时带上父消息的 ref，Host 因此记录这条引用并向父消息作者送达；发送成功会清掉目标，切换 Thread 同样会清掉，所以过期的引用永远不会跟着下一次 Enter 一起出去。
 
 ## Thread / Task 入口行（channel 时间线内）
 - 语义：每个 top-level Channel 消息进入其 Thread 的唯一入口，形态是正文下方**一行**安静的行——既陈述状态，也负责开门。点击走 `selectThread`，不把 Task 作为独立导航层。`Task #N` 是 home Channel 内 durable Task creation 的展示编号，不是稳定身份。跨视图导航使用 branded Task ref。

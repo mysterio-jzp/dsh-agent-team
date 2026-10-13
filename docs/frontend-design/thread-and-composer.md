@@ -30,18 +30,9 @@ A quiet recipient notice shows who will be notified: the picked recipients union
 
 The 「作为任务」 intent is not persisted and resets off after success. The mode chip keeps its word label at every width and narrows the toolbar gap below 560px rather than hiding the word.
 
-The reader's own handle is the one mention chip they must find without reading, so it is the one chip that leaves the business family: `[data-mention-human]` paints it in the success alias, because the error and warn families mean a failure and a caution. A body that wrote the reader's older handle still marks that chip — the mark follows the identity, not the spelling.
-
-## Quoting a Message
-A Thread Message can be answered by picking the Message it answers. The affordance is unconditional: the reply action, the stored quote lines, and the composer banner are one feature the Host serves in full, so no surface asks whether quoting is available.
-
-Choosing a Message states the target where the reader is already looking. The row holds the flat interactive layer the pointer gave it, so the choice survives the pointer leaving. The composer carries a banner naming the parent and its first line, with a cancel beside it, and cancelling clears both. The banner sits inside the composer card above the input, so target and draft read as one act. It does not restate the delivery: the quoted author joins the same “will notify” row as any other recipient, because a quote delivers like a mention and one delivery reads once.
-
-One author never joins that row. The Host delivers to neither the Human — who reads the Thread directly and holds no session to deliver to — nor a Message's own author. A quoted Human, and with them the reader quoting themselves, therefore leaves the recipient set before delivery ever happens. That row states what will happen rather than what was picked, so it stays silent instead of naming the reader back at themselves as the one who hears about it.
+Choosing a Message to answer states the target twice, and both must be visible: the Message itself takes an outline, and the composer carries a banner naming the parent and quoting its first line, with a cancel beside it. The outline is a ring rather than a fill for the same reason the mention mark is — the bubble's material must not change with state. The banner sits inside the composer card above the input, so the target and the draft read as one act, and cancelling clears both the banner and the outline.
 
 The send carries the parent's ref, so the Host records the link and delivers to the parent's author; a successful send clears the target, and so does switching Threads, so a stale quote can never ride along with the next Enter.
-
-In the timeline the link leads the Message it belongs to, in the Markdown reference form the reader already knows: one muted line behind a 2px rule, naming the author and the parent's first line, the whole of it a jump to the original. It is a handle on the original rather than a copy — a long parent is never pasted twice, and the quote cannot disagree with the Message it points at. The composer's banner is the same object in the same language, which is what lets the two read as one statement.
 
 Taskless Thread promotion is Human-only, durable, and non-optimistic. On success reread Thread and supplemental Channel/Member projections; on unread/stale fence errors preserve Host error and reread relevant facts.
 

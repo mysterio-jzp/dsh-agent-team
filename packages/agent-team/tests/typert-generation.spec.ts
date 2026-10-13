@@ -52,6 +52,7 @@ const EXPECTED_REMOTE_METHODS = [
   'recoverMember',
   'removeHumanAvatar',
   'reply',
+  'replySettings',
   'resolveMessageRefs',
   'resolveTaskRefs',
   'resolveThreadRefs',
@@ -68,20 +69,7 @@ describe('Agent Team generated Typert boundary', () => {
   it('publishes exactly the intended Agent Team Client boundary', () => {
     const host = TYPERT as GeneratedHost
     const client = remote as unknown as GeneratedRemote
-    const hostMethods = host.invocations.map(invocation => invocation.method)
-    const clientMethods = client.descriptors.map(invocation => invocation.method)
-    // Sorted once here so the diff output reads as a set difference, not noise.
-    expect([...hostMethods].sort()).toEqual(EXPECTED_REMOTE_METHODS)
-    expect([...clientMethods].sort()).toEqual(EXPECTED_REMOTE_METHODS)
-  })
-
-  // The generator emits both artifacts from one analysis, so a host/remote
-  // disagreement is not the failure mode worth guarding on its own — but it is
-  // still cheaper to name than to debug, and it costs nothing next to the above.
-  it('keeps the host and remote artifacts in agreement', () => {
-    const host = TYPERT as GeneratedHost
-    const client = remote as unknown as GeneratedRemote
-    expect(host.invocations.map(invocation => invocation.method).sort())
-      .toEqual(client.descriptors.map(invocation => invocation.method).sort())
+    expect(host.invocations.map(invocation => invocation.method).sort()).toEqual(EXPECTED_REMOTE_METHODS)
+    expect(client.descriptors.map(invocation => invocation.method).sort()).toEqual(EXPECTED_REMOTE_METHODS)
   })
 })

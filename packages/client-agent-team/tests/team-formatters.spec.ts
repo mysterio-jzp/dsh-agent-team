@@ -4,7 +4,7 @@ import { AGENT_TEAM_HUMAN_HANDLE } from '@contexera/dsh-agent-team/host'
 import { MENTION_BODY_FIXTURE } from '../../agent-team/tests/fixtures/mention-bodies.ts'
 import { zh } from '../src/client/locales.ts'
 import type { TeamConversationProps } from '../src/client/slots.ts'
-import { allMentionMembers, containsAllMention, bodyMentionsHuman, formatClockTime, containsMention, firstSentence, formatAbsoluteTime, formatActivity, formatInboxTime, formatMessageTime, HUMAN_HISTORIC_HANDLE, HUMAN_MEMBER_ID, isPlainTextBody, isSingleBrandedRef, mentionNamesOf, formatRiskClass, mentionedMemberIds, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, taskStatusDot } from '../src/client/team-formatters.ts'
+import { allMentionMembers, containsAllMention, containsMention, firstSentence, formatAbsoluteTime, formatActivity, formatClaimState, formatClockTime, formatInboxTime, formatMessageTime, formatTaskStatus, HUMAN_HISTORIC_HANDLE, HUMAN_MEMBER_ID, isPlainTextBody, isSingleBrandedRef, mentionNamesOf, mentionsHuman, formatRiskClass, mentionedMemberIds, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, taskStatusDot } from '../src/client/team-formatters.ts'
 
 const t = ((key: keyof typeof zh, params?: Record<string, string | number>) => {
   let value: string = zh[key]
@@ -401,28 +401,14 @@ describe('Team presentation formatters', () => {
     expect(shouldClampMessage('字'.repeat(601))).toBe(true)
   })
 
-  it('finds the reader only when the body spells a handle of theirs', () => {
+  it('recognizes the reader in one Message structured mentions', () => {
     // The client spells the Human's durable id locally because a client package
     // must not import a Host package; the handle the Host exposes is the same
     // identity, so the two spellings have to agree.
     expect(HUMAN_MEMBER_ID).toBe(`member:${AGENT_TEAM_HUMAN_HANDLE}`)
-    // The question is what the words say, not who the Message was delivered to:
-    // a Thread delivers to its Human without ever naming them, so a
-    // delivery-based answer would chip Messages that never addressed the reader.
-    expect(bodyMentionsHuman('@builder 再看一眼', 'builder')).toBe(true)
-    expect(bodyMentionsHuman('再看一眼', 'builder')).toBe(false)
-    expect(bodyMentionsHuman('@builders 再看一眼', 'builder')).toBe(false)
-    expect(bodyMentionsHuman('@builder', undefined)).toBe(false)
-    // The scan is about the reader and nobody else. Naming another Member is the
-    // one thing that must never raise this: a Message that calls someone else is
-    // not about the person reading it, and the same answer decides where opening
-    // the Thread lands.
-    expect(bodyMentionsHuman('@builder 看这里', 'Iris')).toBe(false)
-    expect(bodyMentionsHuman('@builder 和 @lead 都看这里', 'Iris')).toBe(false)
-    // A body written before the reader renamed themselves still addresses them.
-    expect(bodyMentionsHuman('@human 看这里', 'Iris')).toBe(true)
-    expect(bodyMentionsHuman('Iris 看一下', 'Iris')).toBe(false)
-    expect(bodyMentionsHuman('@human 看这里', 'human')).toBe(true)
-    expect(bodyMentionsHuman('@Iris 看这里', 'human')).toBe(false)
+    expect(mentionsHuman([HUMAN_MEMBER_ID])).toBe(true)
+    expect(mentionsHuman(['member:builder' as AgentTeamMemberId])).toBe(false)
+    expect(mentionsHuman([])).toBe(false)
+    expect(mentionsHuman(['member:builder' as AgentTeamMemberId, HUMAN_MEMBER_ID])).toBe(true)
   })
 })

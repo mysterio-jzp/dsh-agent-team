@@ -124,6 +124,7 @@ import type {
   AgentTeamRemoveMemberRequest,
   AgentTeamRemoveMemberResult,
   AgentTeamReplyRequest,
+  AgentTeamReplySettings,
   AgentTeamMessage,
   AgentTeamMessageReplyContext,
   AgentTeamThreadFact,
@@ -407,6 +408,14 @@ export interface Config {
   readonly gate: TeamGateSettings
   /** The relatedness judge's own settings; a key here is what mounts it. */
   readonly jev: TeamJudgeSettings
+  /**
+   * Whether quoting a specific Message is available at all. On unless a
+   * deployment turns it off, because the feature changes how a Thread reads and
+   * how answering a Member delivers — a Team that does not want it says so. The
+   * Host is the authority: the Client hides the affordance, and the write
+   * itself is refused here.
+   */
+  replyEnabled: Volatile<boolean | undefined>
 }
 
 /** The Host row's `gate` fields, as the settings service reads and writes them. */
@@ -468,6 +477,7 @@ const TEAM_JUDGE_SETTINGS_SCHEMA = z.object({
  */
 export const TEAM_HOST_ROW_SETTINGS_SCHEMA = z.object({
   ...HUMAN_PROFILE_SETTINGS_SCHEMA.dict,
+  replyEnabled: z.boolean().volatile().description('Quote-replies: link a Thread message to the one it answers, and deliver to that message\'s author. On unless turned off here.'),
   gate: TEAM_PRESSURE_GATE_SCHEMA,
   jev: TEAM_JUDGE_SETTINGS_SCHEMA,
 })
@@ -713,6 +723,7 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private replyContextsFor(facts: readonly AgentTeamThreadFact[], workspaceId: WorkspaceId): ReadonlyMap<AgentTeamMessageRef, AgentTeamMessageReplyContext> {
     const contexts = new Map<AgentTeamMessageRef, AgentTeamMessageReplyContext>()
+    if (!this.repliesEnabled()) return contexts
     const refs = facts.flatMap(fact => fact.kind === 'message' && fact.message.replyToMessageRef !== undefined
       ? [fact.message.replyToMessageRef]
       : [])
@@ -747,11 +758,18 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private repliesToLine(message: AgentTeamMessage, workspaceId: WorkspaceId): string | undefined {
     const ref = message.replyToMessageRef
-    if (ref === undefined) return undefined
+    if (ref === undefined || !this.repliesEnabled()) return undefined
     const parent = this.requireLedger().resolveMessageRefs(workspaceId, [ref])[0]
     return parent === undefined
       ? `Replies to: ${ref}`
       : `Replies to: @${this.printableSender(parent.sender)} — "${parent.excerpt}" [${ref}]`
+  }
+
+  /** Whether quote-replies are available; the one place the flag is read. */
+  private repliesEnabled(): boolean {
+    // On unless a deployment states otherwise: the feature is useful out of the
+    // box, and the switch exists to turn it off, not to hide it.
+    return this.config.replyEnabled.get() !== false
   }
 
   private judgeConfig(): TeamContextJudgeConfig {
@@ -1122,6 +1140,9 @@ export default class AgentTeam extends TypertRemoteService {
   @Remote('resolveMessageRefs')
   resolveMessageRefs(request: AgentTeamResolveMessageRefsRequest): AgentTeamResolveMessageRefsResult {
     this.requireWorkspace(request.workspaceId)
+    // A quote is part of the reply feature: with it off there is nothing to
+    // resolve, and returning none keeps a stored link from rendering anyway.
+    if (!this.repliesEnabled()) return Object.freeze({ resolved: Object.freeze([]) })
     const seen = new Set<AgentTeamMessageRef>()
     const messageRefs = request.messageRefs.filter(messageRef => {
       if (seen.has(messageRef)) return false
@@ -2085,6 +2106,12 @@ export default class AgentTeam extends TypertRemoteService {
     return this.readMessageAs(this.humanCall(request.workspaceId), request)
   }
 
+  /** Whether this deployment offers quote-replies; the Client gates its affordance on it. */
+  @Remote('replySettings')
+  replySettings(): AgentTeamReplySettings {
+    return Object.freeze({ enabled: this.repliesEnabled() })
+  }
+
   /** Human's personal Attention operation. */
   @Remote('changeAttention')
   async changeAttention(request: AgentTeamThreadAttentionRequest): Promise<AgentTeamThreadAttentionResult> {
@@ -2966,13 +2993,27 @@ export default class AgentTeam extends TypertRemoteService {
     return this.commitMessageAs(actor, request, authorized => this.requireLedger().sendMessage(authorized))
   }
 
-  /** Read one Message back verbatim, whoever is asking. */
+  /**
+   * Read one Message back verbatim, whoever is asking.
+   *
+   * A disabled feature refuses rather than answering empty: a caller that asked
+   * for a Message and got nothing back could not tell a switch from a wrong
+   * ref, and would go on to answer a Message it never read.
+   */
   private readMessageAs(actor: AgentTeamHumanActor | AgentTeamMemberActor, request: AgentTeamReadMessageRequest): AgentTeamReadMessageResult {
+    if (!this.repliesEnabled()) throw new Error('quote-replies are disabled for this Team')
     return this.requireLedger().readMessage(actor, request)
   }
 
-  /** Existing-Thread reply commit: the shared envelope over the ledger's reply. */
-  private replyAs(actor: AgentTeamHumanActor | AgentTeamMemberActor, request: AgentTeamReplyRequest): Promise<AgentTeamReplyResult> {
+  /**
+   * Existing-Thread reply commit: the shared envelope over the ledger's reply,
+   * behind the Team's quote-reply switch. Hiding the client's affordance is a
+   * courtesy; this is what actually decides.
+   */
+  private async replyAs(actor: AgentTeamHumanActor | AgentTeamMemberActor, request: AgentTeamReplyRequest): Promise<AgentTeamReplyResult> {
+    if (request.replyToMessageRef !== undefined && !this.repliesEnabled()) {
+      throw new Error('quote-replies are disabled for this Team')
+    }
     return this.commitMessageAs(actor, request, authorized => this.requireLedger().reply(authorized))
   }
 

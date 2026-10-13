@@ -343,84 +343,54 @@ describe('TeamMessage long-body clamp', () => {
   })
 })
 
-describe('TeamMessage reading row and mention line', () => {
-  it('keeps every Message in one column on the reading path', () => {
+describe('TeamMessage bubble and mention mark', () => {
+  it('wraps every Message in one bubble and sides it by the sender', () => {
     const own = render(
       <TeamMessage senderName="human" memberId={'member:human' as AgentTeamMemberId} human body="ping" />,
     )
-    // No side, no per-message surface: the reader's own turn reads in the same
-    // column as everyone else's, on the reading path itself.
-    expect(own.container.querySelector('[data-side]')).toBeNull()
-    expect(own.container.querySelector('[data-bubble]')).toBeNull()
+    expect(own.container.querySelector('[data-side="end"]')).not.toBeNull()
+    expect(own.container.querySelector('[data-side="start"]')).toBeNull()
+    expect(own.container.querySelectorAll('[data-bubble]')).toHaveLength(1)
+    expect(own.container.querySelector('[data-bubble]')!.textContent).toContain('ping')
     cleanup()
 
     const other = render(
       <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="pong" />,
     )
-    expect(other.container.querySelector('[data-side]')).toBeNull()
-    expect(other.container.querySelector('article')!.textContent).toContain('pong')
+    expect(other.container.querySelector('[data-side="start"]')).not.toBeNull()
+    expect(other.container.querySelector('[data-side="end"]')).toBeNull()
+    expect(other.container.querySelectorAll('[data-bubble]')).toHaveLength(1)
   })
 
-  it('states a mention of the reader on the card, never on the reading path', () => {
+  it('marks a bubble only when the Message mentions the reader', () => {
     const plain = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="no call here" t={t} onReply={() => {}} />,
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="no call here" t={t} />,
     )
     expect(plain.container.querySelector('[data-mentions-me]')).toBeNull()
-    expect(plain.container.querySelector('[data-message-card]')).not.toBeNull()
-    expect(plain.container.querySelector('[data-mentions-you]')).toBeNull()
-    expect(plain.container.textContent).not.toContain('提到了你')
+    expect(plain.container.textContent).not.toContain('有人@我')
+    // A Message nobody was called into still draws its bubble: the mark is an
+    // addition, never the reason a bubble exists.
+    expect(plain.container.querySelectorAll('[data-bubble]')).toHaveLength(1)
     cleanup()
 
     const marked = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="@human look" mentionNames={['human']} readerName="human" t={t} onReply={() => {}} />,
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="@human look" mentionsHuman t={t} />,
     )
     const row = marked.container.querySelector('[data-mentions-me]')
     expect(row).not.toBeNull()
-    // The statement is about the Message and never moves the row: every Message
-    // keeps the one column.
-    expect(row!.hasAttribute('data-side')).toBe(false)
-    const line = marked.container.querySelector('[data-mentions-you]')
-    expect(line).not.toBeNull()
-    expect(line!.textContent).toBe('提到了你')
-    // It rides the card, so the body the reader was called into stays the body.
-    expect(row!.querySelector('[data-message-card]')!.contains(line!)).toBe(true)
-    cleanup()
-
-    // A Thread reaches its Human in every row, so delivery alone is not a
-    // mention: a body that never spells `@human` renders no chip even when the
-    // Host delivered the Message to them.
-    const delivered = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="这条交付给你，但没有点名" mentionNames={['human']} readerName="human" t={t} onReply={() => {}} />,
-    )
-    expect(delivered.container.querySelector('[data-mentions-you]')).toBeNull()
-    cleanup()
-
-    // An alias of the reader counts (a rename must not orphan old bodies), while
-    // a handle inside code quotes is not a call.
-    const aliased = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="@human 旧写法也认；`@human` 在代码里不算" mentionNames={['human']} readerName="Iris" t={t} onReply={() => {}} />,
-    )
-    expect(aliased.container.querySelector('[data-mentions-you]')).not.toBeNull()
-    cleanup()
-
-    // Calling somebody else is not calling the reader: the chip states what the
-    // words say to *this* reader, so a Message that names another Member says
-    // nothing about them. The same answer decides where opening the Thread lands
-    // (`firstUnreadMention`), so both surfaces have to agree that naming another
-    // Member is not a mention of the reader.
-    const elsewhere = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="@Iris 这条点名的是别人" mentionNames={[{ name: 'Iris', also: ['human'] }]} readerName="Iris" t={t} onReply={() => {}} />,
-    )
-    expect(elsewhere.container.querySelector('[data-mentions-me]')).not.toBeNull()
-    // Naming Iris while the reader is somebody else draws no chip at all.
-    const otherReader = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="@Iris 这条点名的是别人" mentionNames={[{ name: 'Iris', also: ['human'] }]} readerName="wowyuarm" t={t} onReply={() => {}} />,
-    )
-    expect(otherReader.container.querySelector('[data-mentions-me]')).toBeNull()
-    expect(otherReader.container.querySelector('[data-mentions-you]')).toBeNull()
+    // The mark is decoration on the author's own bubble: it must never move the
+    // bubble to the reader's column, or a reader would think they wrote it.
+    expect(row!.getAttribute('data-side')).toBe('start')
+    const badge = marked.container.querySelector('[data-mentions-me-badge]')
+    expect(badge).not.toBeNull()
+    // The label is the whole badge: no glyph is drawn beside it, or the reader
+    // sees a doubled `@`.
+    expect(badge!.textContent).toBe('有人@我')
+    // The badge is a child of the bubble, not of the identity line.
+    expect(row!.querySelector('[data-bubble]')!.contains(badge!)).toBe(true)
   })
 
-  it('keeps the body, the clamp toggle, and the mention row on the reading path', () => {
+  it('keeps the body, the clamp toggle, and the mention row inside the bubble', () => {
     const longBody = '长正文段落。'.repeat(120)
     const { container, getByRole } = render(
       <TeamMessage
@@ -429,61 +399,24 @@ describe('TeamMessage reading row and mention line', () => {
         human={false}
         body={`${longBody} @lead`}
         mentionNames={['lead']}
+        mentionsHuman
         t={t}
-        onReply={() => {}}
       />,
     )
-    const article = container.querySelector('article')!
-    const document_ = article.querySelector('[data-document]')
-    expect(document_).not.toBeNull()
-    expect(article.contains(getByRole('button', { name: '展开全文' }))).toBe(true)
-    // The mention line and the actions stay outside the body: the reader reads
-    // the Message, not the chrome around it.
-    expect(document_!.contains(article.querySelector('[data-mentions-you]'))).toBe(false)
-    expect(document_!.contains(article.querySelector('[data-message-card]'))).toBe(false)
-  })
-
-  it('shows a continuation row\u2019s time in the avatar seat, out of the text column', () => {
-    const { container } = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="续一条" grouped showGroupedTime occurredAt="2026-10-09T12:34:00.000Z" t={t} onReply={() => {}} />,
-    )
-    // A grouped row carries no identity line, so its time sits in the empty
-    // avatar seat — never on the card, and never in the reading column.
-    expect(container.querySelector('strong')).toBeNull()
-    const seatTime = container.querySelector('[data-gutter-time]')
-    expect(seatTime).not.toBeNull()
-    // The seat is 28px and does not clip, so it states the time of day alone: a
-    // dated label runs to 59px within the year and 87px across it, which would
-    // paint over the words beside it. The date is the identity line's and the
-    // day separator's business; the exact instant stays on the element's title.
-    expect(seatTime!.textContent).toBe(formatClockTime('2026-10-09T12:34:00.000Z'))
-    expect(seatTime!.textContent).toBe('20:34')
-    expect(seatTime!.textContent).not.toBe(formatMessageTime('2026-10-09T12:34:00.000Z'))
-    expect(seatTime!.getAttribute('title')).toBe(formatAbsoluteTime('2026-10-09T12:34:00.000Z'))
-    expect(container.querySelector('[data-avatar]')).not.toBeNull()
-    cleanup()
-
-    // The identity line that opens the run still carries the whole wall-clock
-    // form: the date is not lost, it moved to the row that has room for it.
-    const head = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="起一条" occurredAt="2026-10-09T12:34:00.000Z" t={t} onReply={() => {}} />,
-    )
-    expect(head.container.querySelector('[data-gutter-time]')).toBeNull()
-    expect(head.container.querySelector('strong')!.parentElement!.textContent).toContain(formatMessageTime('2026-10-09T12:34:00.000Z'))
-    cleanup()
-
-    // A surface that never asked for the reading language — the Channel feed —
-    // renders no time at all: the Thread owns all of it.
-    const feed = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="续一条" grouped occurredAt="2026-10-09T12:34:00.000Z" t={t} />,
-    )
-    expect(feed.container.querySelector('[data-gutter-time]')).toBeNull()
+    const bubble = container.querySelector('[data-bubble]')!
+    expect(bubble.querySelector('[data-document]')).not.toBeNull()
+    expect(bubble.contains(getByRole('button', { name: '展开全文' }))).toBe(true)
+    const badge = bubble.querySelector('[data-mentions-me-badge]')
+    expect(badge).not.toBeNull()
+    // The mark leads the bubble: the reader learns the Message names them
+    // before reading the body they were called into.
+    expect(bubble.firstElementChild).toBe(badge)
   })
 
   it('never repeats the reader back to themselves in the trailing row', () => {
     // A mention the body text does not carry — here only inside a code span,
     // which the chip pass deliberately leaves literal — used to print a bare
-    // `@me` chip under the body, duplicating the name already chipped above.
+    // `@me` chip under the bubble, duplicating the name already chipped above.
     const { container } = render(
       <TeamMessage
         senderName="Builder"
@@ -518,27 +451,27 @@ describe('TeamMessage reading row and mention line', () => {
   })
 })
 
-describe('TeamMessage quote line and card actions', () => {
-  it('leads the Message with the quoted line and jumps to what it quotes', () => {
-    let opened: string | undefined
+describe('TeamMessage reply quote and action', () => {
+  it('renders the resolved quote above the body and jumps through it', () => {
+    let opened = 0
+    let jumpedTo: unknown
     const { container } = render(
       <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="我认这个方向"
         messageRef={'message:self' as never}
-        replyTo={{ senderName: '@架构师', excerpt: '这段逻辑现在有点乱', messageRef: 'message:parent' as never }}
-        onOpenReplyTo={messageRef => { opened = messageRef }} t={t} />,
+        replyTo={{ senderName: '@架构师', excerpt: '这段逻辑现在有点乱', messageRef: 'message:parent' as never }} onOpenReplyTo={(ref) => { opened += 1; jumpedTo = ref }} t={t} />,
     )
-    const quote = container.querySelector('[data-quote-line]')
+    const quote = container.querySelector('[data-reply-quote]')
     expect(quote).not.toBeNull()
     expect(quote!.textContent).toContain('@架构师')
     expect(quote!.textContent).toContain('这段逻辑现在有点乱')
-    // It is the Message's first line under the identity line: the reader learns
-    // what this points at before reading what it says.
-    const body = [...container.querySelectorAll('div')].find(div => hasClassToken(div, 'messageBody'))!
-    const nameRow = [...body.children].find(child => hasClassToken(child, 'nameRow'))!
-    expect(nameRow.nextElementSibling).toBe(quote)
+    // The quote answers "what is this replying to" before the body is read.
+    const bubble = container.querySelector('[data-bubble]')!
+    expect(bubble.firstElementChild).toBe(quote)
     fireEvent.click(quote!)
-    // The pointer lands on the Message this one quotes, never on this one.
-    expect(opened).toBe('message:parent')
+    expect(opened).toBe(1)
+    // The jump lands on the Message this one answers, not on this row: the row's
+    // own ref is the anchor the quote was read from.
+    expect(jumpedTo).toBe('message:parent')
   })
 
   it('renders an inert quote when the surface offers no jump', () => {
@@ -546,82 +479,30 @@ describe('TeamMessage quote line and card actions', () => {
       <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="收到"
         replyTo={{ senderName: '@架构师', excerpt: '一段原文', messageRef: 'message:parent' as never }} t={t} />,
     )
-    const quote = container.querySelector('[data-quote-line]')!
+    const quote = container.querySelector('[data-reply-quote]')!
     expect(quote.tagName).toBe('SPAN')
   })
 
-  it('states the quoted delivery once, in the quote line that carries it', () => {
-    // The reply delivers to the parent's author, so the Host lists them among
-    // this Message's recipients. The quote line already names them, and a bare
-    // chip under it would read as a mention the body never wrote.
-    const mentions = [{ name: 'reviewer', also: [] }]
-    const { container, rerender } = render(
-      <TeamMessage senderName="Iris" memberId={'member:iris' as AgentTeamMemberId} human body="引用这条"
-        mentionNames={mentions} replyTo={{ senderName: '@reviewer', excerpt: '离线期间的批量更新 一', messageRef: 'message:parent' as never }} t={t} />,
-    )
-    expect(container.querySelector('[data-quote-line]')!.textContent).toContain('@reviewer')
-    const row = [...container.querySelectorAll('div')].find(div => hasClassToken(div, 'mentionsRow'))
-    expect(row?.textContent ?? '').not.toContain('@reviewer')
-
-    // A quote that no longer resolves names nobody, so there the chip is the
-    // only place the delivery still shows.
-    rerender(
-      <TeamMessage senderName="Iris" memberId={'member:iris' as AgentTeamMemberId} human body="引用这条" mentionNames={mentions} t={t} />,
-    )
-    const alone = [...container.querySelectorAll('div')].find(div => hasClassToken(div, 'mentionsRow'))
-    expect(alone?.textContent).toContain('@reviewer')
-  })
-
-  it('offers copy and quote on the card, and marks the current target', () => {
+  it('offers a reachable reply action and marks the current target', () => {
     let replied = 0
     const { container, getByRole, rerender } = render(
       <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="可以"
         messageRef={'message:abc' as never} onReply={() => { replied += 1 }} t={t} />,
     )
-    fireEvent.click(getByRole('button', { name: '引用这条消息' }))
+    fireEvent.click(getByRole('button', { name: '回复这条消息' }))
     expect(replied).toBe(1)
-    const card = container.querySelector('[data-message-card]')!
-    expect(card.querySelector('[data-copy-message]')).not.toBeNull()
-    // The card floats beside the Message instead of living on the reading path.
-    expect(container.querySelector('article')!.contains(card)).toBe(true)
-    expect(card.closest('[data-document]')).toBeNull()
+    // The action shares the identity line with the author, so it sits beside
+    // the Message it acts on instead of at the row's far edge.
+    const actions = container.querySelector('[data-message-actions]')!
+    expect(actions.parentElement!.textContent).toContain('Builder')
 
     rerender(<TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="可以"
       messageRef={'message:abc' as never} replyTarget t={t} />)
-    expect(container.querySelector('[data-replying-to]')).not.toBeNull()
+    const row = container.querySelector('[data-replying-to]')
+    expect(row).not.toBeNull()
     // A row without the action offers none: the Channel feed passes no onReply.
     rerender(<TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="可以" t={t} />)
-    expect(container.querySelector('[data-message-card]')).toBeNull()
+    expect(container.querySelector('[data-message-actions]')).toBeNull()
     expect(container.querySelector('[data-replying-to]')).toBeNull()
-  })
-
-  it('keeps the row actions and the reader notice when quoting is withheld', () => {
-    // The switch decides one action, not the card: a Thread with quotes turned
-    // off still copies, and still tells the reader the Message names them.
-    const { container } = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="@Iris 可以"
-        mentionNames={[{ name: 'Iris', also: ['human'] }]} readerName="Iris" rowActions t={t} />,
-    )
-    const card = container.querySelector('[data-message-card]')
-    expect(card).not.toBeNull()
-    expect(card!.querySelector('[data-copy-message]')).not.toBeNull()
-    expect(card!.querySelector('[data-mentions-you]')).not.toBeNull()
-    expect(card!.querySelector('[data-quote-message]')).toBeNull()
-  })
-
-  it('copies the stored Markdown of the body, not the text it rendered as', async () => {
-    const writeText = vi.fn<(text: string) => Promise<void>>().mockResolvedValue(undefined)
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
-    const { getByRole } = render(
-      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false}
-        body={'**重点**：见 `src/a.ts`\n\n- 一条\n- 两条'} messageRef={'message:abc' as never} onReply={() => {}} t={t} />,
-    )
-    fireEvent.click(getByRole('button', { name: '复制这条消息' }))
-    await vi.waitFor(() => { expect(writeText).toHaveBeenCalledTimes(1) })
-    // The source travels, markers and all: a reader pasting it elsewhere wants
-    // what the author wrote, not the styling this page gave it.
-    expect(writeText.mock.calls[0]![0]).toBe('**重点**：见 `src/a.ts`\n\n- 一条\n- 两条')
-    await vi.waitFor(() => { expect(getByRole('button', { name: '复制这条消息' }).textContent).toBe('已复制') })
-    delete (navigator as { clipboard?: unknown }).clipboard
   })
 })

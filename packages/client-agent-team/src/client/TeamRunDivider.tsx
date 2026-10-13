@@ -1,15 +1,20 @@
+import { formatMessageTime } from './team-formatters.ts'
 import css from './conversation.module.css'
 
 /**
- * Boundary between two same-sender Messages of one run separated by a real
- * waiting gap: the hairline restores the block boundary that grouping removed.
- * It never states the instant — every row states its own time under the
- * pointer, in the avatar seat — so the line stays a line.
+ * Explicit boundary between two same-sender Messages of one run separated by
+ * a real waiting gap: the hairline restores the block boundary that grouping
+ * removed, and the label below it restores the instant that the suppressed
+ * identity chrome would have shown.
  *
- * Only the Channel feed draws it: the feed states blocks, where the Thread
- * reads as one flow. The divider is a sibling of the rows it separates, so it
- * insets its own hairline to hug the text column every Message shares.
+ * The divider is a sibling of the rows it separates, so it carries the run's
+ * side itself: the hairline and the label hug the text column, which sits on
+ * the reader's opposite side for the reader's own turns.
  */
-export function TeamRunDivider() {
-  return <div className={css.runDivider} role="separator" />
+export function TeamRunDivider({ occurredAt, side }: { readonly occurredAt: string; readonly side: 'start' | 'end' }) {
+  return (
+    <div className={css.runDivider} data-side={side} role="separator">
+      <time dateTime={occurredAt}>{formatMessageTime(occurredAt)}</time>
+    </div>
+  )
 }

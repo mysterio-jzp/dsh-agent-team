@@ -160,7 +160,7 @@ export const resolveUnknownThreadRefs = threadStore.resolveUnknown
 export const useResolvedMessageRefVersion = messageStore.useVersion
 export const cachedResolvedMessageRef = messageStore.cached
 /** Store one reply-parent resolution and wake every rendered quote. */
-const rememberResolvedMessageRef = messageStore.remember
+export const rememberResolvedMessageRef = messageStore.remember
 export const resolveUnknownMessageRefs = messageStore.resolveUnknown
 
 /**
