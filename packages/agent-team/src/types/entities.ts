@@ -342,6 +342,33 @@ export interface AgentTeamMessageAttachment {
   readonly mediaType: string
 }
 
+/**
+ * One file a Message delivers, as its author Session's delivery surface
+ * carried it when the Message was committed.
+ *
+ * The entry is a coordinate, never bytes: a preview reads the file through the
+ * Session that produced it, so a deleted, renamed, or rewritten file reports
+ * itself instead of resurrecting a cached copy.
+ */
+export interface AgentTeamMessageArtifact {
+  /**
+   * The author Session whose surface carried the file. A preview resolves
+   * `path` inside THIS Session — never in whoever is reading — so a Message
+   * whose Session is gone fails explicitly instead of opening a same-named
+   * file under another Session's working directory.
+   */
+  readonly sessionId: SessionId
+  /**
+   * Absolute path of the file. A declaration that named a relative path was
+   * resolved against the declaring Session's working directory at the append,
+   * because one Member can own several Sessions and a bare relative path would
+   * resolve against the reader's directory instead of the producer's.
+   */
+  readonly path: string
+  /** What the declaring call said the file was for, when it said anything. */
+  readonly description?: string | undefined
+}
+
 export interface AgentTeamMessage {
   readonly messageRef: AgentTeamMessageRef
   readonly channelRef: AgentTeamChannelRef
@@ -351,6 +378,13 @@ export interface AgentTeamMessage {
   readonly sender: AgentTeamMemberId
   readonly body: string
   readonly attachments?: readonly AgentTeamMessageAttachment[] | undefined
+  /**
+   * Files the author's Session declared for delivery while this Message was
+   * being written. Absent on Messages whose author has no Session (the Human)
+   * and on every Message committed before this field existed, so an older
+   * ledger reads back unchanged and needs no normalization.
+   */
+  readonly artifacts?: readonly AgentTeamMessageArtifact[] | undefined
   /**
    * The Message this one answers, when it was written as a reply. Absent on
    * every Message that is not a reply, including every Message recorded before

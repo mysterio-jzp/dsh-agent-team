@@ -43,6 +43,7 @@ import { TeamContextJudge, type TeamContextJudgeConfig } from './context-judge.t
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
 import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, createTeamContextProjectionConfig, createTeamContextProjectionDefinition, foldTeamContextProjection, TeamContextProjectionHost } from './context-projection.ts'
 import { AGENT_TEAM_HUMAN_MEMBER_ID, AgentTeamLedger, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
+import { claimMessageArtifacts, MESSAGE_ARTIFACTS_PROJECTION_KEY, NOTHING_CLAIMED, presentedDeliveriesProjection, type ClaimedArtifacts } from './message-artifacts.ts'
 import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, MemberRuntime } from './member-runtime.ts'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
 import { classifyRecoverableError, failureDetail, RecoveryCoordinator, type RecoveryFact } from './recovery.ts'
@@ -138,6 +139,7 @@ import type {
   AgentTeamReplyRequest,
   AgentTeamReplySettings,
   AgentTeamMessage,
+  AgentTeamMessageArtifact,
   AgentTeamMessageReplyContext,
   AgentTeamThreadFact,
   AgentTeamReadMessageRequest,
@@ -513,6 +515,13 @@ export default class AgentTeam extends TypertRemoteService {
   private readonly handles = new Map<AgentTeamMemberId, AgentHandle>()
   /** Live Member per session id; drives the root session/event listener. */
   private readonly memberBySessionId = new Map<SessionId, AgentTeamMemberId>()
+  /**
+   * Declarations each live Session's Messages already consumed, per turn. A
+   * resolution-time note, not a Team fact: what a Message carries is durable in
+   * the ledger, while this only stops the next Message of the same turn from
+   * claiming the same declaration twice.
+   */
+  private readonly claimedDeliveries = new Map<SessionId, { readonly turn: number; readonly callIds: Set<string> }>()
   /** Live selection refs let model edits take effect without disposing the Session. */
   private readonly modelSelections = new Map<AgentTeamMemberId, ModelSelectionRef>()
   /** Agent ids with a turn in flight; restarts must wait for the boundary. */
@@ -927,6 +936,13 @@ export default class AgentTeam extends TypertRemoteService {
     this.ctx.effect(() => this.ctx.root.sessionProjections.register(
       createTeamContextProjectionDefinition(this.contextProjectionHost),
     ), 'agentTeam.contextProjection')
+    // The delivery surface registers beside it, same reason and same lifetime:
+    // one Host-wide unit folding every Session's declarations, so a Message can
+    // carry what its author was handing over without Team watching each Session
+    // separately.
+    this.ctx.effect(() => this.ctx.root.sessionProjections.register(
+      presentedDeliveriesProjection,
+    ), 'agentTeam.presentedDeliveries')
     this.ctx.on('agent/error', ({ agent, error }) => {
       const member = this.memberForAgent(agent)
       if (member === undefined) return
@@ -1538,6 +1554,9 @@ export default class AgentTeam extends TypertRemoteService {
     // the retire window must still be captured for the new generation, and
     // the coordinator drops its own bookkeeping only after the swap settles.
     this.memberBySessionId.delete(previousSessionId)
+    // A retired generation's claim record describes a Session nothing can post
+    // from again; the declarations it lists died with that Session.
+    this.claimedDeliveries.delete(previousSessionId)
     await this.waitLogged('wait-external', { label: this.memberLabel(memberId), sessionId: previousSessionId },
       'for the retired Agent to release its Session write path',
       () => this.disposeWithWakeGuard(active))
@@ -3069,21 +3088,58 @@ export default class AgentTeam extends TypertRemoteService {
   >(
     actor: AgentTeamHumanActor | AgentTeamMemberActor,
     request: Req,
-    commit: (authorized: Req & { readonly actor: AgentTeamHumanActor | AgentTeamMemberActor; readonly body: string; readonly resolvedAttachments?: readonly AgentTeamMessageAttachment[] }) => Promise<{ readonly committed: boolean; readonly value: Res }>,
+    commit: (authorized: Req & { readonly actor: AgentTeamHumanActor | AgentTeamMemberActor; readonly body: string; readonly resolvedAttachments?: readonly AgentTeamMessageAttachment[]; readonly resolvedArtifacts?: readonly AgentTeamMessageArtifact[] }) => Promise<{ readonly committed: boolean; readonly value: Res }>,
   ): Promise<Res> {
     try {
       const metadata = await this.resolveMessageAttachments(request)
+      const claim = this.claimArtifactsFor(actor)
       const result = await commit({
         ...request, body: this.appendAttachmentLines(request.body, metadata),
         ...(metadata.length === 0 ? {} : { resolvedAttachments: metadata }),
+        ...(claim.artifacts.length === 0 ? {} : { resolvedArtifacts: claim.artifacts }),
         actor,
       })
+      // Only a Message that reached the ledger consumed its declarations: a
+      // rejected append leaves them for the retry.
+      if (result.committed) this.rememberClaimedArtifacts(claim)
       this.emitCommittedOutcome(result)
       return result.value
     } catch (error) {
       await this.dropUnreferencedPrepared(request, error)
       throw error
     }
+  }
+
+  /**
+   * The artifacts the Message being committed claims from its author's Session.
+   *
+   * Only a Member has a Session to read. A Human Message is composed in the
+   * Client with no Session behind it, and substituting one would point every
+   * card at a directory that never produced the file.
+   */
+  private claimArtifactsFor(actor: AgentTeamHumanActor | AgentTeamMemberActor): ClaimedArtifacts & { readonly sessionId?: SessionId; readonly turn?: number } {
+    if (actor.kind !== 'member') return NOTHING_CLAIMED
+    const session = this.handles.get(actor.memberId)?.agent.session
+    if (session === undefined) return NOTHING_CLAIMED
+    const deliveries = this.ctx.sessionProjections.stateOf(session, MESSAGE_ARTIFACTS_PROJECTION_KEY)
+    if (deliveries === undefined) return NOTHING_CLAIMED
+    const carried = this.claimedDeliveries.get(session.id)
+    const consumed = carried !== undefined && carried.turn === deliveries.turn ? carried.callIds : new Set<string>()
+    return {
+      ...claimMessageArtifacts(session.id, session.header.cwd, deliveries, consumed),
+      sessionId: session.id,
+      turn: deliveries.turn,
+    }
+  }
+
+  /** Record which declarations a committed Message carries, so this turn's next Message claims only what follows. */
+  private rememberClaimedArtifacts(claim: ClaimedArtifacts & { readonly sessionId?: SessionId; readonly turn?: number }): void {
+    const { sessionId, turn } = claim
+    if (sessionId === undefined || turn === undefined || claim.callIds.length === 0) return
+    const carried = this.claimedDeliveries.get(sessionId)
+    const callIds = carried !== undefined && carried.turn === turn ? carried.callIds : new Set<string>()
+    for (const callId of claim.callIds) callIds.add(callId)
+    this.claimedDeliveries.set(sessionId, { turn, callIds })
   }
 
   /** Task-creation commit (new Thread): the shared envelope over the ledger's sendMessage. */
@@ -4042,6 +4098,7 @@ export default class AgentTeam extends TypertRemoteService {
   /** Dispose one live Member Session and drop its per-Member runtime state. */
   private async disposeMemberSession(memberId: AgentTeamMemberId, member: Pick<AgentTeamAgentMember, 'memberId' | 'sessionId'>): Promise<void> {
     this.clearMemberRecoveryState(member)
+    this.claimedDeliveries.delete(member.sessionId)
     const handle = this.handles.get(memberId)
     if (handle !== undefined) {
       // Disposal cancels the Member's turn and then waits for the Agent to

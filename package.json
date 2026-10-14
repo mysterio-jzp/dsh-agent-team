@@ -190,6 +190,7 @@
     "@deepseek-ai/dsh-tool-fs": ">=0.2.0-rc.2 <0.2.1",
     "@deepseek-ai/dsh-tool-fs-search": ">=0.2.0-rc.2 <0.2.1",
     "@deepseek-ai/dsh-tool-jobs": ">=0.2.0-rc.2 <0.2.1",
+    "@deepseek-ai/dsh-tool-present": ">=0.2.0-rc.2 <0.2.1",
     "@deepseek-ai/dsh-tool-pwsh": ">=0.2.0-rc.2 <0.2.1",
     "@deepseek-ai/dsh-tool-skill": ">=0.2.0-rc.2 <0.2.1",
     "@deepseek-ai/dsh-tool-web": ">=0.2.0-rc.2 <0.2.1",

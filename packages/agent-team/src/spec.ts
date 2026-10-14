@@ -105,14 +105,20 @@ const channelSchema = z.object({
   state: z.enum(['active', 'archived']).default('active'),
 }).strict()
 
-// Ledgers written before message occurredAt or attachments existed store bare
-// messages; the union schema below stamps occurredAt on load and leaves absent
-// attachment metadata undefined, so old ledgers replay unchanged.
+// Ledgers written before message occurredAt, attachments, or artifacts existed
+// store bare messages; the union schema below stamps occurredAt on load and
+// leaves absent attachment and artifact metadata undefined, so old ledgers
+// replay unchanged.
 const attachmentSchema = z.object({
   attachmentId: attachmentIdSchema,
   name: z.string().min(1),
   byteSize: z.number().int().nonnegative(),
   mediaType: z.string().min(1),
+}).strict()
+const artifactSchema = z.object({
+  sessionId: sessionIdSchema,
+  path: z.string().min(1),
+  description: z.string().optional(),
 }).strict()
 function omitUndefined<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T
@@ -126,6 +132,7 @@ const messageSchema = z.object({
   sender: memberIdSchema,
   body: z.string().min(1),
   attachments: z.array(attachmentSchema).optional(),
+  artifacts: z.array(artifactSchema).optional(),
   /**
    * The Message this one answers, when it is a reply.
    *

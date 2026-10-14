@@ -129,6 +129,14 @@
               config:
                 sampleOverCapGlobResults: false
 
+            # Members declare what they hand over through the Harness delivery
+            # tool: the Team Host reads those declarations off the Member's own
+            # Session and stores their coordinates on the Message that carries
+            # them, so a reader can open the file instead of hunting the Member's
+            # conversation for it.
+            - id: tool-present
+              name: '@deepseek-ai/dsh-tool-present'
+
             - id: tool-jobs
               name: '@deepseek-ai/dsh-tool-jobs'
 

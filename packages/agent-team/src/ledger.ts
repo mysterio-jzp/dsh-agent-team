@@ -95,6 +95,7 @@ import type {
   AgentTeamReadMessageResult,
   AgentTeamResolvedTaskRef,
   AgentTeamResolvedThreadRef,
+  AgentTeamMessageArtifact,
   AgentTeamMessageAttachment,
   AgentTeamSendMessageRequest,
   AgentTeamSendMessageResult,
@@ -245,12 +246,25 @@ export interface AgentTeamAuthorizedSendMessageRequest extends AgentTeamSendMess
   readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
   /** Metadata the Host resolved from the attachment cache before the append. */
   readonly resolvedAttachments?: readonly AgentTeamMessageAttachment[] | undefined
+  /** Artifacts the Host read off the author Session's surface before the append; see {@link AgentTeamAuthorizedReplyRequest.resolvedArtifacts}. */
+  readonly resolvedArtifacts?: readonly AgentTeamMessageArtifact[] | undefined
 }
 
 export interface AgentTeamAuthorizedReplyRequest extends AgentTeamReplyRequest {
   readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
   /** Metadata the Host resolved from the attachment cache before the append. */
   readonly resolvedAttachments?: readonly AgentTeamMessageAttachment[] | undefined
+  /**
+   * Files the author Session's artifact surface carried when this request was
+   * authorized: Host-derived, never caller-supplied.
+   *
+   * A retry replays the stored Message instead of rereading the surface, so
+   * this list stays out of the request-collision comparison — the second
+   * reading may legitimately differ (the author kept working) without making
+   * the repeated `requestId` a different request. An empty list is not stored:
+   * the field means the Message carries artifacts at all.
+   */
+  readonly resolvedArtifacts?: readonly AgentTeamMessageArtifact[] | undefined
 }
 
 export interface AgentTeamAuthorizedClaimRequest extends AgentTeamClaimRequest {
@@ -1115,6 +1129,7 @@ export class AgentTeamLedger {
         messageRef: this.ref('message'), channelRef: channel.channelRef, threadRef, ...(taskRef === undefined ? {} : { taskRef }),
         sender: request.actor.memberId, body,
         ...(request.resolvedAttachments === undefined ? {} : { attachments: request.resolvedAttachments }),
+        ...(request.resolvedArtifacts === undefined || request.resolvedArtifacts.length === 0 ? {} : { artifacts: request.resolvedArtifacts }),
         topLevel: true, sequence, occurredAt: base.occurredAt,
       })
       const started = [this.startAttention(request.actor.memberId, threadRef, sequence),
@@ -1180,6 +1195,7 @@ export class AgentTeamLedger {
         messageRef: this.ref('message'), channelRef, threadRef: thread.threadRef,
         ...(task === undefined ? {} : { taskRef: task.taskRef }), sender: request.actor.memberId, body,
         ...(request.resolvedAttachments === undefined ? {} : { attachments: request.resolvedAttachments }),
+        ...(request.resolvedArtifacts === undefined || request.resolvedArtifacts.length === 0 ? {} : { artifacts: request.resolvedArtifacts }),
         ...(parent === undefined ? {} : { replyToMessageRef: parent.messageRef }),
         topLevel: false, sequence, occurredAt: base.occurredAt,
       })
