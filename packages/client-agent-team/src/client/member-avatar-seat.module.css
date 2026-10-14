@@ -1,0 +1,40 @@
+/* One Member face, three sizes. The seat owns the shape and the two states; the
+   caller owns where it sits. Sizes are pinned by the frozen prototype (D1): 24
+   in the roster and a message bubble, 18 in a mention chip. */
+.seat {
+  align-items: center;
+  background: hsl(var(--team-avatar-hue, 212) 42% 46%);
+  border-radius: 50%;
+  corner-shape: round;
+  color: #fff;
+  display: inline-flex;
+  flex: none;
+  font-weight: 600;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+.seat[data-avatar-size='24'] {
+  flex-basis: 24px;
+  font-size: 11px;
+  height: 24px;
+  width: 24px;
+}
+
+.seat[data-avatar-size='18'] {
+  flex-basis: 18px;
+  font-size: 9px;
+  height: 18px;
+  width: 18px;
+}
+
+/* The uploaded bytes fill the same circle the initial sat in, so the two states
+   occupy identical geometry and a swap cannot reflow the row around them. */
+.image {
+  border-radius: 50%;
+  corner-shape: round;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}

@@ -44,7 +44,7 @@ import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
 import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, createTeamContextProjectionConfig, createTeamContextProjectionDefinition, foldTeamContextProjection, TeamContextProjectionHost } from './context-projection.ts'
 import { AGENT_TEAM_HUMAN_MEMBER_ID, AgentTeamLedger, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
 import { claimMessageArtifacts, MESSAGE_ARTIFACTS_PROJECTION_KEY, NOTHING_CLAIMED, presentedDeliveriesProjection, type ClaimedArtifacts } from './message-artifacts.ts'
-import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, MemberRuntime } from './member-runtime.ts'
+import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, memberMemoryDirectoryPath, MemberRuntime } from './member-runtime.ts'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
 import { classifyRecoverableError, failureDetail, RecoveryCoordinator, type RecoveryFact } from './recovery.ts'
 import { StoredSessionReadError, StoredSessionReader, sessionFailureOf } from './stored-session-reader.ts'
@@ -1187,7 +1187,19 @@ export default class AgentTeam extends TypertRemoteService {
     const ledger = this.requireLedger()
     return this.members()
       .filter(status => request.workspaceId === undefined || ledger.participatesIn(status.member.memberId, request.workspaceId))
-      .map(({ member: { privateMemoryPath: _privateMemoryPath, ...member }, ...status }) => Object.freeze({ ...status, member: Object.freeze(member), workspaceIds: ledger.workspacesOf(member.memberId) }))
+      .map(({ member: { privateMemoryPath: _privateMemoryPath, ...member }, ...status }) => Object.freeze({
+        ...status,
+        // The boundary page opens this file, so the Client is told where it is;
+        // it is derived here rather than stored, which is what lets a Member
+        // recorded before the file existed still get a path while
+        // `privateMemoryPath` stays Host-only. `join` rather than a literal
+        // separator, so Windows member namespaces keep their own convention.
+        member: Object.freeze({
+          ...member,
+          agentMdPath: join(memberMemoryDirectoryPath({ memberId: member.memberId, privateMemoryPath: _privateMemoryPath }), 'agent.md'),
+        }),
+        workspaceIds: ledger.workspacesOf(member.memberId),
+      }))
   }
 
   /** Emit a current baseline, then coalesced invalidations until canceled. */

@@ -91,7 +91,7 @@ interface SeededMessage {
   readonly mentions?: readonly string[]
 }
 
-export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: string; workspaceId?: string; initialChannels?: boolean; remainingUnreadCounts?: readonly number[]; seededMessages?: readonly SeededMessage[]; seedTaskRef?: string; seedThreadRef?: string; seedTaskStatus?: AgentTeamTask['status']; seedFollowers?: readonly string[]; humanProfile?: HumanProfileSeed; humanProfileFailure?: string; environment?: EnvironmentSeed; environmentFailure?: string }) {
+export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: string; workspaceId?: string; initialChannels?: boolean; remainingUnreadCounts?: readonly number[]; seededMessages?: readonly SeededMessage[]; seedTaskRef?: string; seedThreadRef?: string; seedTaskStatus?: AgentTeamTask['status']; seedFollowers?: readonly string[]; humanProfile?: HumanProfileSeed; humanProfileFailure?: string; environment?: EnvironmentSeed; environmentFailure?: string; memberAvatarRefs?: Readonly<Record<string, string>>; memberAvatarBytes?: Readonly<Record<string, string>> }) {
   if (options?.mode !== undefined) {
     localStorage.setItem('dsh.agent-team.navigation', JSON.stringify({ mode: options.mode, ...(options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId }) }))
   }
@@ -168,10 +168,11 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
     releaseDraftAttachments: () => {},
     rebindDraftFiles: () => {},
   } as never)
-  const status = (memberId: string, workspaceId: string, handle: string, presence: 'available' | 'working' | 'error' | 'unavailable', diagnostic?: AgentTeamMemberDiagnostic) => ({
+  const status = (memberId: string, workspaceId: string, handle: string, presence: 'available' | 'working' | 'error' | 'unavailable', diagnostic?: AgentTeamMemberDiagnostic, avatarRef?: string) => ({
     member: {
       memberId, workspaceId, handle, description: `${handle} description`,
       presetId: 'team-member', state: 'enabled', sessionId: `session:${memberId}`,
+      ...(avatarRef === undefined ? {} : { avatarRef }),
     },
     workspaceIds: [workspaceId],
     availability: presence === 'unavailable' ? 'unavailable' : 'active',
@@ -179,7 +180,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
     ...(diagnostic === undefined ? {} : { diagnostic }),
   })
   let memberRows = [
-    status('member:builder', 'w1', 'builder', 'available'),
+    status('member:builder', 'w1', 'builder', 'available', undefined, options?.memberAvatarRefs?.['member:builder']),
     status('member:worker', 'w1', 'worker', 'working'),
     status('member:failed', 'w1', 'failed', 'error', { class: 'runtime', detail: 'model failed' }),
     status('member:offline', 'w1', 'offline', 'unavailable', { class: 'preset-composition', detail: 'preset missing' }),
@@ -594,6 +595,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   // answers with exactly what the test asked for.
   let humanProfileFailure: string | undefined = options?.humanProfileFailure
   let humanProfileWriteFailure: string | undefined
+  let memberAvatarWriteFailure: string | undefined
   const humanProfile = vi.fn(async () => humanProfileFailure === undefined
     ? { ok: true as const, value: { ...humanProfileValue } }
     : { ok: false as const, error: { message: humanProfileFailure } })
@@ -606,6 +608,22 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
     value: { avatarRef: 'avatar:1', path: '/human/v1/avatar:1/avatar.png', name: 'avatar.png', byteSize: 3, mediaType: 'image/png' },
   }))
   const removeHumanAvatar = vi.fn(async (_request: { avatarRef: string }) => ({ ok: true as const, value: { removed: true } }))
+  // A Member's picture is stored per reference like the Human's, but which
+  // Member wears which is the Member record's business — so the bench keeps
+  // bytes by ref and lets the record decide, exactly as the Host does.
+  const memberAvatarBytes = new Map<string, string>(Object.entries(options?.memberAvatarBytes ?? {}))
+  const putMemberAvatar = vi.fn(async (request: { name: string; mediaType?: string; bytesBase64: string }) => {
+    if (memberAvatarWriteFailure !== undefined) return { ok: false as const, error: { message: memberAvatarWriteFailure } }
+    const avatarRef = `member-avatar:${memberAvatarBytes.size + 1}`
+    memberAvatarBytes.set(avatarRef, request.bytesBase64)
+    return { ok: true as const, value: { avatarRef, path: `/team/avatars/${avatarRef}.png`, name: request.name, byteSize: 3, mediaType: request.mediaType ?? 'image/png' } }
+  })
+  const getMemberAvatar = vi.fn(async (request: { avatarRef: string }) => {
+    const bytesBase64 = memberAvatarBytes.get(request.avatarRef)
+    if (bytesBase64 === undefined) return { ok: false as const, error: { message: `unknown Member avatar '${request.avatarRef}'` } }
+    return { ok: true as const, value: { name: 'avatar.png', mediaType: 'image/png', byteSize: 3, bytesBase64 } }
+  })
+  const removeMemberAvatar = vi.fn(async (request: { avatarRef: string }) => ({ ok: true as const, value: { removed: memberAvatarBytes.delete(request.avatarRef) } }))
   // The Host owns the profile write and answers with the resolved name +
   // avatarRef, so the bench refuses exactly where the Host refuses: before
   // anything is stored.
@@ -630,6 +648,17 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   /** Make the next profile writes fail, or clear the failure. */
   const failHumanProfileWrite = (message?: string): void => {
     humanProfileWriteFailure = message
+  }
+  /**
+   * Register bytes under one Member avatar reference, so a Member record
+   * carrying that ref renders a picture instead of its initial.
+   */
+  const seedMemberAvatar = (avatarRef: string, bytesBase64 = 'AAAA'): void => {
+    memberAvatarBytes.set(avatarRef, bytesBase64)
+  }
+  /** Make the next Member avatar writes fail, or clear the failure. */
+  const failMemberAvatarWrite = (message?: string): void => {
+    memberAvatarWriteFailure = message
   }
   // The environment check double: one read, no write, seeded before the Team
   // Client mounts because its projection reads on the first subscriber.
@@ -660,7 +689,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   // refuses by contract.
   runtime.remote.provideNamespaces({
     session: { modelCatalog },
-    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, humanTodos, changeHumanTodo, readThread, threadHistory: loadThreadHistory, threadObservations, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar },
+    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, humanTodos, changeHumanTodo, readThread, threadHistory: loadThreadHistory, threadObservations, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar, putMemberAvatar, getMemberAvatar, removeMemberAvatar },
   })
   Object.assign(runtime.remote, {
     $stream: <T,>(options: ConstructorParameters<typeof RemoteStream<T>>[1]) => new RemoteStream(connection, options),
@@ -703,5 +732,5 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
   const failThreadHistory = (message?: string): void => { threadHistoryFailure = message }
-  return { runtime, team, view, panelInfo: runtime.panelInfo, selectPanel, disposeWorkspace, disposeSettings, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, publishAgentReply, publishPresence, publishWorkspaceUpdate, publishGlobalUpdate, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, humanTodos, changeHumanTodo, seedHumanTodos, openSession, failThreadHistory }
+  return { runtime, team, view, panelInfo: runtime.panelInfo, selectPanel, disposeWorkspace, disposeSettings, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, putMemberAvatar, getMemberAvatar, removeMemberAvatar, seedMemberAvatar, failMemberAvatarWrite, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, publishAgentReply, publishPresence, publishWorkspaceUpdate, publishGlobalUpdate, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, humanTodos, changeHumanTodo, seedHumanTodos, openSession, failThreadHistory }
 }

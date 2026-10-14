@@ -9,6 +9,7 @@ import { mintRequestId, uploadComposerFiles } from './requests.ts'
 import type { TeamDraftKey, TeamDraftStore } from './drafts.ts'
 import { TeamComposer } from './TeamComposer.tsx'
 import { TeamMessage } from './TeamMessage.tsx'
+import type { TeamMemberAvatars } from './member-avatars.ts'
 import { namedAvatarOwners, TeamAvatarStack, type TeamAvatarHuman, type TeamAvatarOwner } from './TeamAvatarStack.tsx'
 import { TeamCountBadge } from './TeamCountBadge.tsx'
 import { TeamRunDivider } from './TeamRunDivider.tsx'
@@ -29,6 +30,10 @@ interface TeamChannelPageProps {
   /** The Human's own display name and avatar, from the shared identity projection. */
   readonly humanName: string
   readonly humanAvatarUrl?: string | undefined
+  /** Member faces by reference. Distinct from `humanAvatarUrl` because the two
+   * are different people: a row resolves the author it actually drew and never
+   * borrows the Human's bytes for an Agent, nor the reverse. */
+  readonly memberAvatars?: TeamMemberAvatars | undefined
   readonly loadChannels: TeamConversationProps['loadChannels']
   readonly subscribeChanges: TeamConversationProps['subscribeChanges']
   readonly loadMembers: TeamConversationProps['loadMembers']
@@ -95,7 +100,7 @@ function unreadCounts(inbox: AgentTeamInbox): ReadonlyMap<AgentTeamThreadRef, nu
   return new Map(inbox.items.filter(item => item.unreadCount > 0).map(item => [item.thread.threadRef, item.unreadCount]))
 }
 
-export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvatarUrl, loadChannels, subscribeChanges, loadMembers, loadInbox, drafts, putAttachment, getAttachment, sendMessage, selectThread, selectChannel, backToChannels, resolveTaskRefs, resolveThreadRefs, openMemberSession, t }: TeamChannelPageProps) {
+export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvatarUrl, memberAvatars, loadChannels, subscribeChanges, loadMembers, loadInbox, drafts, putAttachment, getAttachment, sendMessage, selectThread, selectChannel, backToChannels, resolveTaskRefs, resolveThreadRefs, openMemberSession, t }: TeamChannelPageProps) {
   const [view, setView] = useState<AgentTeamView>()
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [unreadByThread, setUnreadByThread] = useState<ReadonlyMap<AgentTeamThreadRef, number>>(new Map())
@@ -173,6 +178,14 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
     const humanMemberId = view?.humanMemberId
     return (ref: AgentTeamMemberId) => rosterMember(members, humanMemberId, humanName, ref)
   }, [rosterKey, humanName])
+  // Which face a row may draw: the reference the author's own Member record
+  // carries. The Human is deliberately not a case here — that row reads the
+  // profile's bytes through `avatarUrl`, and the two must not stand in for one
+  // another, so this never answers for the Human.
+  const avatarRefOf = useMemo(() => {
+    const refsByMember = new Map(members.map(status => [status.member.memberId as string, status.member.avatarRef]))
+    return (ref: AgentTeamMemberId): string | undefined => refsByMember.get(ref as string)
+  }, [rosterKey])
   // The Thread entry row's owner stack speaks the same grammar as the Inbox
   // row's, Human included: the Host names which actor is the reader, the
   // Client's identity projection says what that actor looks like.
@@ -406,6 +419,12 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
                 mentionsHuman={!human && mentionsHuman(item.mentions) && item.message.topLevel === true && unread > 0}
                 readerName={humanName}
                 {...(humanAvatarUrl === undefined ? {} : { avatarUrl: humanAvatarUrl })}
+                // Only a Member's own row reads this: the Human's row already
+                // took `avatarUrl` above, and the two sources never substitute
+                // for one another. The reference comes from the roster, so a
+                // row draws the face the Member record actually carries.
+                memberAvatarRef={avatarRefOf(item.message.sender)}
+                memberAvatars={memberAvatars}
                 body={item.message.body}
                 attachments={item.message.attachments}
                 loadAttachment={getAttachment}

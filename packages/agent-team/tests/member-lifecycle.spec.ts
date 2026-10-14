@@ -748,6 +748,12 @@ describe('Agent Team Member lifecycle', () => {
     expect(live?.session.ownEvents()).toContainEqual(expect.objectContaining({ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }))
     expect(ctx.agentTeam.memberForAgent(live!)).toEqual(added.status.member)
     expect(ctx.agentTeam.membersForClient({ workspaceId })[0]?.member).not.toHaveProperty('privateMemoryPath')
+    // The boundary page opens `agent.md`, so the projection carries its path.
+    // It is derived while the projection is built rather than stored, which is
+    // what keeps the Host-only namespace from leaving and still gives the path
+    // to a Member recorded before the file existed.
+    expect(ctx.agentTeam.membersForClient({ workspaceId })[0]?.member.agentMdPath)
+      .toBe(join(added.status.member.privateMemoryPath, 'agent.md'))
     const sessionTitle = ctx.get('sessionTitle')
     expect(sessionTitle?.get(live!.session)).toMatchObject({ title: 'builder', source: { kind: 'user' } })
 

@@ -1,36 +1,38 @@
-import type { CSSProperties } from 'react'
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentTeamClientMemberStatus } from '@contexera/dsh-agent-team/types'
 import type { TeamSidebarProps } from './slots.ts'
-import { memberHue } from './team-formatters.ts'
 import { presenceDotState, presenceLabel } from './TeamPresenceDot.tsx'
 import { TeamStateDot } from './TeamStateDot.tsx'
+import { MemberAvatarSeat } from './MemberAvatarSeat.tsx'
 import css from './sidebar.module.css'
 
 /**
  * Sidebar Member avatar reusing the conversation identity language: the
  * deterministic member hue and handle initial, with the presence indicator
  * overlaid at the bottom-right so one glyph carries identity and state.
+ *
+ * The face itself comes from the shared seat, which is what keeps this one, the
+ * roster's and the mention chip's the same picture of the same Member.
  */
-export function TeamMemberAvatar({ status, t }: {
+export function TeamMemberAvatar({ status, t, avatarUrl }: {
   readonly status: AgentTeamClientMemberStatus
   readonly t: TeamSidebarProps['t']
+  /** Uploaded avatar for this Member, when the calling surface resolved one. */
+  readonly avatarUrl?: string | undefined
 }) {
   const label = presenceLabel(status, t)
   const state = presenceDotState(status.presence)
   return (
     <Tooltip label={label} delayMs={300}>
-      <span
+      <MemberAvatarSeat
+        memberId={status.member.memberId}
+        handle={status.member.handle}
+        avatarUrl={avatarUrl}
+        size={24}
+        label={label}
         className={css.agentAvatar}
-        style={{ '--team-avatar-hue': memberHue(status.member.memberId) } as CSSProperties}
-        role="img"
-        aria-label={label}
-      >
-        {status.member.handle.replace('@', '').slice(0, 1).toUpperCase()}
-        <span className={css.agentAvatarBadge} aria-hidden="true">
-          <TeamStateDot state={state} />
-        </span>
-      </span>
+        badge={<span className={css.agentAvatarBadge} aria-hidden="true"><TeamStateDot state={state} /></span>}
+      />
     </Tooltip>
   )
 }

@@ -65,8 +65,11 @@ describe('Human identity in the Team surfaces', () => {
         { body: 'agent note', occurredAt: '2026-08-21T10:05:00.000Z', sender: 'agent' },
       ],
     })
-    // The profile picture belongs to the Human's own seat: an Agent row keeps
-    // its own hue and initial, so the feed never paints two people alike.
+    // The profile picture belongs to the Human's own seat. A Member row now
+    // draws its own face when its record carries one, which makes this
+    // assertion sharper than it used to be: the Human's bytes must not reach an
+    // Agent row even though Agent rows are no longer blank by definition. The
+    // seeded Agent carries no avatar, so hue and initial are still what it owes.
     const seats = await waitFor(() => {
       const rows = [...page.querySelectorAll('article')]
       if (rows.length < 2) throw new Error('feed rows not mounted')
@@ -80,6 +83,39 @@ describe('Human identity in the Team surfaces', () => {
       { human: true, seat: 'image', src: 'data:image/png;base64,AAAA' },
       { human: false, seat: 'initial', src: undefined },
     ])
+  })
+
+  it('draws each seat its own face when the Human and a Member both have one', async () => {
+    const { b } = await openSeededChannel({
+      humanProfile: { name: 'Ada', avatarRef: 'avatar:1' },
+      memberAvatarRefs: { 'member:builder': 'member-avatar:1' },
+      memberAvatarBytes: { 'member-avatar:1': 'BBBB' },
+      seededMessages: [
+        { body: 'human note', occurredAt: '2026-08-21T10:00:00.000Z', sender: 'human' },
+        { body: 'agent note', occurredAt: '2026-08-21T10:05:00.000Z', sender: 'agent' },
+      ],
+    })
+    // Two people, two faces: the Human's row draws the profile's bytes and the
+    // Member's row draws its own. Each seat asks only its own source, so the
+    // two must land where they belong and neither may stand in for the other.
+    // Select by whose row it is, not by position: the feed also renders rows
+    // that are not authored messages, and an index would silently shift.
+    const pictures = await waitFor(() => {
+      // A seat is what this asserts about, so select the rows that carry one:
+      // the feed also renders rows without identity (dividers, the Thread
+      // entry), and position would silently shift as those come and go.
+      const seats = [...b.view.container.querySelectorAll('article')].filter(row => row.querySelector('[data-avatar]') !== null)
+      if (seats.length < 2) throw new Error('identity seats not mounted')
+      return seats.map(row => ({ human: row.hasAttribute('data-human'), src: row.querySelector('img')?.getAttribute('src') }))
+    })
+    expect(pictures).toEqual([
+      { human: true, src: 'data:image/png;base64,AAAA' },
+      { human: false, src: 'data:image/png;base64,BBBB' },
+    ])
+    // The reads are per person, never shared: the Human's bytes came from the
+    // profile Remote and the Member's from the Member Remote.
+    expect(b.getHumanAvatar).toHaveBeenCalledWith({ avatarRef: 'avatar:1' })
+    expect(b.getMemberAvatar).toHaveBeenCalledWith({ avatarRef: 'member-avatar:1' })
   })
 
   it('chips an agent message that wrote the historic human handle as the renamed Human', async () => {

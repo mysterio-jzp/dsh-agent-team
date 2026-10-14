@@ -10,6 +10,7 @@ import { cachedResolvedTaskRef, resolveUnknownTaskRefs, useResolvedTaskRefVersio
 import { cachedResolvedThreadRef, resolveUnknownThreadRefs, useResolvedThreadRefVersion, type ResolvedThreadRef } from './refs.ts'
 import { formatMessageTime, isSingleBrandedRef, memberHue, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, type MentionHandle } from './team-formatters.ts'
 import { useAvatarImage } from './avatar-image.ts'
+import { useMemberAvatarUrl, type TeamMemberAvatars } from './member-avatars.ts'
 import css from './conversation.module.css'
 
 export interface TeamMessageProps {
@@ -59,6 +60,14 @@ export interface TeamMessageProps {
   /** The Human's uploaded avatar; only the Human's own row draws it, and absent
    * or undecodable bytes draw the initial on the business-tinted chip. */
   readonly avatarUrl?: string | undefined
+  /** The avatar reference this Member's own record carries, resolved through
+   * the shared Member map rather than handed in as bytes. It travels separately
+   * from `avatarUrl` on purpose: the Human's bytes and a Member's bytes belong
+   * to different people, and a row that read one where the other belongs would
+   * paint a face onto the wrong author. */
+  readonly memberAvatarRef?: string | undefined
+  /** The shared Member face map; absent on surfaces without the Remote. */
+  readonly memberAvatars?: TeamMemberAvatars | undefined
   /** Cache readback for thumbnails; absent on surfaces without the remotes. */
   readonly loadAttachment?: TeamConversationProps['getAttachment'] | undefined
   readonly t?: TeamConversationProps['t'] | undefined
@@ -85,13 +94,17 @@ export interface TeamMessageProps {
  * skipping a render here never detaches it. Callers must therefore keep the
  * props they derive per render (mention names, ref callbacks) identity-stable.
  */
-export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, loadAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
+export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, memberAvatarRef, memberAvatars, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, loadAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
   const avatarStyle = human ? undefined : { '--team-avatar-hue': memberHue(memberId) } as CSSProperties
-  // Only the Human's own row may draw a picture: the profile owns those bytes,
-  // and one seat painting the reader's face for another author would name two
-  // people alike. A seat draws it while those bytes decode; anything else keeps
-  // the initial, which is what the fallback promises.
-  const identityImage = useAvatarImage(human ? avatarUrl : undefined)
+  // A seat may draw a picture, but only its own author's: the Human's row reads
+  // the profile's bytes and a Member's row reads that Member's. The two sources
+  // are deliberately not interchangeable — swapping them would paint one
+  // person's face onto another's messages, which is the one thing this seat
+  // exists to prevent. Whichever bytes apply are drawn while they decode;
+  // anything else keeps the initial, which is what the fallback promises.
+  // A Member's own ref resolves through the shared map; the Human's row never
+  // asks it, and a Member's row never reads `avatarUrl`.
+  const identityImage = useAvatarImage(human ? avatarUrl : useMemberAvatarUrl(memberAvatars, memberAvatarRef))
   // Literal bodies carry mention chips inline — Human input always, and
   // plain-prose Agent bodies where literal rendering loses nothing. Rich
   // Markdown keeps unmatched structured mentions in the trailing row.

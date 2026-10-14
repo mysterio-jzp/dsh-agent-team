@@ -53,6 +53,12 @@ import type {
   AgentTeamSendMessageResult,
   AgentTeamUpdateChannelRequest,
   AgentTeamUpdateChannelResult,
+  AgentTeamGetMemberAvatarRequest,
+  AgentTeamGetMemberAvatarResult,
+  AgentTeamPutMemberAvatarRequest,
+  AgentTeamPutMemberAvatarResult,
+  AgentTeamRemoveMemberAvatarRequest,
+  AgentTeamRemoveMemberAvatarResult,
   AgentTeamUpdateMemberRequest,
   AgentTeamView,
   AgentTeamViewRequest,
@@ -63,6 +69,7 @@ import type { TeamChangeListener, TeamChangeScope } from './team-changes.ts'
 import type { TeamDraftStore } from './drafts.ts'
 import type { TeamReplyCapabilitiesSource } from './reply-capabilities.ts'
 import type { TeamHumanIdentitySource } from './human-identity.ts'
+import type { TeamMemberAvatars } from './member-avatars.ts'
 
 export interface TeamNavigationSource {
   getSnapshot: () => TeamNavigationSnapshot
@@ -124,6 +131,16 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
     updateChannel: (request: AgentTeamUpdateChannelRequest) => Promise<RemoteResult<AgentTeamUpdateChannelResult>>
     archiveChannel: (request: AgentTeamArchiveChannelRequest) => Promise<RemoteResult<AgentTeamArchiveChannelResult>>
     updateMember: (request: AgentTeamUpdateMemberRequest) => Promise<RemoteResult<AgentTeamMemberResult>>
+    /**
+     * Store one Member avatar's bytes and return their opaque reference. The
+     * caller records that reference on the Member with `updateMember` as a
+     * separate step, so a failure at either half never leaves a name pointing at
+     * bytes that are not there, or bytes nobody names.
+     */
+    putMemberAvatar: (request: AgentTeamPutMemberAvatarRequest) => Promise<RemoteResult<AgentTeamPutMemberAvatarResult>>
+    /** Read one Member avatar's bytes so the boundary page can draw them. */
+    getMemberAvatar: (request: AgentTeamGetMemberAvatarRequest) => Promise<RemoteResult<AgentTeamGetMemberAvatarResult>>
+    removeMemberAvatar: (request: AgentTeamRemoveMemberAvatarRequest) => Promise<RemoteResult<AgentTeamRemoveMemberAvatarResult>>
     recoverMember: (request: AgentTeamRecoverMemberRequest) => Promise<RemoteResult<AgentTeamRecoverMemberResult>>
     /**
      * Host clear-context remote kept as a hidden migration escape hatch.
@@ -147,6 +164,9 @@ export type TeamConversationProps = PropsRuntime<'main'> & PropsLocale<'team'> &
   drafts: TeamDraftStore
   /** The Human's own identity: the display name and avatar every seat that names or draws them reads. */
   humanIdentity: TeamHumanIdentitySource
+  /** Member faces by reference; separate from the Human's identity because a
+   * seat must never reach one person's bytes under another's name. */
+  memberAvatars: TeamMemberAvatars
   loadChannels: (request: AgentTeamViewRequest) => Promise<RemoteResult<AgentTeamView>>
   readThread: (request: AgentTeamThreadReadRequest) => Promise<RemoteResult<AgentTeamThreadReadResult>>
   loadThreadHistory: (request: AgentTeamThreadHistoryRequest) => Promise<RemoteResult<AgentTeamThreadHistory>>

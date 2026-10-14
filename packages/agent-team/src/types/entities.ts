@@ -188,7 +188,18 @@ export interface AgentTeamMemberDiagnostic {
 }
 
 /** Browser-safe Member identity with Host-only paths removed. */
-export type AgentTeamClientMember = Omit<AgentTeamAgentMember, 'privateMemoryPath'>
+export type AgentTeamClientMember = Omit<AgentTeamAgentMember, 'privateMemoryPath'> & {
+  /**
+   * Absolute path of the Member's `agent.md`, derived for the boundary page.
+   *
+   * Not a durable Member fact: it is computed from `privateMemoryPath` while the
+   * Client projection is built, so a Member recorded before that file existed
+   * still gets a path, and the ledger's own shape — its update validation, its
+   * idempotent comparison, its schema — stays untouched. `privateMemoryPath`
+   * itself never leaves the Host.
+   */
+  readonly agentMdPath?: string | undefined
+}
 
 /** Browser-safe lifecycle projection. */
 export interface AgentTeamClientMemberStatus extends Omit<AgentTeamAgentMemberStatus, 'member'> {

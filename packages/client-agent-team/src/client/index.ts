@@ -26,6 +26,9 @@ import type {
   AgentTeamResolveTaskRefsRequest,
   AgentTeamResolveThreadRefsRequest,
   AgentTeamTaskRequest,
+  AgentTeamGetMemberAvatarRequest,
+  AgentTeamPutMemberAvatarRequest,
+  AgentTeamRemoveMemberAvatarRequest,
   AgentTeamUpdateChannelRequest,
   AgentTeamUpdateMemberRequest,
   AgentTeamViewRequest,
@@ -45,6 +48,10 @@ import { TeamSettingsSection } from './TeamSettingsSection.tsx'
 import { TeamContextJudgeCheck } from './context-judge.ts'
 import { TeamJudgeForm, TeamJudgeFormSeat, type TeamJudgeSection } from './judge-form.ts'
 import { TeamHumanIdentity } from './human-identity.ts'
+// The Member side of the same idea: a picture resolved per reference and shared
+// by every seat that draws that Member. Kept apart from the Human's identity so
+// a row cannot reach the wrong person's bytes.
+import { TeamMemberAvatars } from './member-avatars.ts'
 import { TeamReplyCapabilities, type TeamReplyCapabilitiesFace } from './reply-capabilities.ts'
 import { TeamEnvironmentCheck } from './environment-check.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
@@ -134,9 +141,10 @@ function registerTeamPanel(
   reads: TeamReadStream,
   drafts: TeamDraftStore,
   humanIdentity: TeamHumanIdentity,
+  memberAvatars: TeamMemberAvatars,
   replyCapabilities: TeamReplyCapabilitiesFace,
 ): void {
-  const sharedRemotes = teamSharedRemotes(ctx, navigation, queries, reads, drafts, humanIdentity, replyCapabilities)
+  const sharedRemotes = teamSharedRemotes(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities)
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: TEAM_PANEL_ID,
@@ -258,6 +266,7 @@ function teamSharedRemotes(
   reads: TeamReadStream,
   drafts: TeamDraftStore,
   humanIdentity: TeamHumanIdentity,
+  memberAvatars: TeamMemberAvatars,
   replyCapabilities: TeamReplyCapabilitiesFace,
 ): Record<string, unknown> {
   return {
@@ -275,11 +284,15 @@ function teamSharedRemotes(
     subscribeChanges: (scope: TeamChangeScope, listener: TeamChangeListener) => queries.subscribeChanges(scope, listener),
     drafts,
     humanIdentity,
+    memberAvatars,
     replyCapabilities,
     loadMembers: (request: AgentTeamMembersRequest) => queries.read(membersQuery(request), () => ctx.remote.agentTeam.members(request)),
     updateChannel: (request: AgentTeamUpdateChannelRequest) => ctx.remote.agentTeam.updateChannel(request),
     archiveChannel: (request: AgentTeamArchiveChannelRequest) => ctx.remote.agentTeam.archiveChannel(request),
     updateMember: (request: AgentTeamUpdateMemberRequest) => ctx.remote.agentTeam.updateMember(request),
+    putMemberAvatar: (request: AgentTeamPutMemberAvatarRequest) => ctx.remote.agentTeam.putMemberAvatar(request),
+    getMemberAvatar: (request: AgentTeamGetMemberAvatarRequest) => ctx.remote.agentTeam.getMemberAvatar(request),
+    removeMemberAvatar: (request: AgentTeamRemoveMemberAvatarRequest) => ctx.remote.agentTeam.removeMemberAvatar(request),
     recoverMember: (request: AgentTeamRecoverMemberRequest) => ctx.remote.agentTeam.recoverMember(request),
     clearMemberContext: (request: AgentTeamClearMemberContextRequest) => ctx.remote.agentTeam.clearMemberContext(request),
     archiveMember: (request: AgentTeamArchiveMemberRequest) => ctx.remote.agentTeam.archiveMember(request),
@@ -350,6 +363,7 @@ function registerModeShadow<T extends object>(
   reads: TeamReadStream,
   drafts: TeamDraftStore,
   humanIdentity: TeamHumanIdentity,
+  memberAvatars: TeamMemberAvatars,
   replyCapabilities: TeamReplyCapabilitiesFace,
   name: 'sidebar.workspaces' | 'main' | 'sidebar.settings',
   component: T,
@@ -359,7 +373,7 @@ function registerModeShadow<T extends object>(
   // that same panel instead of adding a second one.
   entryKey?: string,
 ): void {
-  const sharedRemotes = teamSharedRemotes(ctx, navigation, queries, reads, drafts, humanIdentity, replyCapabilities)
+  const sharedRemotes = teamSharedRemotes(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities)
   ctx.slots.inject(name, () => {
     let dispose: (() => void) | undefined
     const reconcile = (): void => {
@@ -413,6 +427,16 @@ function applyUi(ctx: ClientContext): void {
       return `data:${result.value.mediaType};base64,${result.value.bytesBase64}`
     },
   })
+  // Member faces: one map from the reference a Member record carries to the
+  // bytes a seat can draw. Separate from the Human's identity above because the
+  // two are different people — see the note on the store itself.
+  const memberAvatars = new TeamMemberAvatars({
+    loadAvatarUrl: async (avatarRef: string) => {
+      const result = await ctx.remote.agentTeam.getMemberAvatar({ avatarRef })
+      if (!result.ok || !result.value.mediaType.startsWith('image/')) return null
+      return `data:${result.value.mediaType};base64,${result.value.bytesBase64}`
+    },
+  })
   // The local environment check: a fact about this installation rather than
   // about the Human, so it is its own projection and never a field of the
   // identity above. Read once, on the first subscriber, and never written back.
@@ -435,6 +459,7 @@ function applyUi(ctx: ClientContext): void {
     navigation.dispose()
     drafts.dispose()
     humanIdentity.dispose()
+    memberAvatars.dispose()
     environment.dispose()
     contextJudge.dispose()
     judgeForm.dispose()
@@ -505,11 +530,11 @@ function applyUi(ctx: ClientContext): void {
   // and refreshes it, and every surface that offers a reply reads the same
   // answer, so the affordance appears and disappears immediately.
   const replyCapabilities = new TeamReplyCapabilities(() => ctx.remote.agentTeam.replySettings())
-  registerTeamPanel(ctx, navigation, queries, reads, drafts, humanIdentity, replyCapabilities)
+  registerTeamPanel(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities)
 
-  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, replyCapabilities, 'sidebar.workspaces', TeamWorkspaceBrowser as never)
-  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, replyCapabilities, 'main', TeamConversation as never, undefined, 'conversation')
-  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, replyCapabilities, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups }))
+  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.workspaces', TeamWorkspaceBrowser as never)
+  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'main', TeamConversation as never, undefined, 'conversation')
+  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups }))
 
   // The Team entry stands at the sidebar's foot and the panel it selects is what
   // Team mode is entered as, so the selection and the mode are one fact: picking
