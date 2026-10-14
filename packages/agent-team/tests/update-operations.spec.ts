@@ -168,6 +168,45 @@ describe('Agent Team display-fact updates', () => {
     expect(replayed.listMembers().find(member => member.memberId === reviewer.status.member.memberId)?.state).toBe('inactive')
   })
 
+  it('carries a Member avatar reference through edits, clearing, and replay', async () => {
+    const { ctx, facility } = await harness()
+    const created = await ctx.agentTeam.createChannel({ requestId: requestId('avatar-channel'), workspaceId: alpha, name: 'avatars', description: 'Faces' })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('avatar-builder'), workspaceId: alpha, handle: 'builder', description: 'Builds', presetId: 'default', channelRefs: [created.channel.channelRef] })
+    expect(builder.status.member.avatarRef).toBeUndefined()
+
+    // A face is set by naming the stored ref, exactly as the Human seat does.
+    const ref = '11111111-2222-3333-4444-555555555555'
+    const set = await ctx.agentTeam.updateMember({ requestId: requestId('avatar-set'), memberId: builder.status.member.memberId, handle: 'builder', description: 'Builds', avatarRef: ref })
+    expect(set.status.member.avatarRef).toBe(ref)
+
+    // An absent avatarRef keeps the face: an edit that only renames must not
+    // silently drop it, which is what a naive spread without the overlay
+    // removal would do.
+    const renamed = await ctx.agentTeam.updateMember({ requestId: requestId('avatar-rename'), memberId: builder.status.member.memberId, handle: 'builder2', description: 'Still builds' })
+    expect(renamed.status.member.avatarRef).toBe(ref)
+
+    // Replaying the same set payload is a replay, not a collision.
+    const replayed = await ctx.agentTeam.updateMember({ requestId: requestId('avatar-set'), memberId: builder.status.member.memberId, handle: 'builder', description: 'Builds', avatarRef: ref })
+    expect(replayed.status.member.avatarRef).toBe(ref)
+
+    // Drift on the avatar field alone collides, like every other op.
+    await expect(ctx.agentTeam.updateMember({ requestId: requestId('avatar-set'), memberId: builder.status.member.memberId, handle: 'builder', description: 'Builds', avatarRef: 'other-ref' })).rejects.toThrow(/was reused with a different operation or payload/)
+
+    // A cold replay preserves the face; this is the path a Host restart takes.
+    const cold = replayLedger(facility)
+    expect(() => cold.validate()).not.toThrow()
+    expect(cold.getMember(builder.status.member.memberId)?.avatarRef).toBe(ref)
+
+    // `null` clears back to hue + initial. This is the branch a spread without
+    // the overlay removal silently loses, so it is asserted on its own.
+    const cleared = await ctx.agentTeam.updateMember({ requestId: requestId('avatar-clear'), memberId: builder.status.member.memberId, handle: 'builder2', description: 'Still builds', avatarRef: null })
+    expect(cleared.status.member.avatarRef).toBeUndefined()
+
+    const afterClear = replayLedger(facility)
+    expect(() => afterClear.validate()).not.toThrow()
+    expect(afterClear.getMember(builder.status.member.memberId)?.avatarRef).toBeUndefined()
+  })
+
   it('carries Member capabilities through lifecycle operations, edits, replay, and Host restart', async () => {
     const { ctx, facility } = await harness()
     const created = await ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })

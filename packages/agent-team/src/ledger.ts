@@ -781,13 +781,16 @@ export class AgentTeamLedger {
         : request.model === null ? undefined : Object.freeze({ ...request.model })
       const nextCapabilities = request.capabilities === undefined ? prior.capabilities
         : request.capabilities === null ? undefined : request.capabilities
+      const nextAvatarRef = request.avatarRef === undefined ? prior.avatarRef
+        : request.avatarRef === null ? undefined : request.avatarRef
       // Both overlays come off `prior` before being re-added, or a cleared field
       // would survive in the spread and the null branch would do nothing.
-      const { model: _priorModel, capabilities: _priorCapabilities, ...priorWithoutOverlays } = prior
+      const { model: _priorModel, capabilities: _priorCapabilities, avatarRef: _priorAvatarRef, ...priorWithoutOverlays } = prior
       const member = Object.freeze({
         ...priorWithoutOverlays, handle, description,
         ...(nextModel === undefined ? {} : { model: nextModel }),
         ...freezeCapabilities(nextCapabilities),
+        ...(nextAvatarRef === undefined ? {} : { avatarRef: nextAvatarRef }),
       })
       const operation: AgentTeamMemberUpdatedOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/member-updated',
@@ -4626,7 +4629,8 @@ export class AgentTeamLedger {
       // means "keep the stored value", which the record cannot distinguish from
       // a request that stated the same value.
       || (request.model !== undefined && !isDeepStrictEqual(operation.data.member.model ?? undefined, request.model ?? undefined))
-      || (request.capabilities !== undefined && !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.capabilities ?? undefined))) this.throwRequestCollision(request.requestId)
+      || (request.capabilities !== undefined && !isDeepStrictEqual(operation.data.member.capabilities ?? undefined, request.capabilities ?? undefined))
+      || (request.avatarRef !== undefined && (operation.data.member.avatarRef ?? null) !== request.avatarRef)) this.throwRequestCollision(request.requestId)
   }
 
   private assertSameChannelJoin(operation: AgentTeamOperation, request: AgentTeamAuthorizedJoinChannelRequest): asserts operation is AgentTeamChannelMemberAddedOperation {

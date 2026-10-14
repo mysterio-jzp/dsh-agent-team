@@ -34,6 +34,7 @@ import { ATTACHMENT_MAX_BYTES, attachmentPayloadPath, attachmentsRoot, copyPathA
 import { reportEnvironment } from './environment-check.ts'
 import { HUMAN_PROFILE_DEFAULT_NAME, HUMAN_PROFILE_REPO_URL, HUMAN_PROFILE_SETTINGS_NAMESPACE, HUMAN_PROFILE_SETTINGS_SCHEMA, HUMAN_PROFILE_VERSION, assertValidHumanName, normalizeHumanName, parseLegacyHumanProfile, planLegacyAdoption, type LegacyHumanProfileFields } from './human-profile.ts'
 import { humanAvatarsRoot, readHumanAvatar, removeHumanAvatar, writeHumanAvatar } from './human-avatar.ts'
+import { memberAvatarsRoot, readMemberAvatar, removeMemberAvatar, writeMemberAvatar } from './member-avatar.ts'
 import { createHumanUpdateChecker } from './human-update-check.ts'
 import { AgentTeamInvariantError } from './invariant.ts'
 import { createTeamContextManagement, TeamPressurePolicy, TEAM_CONTEXT_CODEC, TEAM_JUDGE_TIMEOUT_DEFAULT_MS, TEAM_PRESSURE_GATE_SCHEMA } from './context-continuity-host.ts'
@@ -78,12 +79,18 @@ import type {
   AgentTeamGetAttachmentResult,
   AgentTeamGetHumanAvatarRequest,
   AgentTeamGetHumanAvatarResult,
+  AgentTeamGetMemberAvatarRequest,
+  AgentTeamGetMemberAvatarResult,
   AgentTeamHumanProfileRequest,
   AgentTeamHumanProfileResult,
   AgentTeamPutHumanAvatarRequest,
   AgentTeamPutHumanAvatarResult,
+  AgentTeamPutMemberAvatarRequest,
+  AgentTeamPutMemberAvatarResult,
   AgentTeamRemoveHumanAvatarRequest,
   AgentTeamRemoveHumanAvatarResult,
+  AgentTeamRemoveMemberAvatarRequest,
+  AgentTeamRemoveMemberAvatarResult,
   AgentTeamInbox,
   AgentTeamInboxRequest,
   AgentTeamJoinWorkspaceRequest,
@@ -2085,6 +2092,38 @@ export default class AgentTeam extends TypertRemoteService {
   async removeHumanAvatar(request: AgentTeamRemoveHumanAvatarRequest): Promise<AgentTeamRemoveHumanAvatarResult> {
     this.requireAccepting()
     await removeHumanAvatar(humanAvatarsRoot(), request.avatarRef)
+    return Object.freeze({ removed: true })
+  }
+
+  /**
+   * Upload one Member avatar image into the persistent store. Mirrors
+   * `putHumanAvatar`: the caller records the returned ref on the Member
+   * through `updateMember`, which is what actually makes it the face.
+   */
+  @Remote('putMemberAvatar')
+  async putMemberAvatar(request: AgentTeamPutMemberAvatarRequest): Promise<AgentTeamPutMemberAvatarResult> {
+    this.requireAccepting()
+    const bytes = Buffer.from(request.bytesBase64, 'base64')
+    return Object.freeze(await writeMemberAvatar(memberAvatarsRoot(), request.name, request.mediaType ?? 'application/octet-stream', bytes))
+  }
+
+  /** Read one Member avatar back; removed entries throw and the seat falls back to hue/initial. */
+  @Remote('getMemberAvatar')
+  async getMemberAvatar(request: AgentTeamGetMemberAvatarRequest): Promise<AgentTeamGetMemberAvatarResult> {
+    const stored = await readMemberAvatar(memberAvatarsRoot(), request.avatarRef)
+    if (stored === undefined) throw new Error(`member avatar '${request.avatarRef}' is no longer stored`)
+    return Object.freeze({ name: stored.name, mediaType: stored.mediaType, byteSize: stored.byteSize, bytesBase64: stored.bytes.toString('base64') })
+  }
+  /**
+   * Remove one Member avatar entry; the seat falls back to hue/initial
+   * afterwards. Clearing the Member's ref stays with `updateMember`, so this
+   * Remote does one thing and the editor's own save remains the single writer
+   * of the record.
+   */
+  @Remote('removeMemberAvatar')
+  async removeMemberAvatar(request: AgentTeamRemoveMemberAvatarRequest): Promise<AgentTeamRemoveMemberAvatarResult> {
+    this.requireAccepting()
+    await removeMemberAvatar(memberAvatarsRoot(), request.avatarRef)
     return Object.freeze({ removed: true })
   }
 

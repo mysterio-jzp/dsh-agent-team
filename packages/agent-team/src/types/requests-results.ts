@@ -127,6 +127,11 @@ export interface AgentTeamUpdateMemberRequest {
   readonly model?: AgentTeamModelSelection | null
   /** Absent keeps the current override; `null` clears it back to the full surface. */
   readonly capabilities?: AgentTeamMemberCapabilities | null
+  /**
+   * Absent keeps the current face; `null` clears it back to hue + initial.
+   * Clearing needs its own shape because a merge patch cannot remove a field.
+   */
+  readonly avatarRef?: string | null | undefined
 }
 
 /** Human intent to suspend or resume one Agent Member. */
@@ -494,6 +499,43 @@ export interface AgentTeamRemoveHumanAvatarRequest {
 }
 
 export interface AgentTeamRemoveHumanAvatarResult {
+  readonly removed: boolean
+}
+
+/** Upload one Member avatar image into the persistent Member avatar store. */
+export interface AgentTeamPutMemberAvatarRequest {
+  readonly name: string
+  readonly mediaType?: string | undefined
+  readonly bytesBase64: string
+}
+
+export interface AgentTeamPutMemberAvatarResult {
+  readonly avatarRef: string
+  /** Absolute path members read the bytes from; stable until removed. */
+  readonly path: string
+  readonly name: string
+  readonly byteSize: number
+  readonly mediaType: string
+}
+
+/** Read one Member avatar back for client-side display. */
+export interface AgentTeamGetMemberAvatarRequest {
+  readonly avatarRef: string
+}
+
+export interface AgentTeamGetMemberAvatarResult {
+  readonly name: string
+  readonly mediaType: string
+  readonly byteSize: number
+  readonly bytesBase64: string
+}
+
+/** Remove one Member avatar entry; the seat falls back to hue/initial. */
+export interface AgentTeamRemoveMemberAvatarRequest {
+  readonly avatarRef: string
+}
+
+export interface AgentTeamRemoveMemberAvatarResult {
   readonly removed: boolean
 }
 

@@ -105,6 +105,12 @@ export interface AgentTeamAgentMember {
   readonly presetId: string
   /** Absent inherits the Host default model selection at every activation. */
   readonly model?: AgentTeamModelSelection | undefined
+  /**
+   * Reference into the Member avatar store; absent renders the hue + initial
+   * fallback. Carried on the Member record the way the Human's lives in its
+   * profile row, so removing a Member drops its face with the rest of it.
+   */
+  readonly avatarRef?: string | undefined
   /** Durable capability intent; see AgentTeamMemberCapabilities. */
   readonly capabilities?: AgentTeamMemberCapabilities | undefined
   /** Host-internal namespace; never exposed through Client projections. */
