@@ -113,7 +113,7 @@ export function TeamWorkspaceBrowser({ wide, expandSidebar, navigation, selectWo
     if (!wide || pendingSection === undefined) return
     const node = pendingSection === 'agents' ? agentsRef.current : channelsRef.current
     setPendingSection(undefined)
-    queueMicrotask(() => { node?.querySelector<HTMLButtonElement>('button')?.focus() })
+    queueMicrotask(() => { node?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true }) })
   }, [wide, pendingSection])
 
   if (!wide) {

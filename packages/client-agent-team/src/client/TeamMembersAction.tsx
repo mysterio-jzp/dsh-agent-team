@@ -17,7 +17,7 @@ export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActi
 
   useEffect(() => {
     if (!panelOpen) return
-    queueMicrotask(() => { contentRef.current?.focus() })
+    queueMicrotask(() => { contentRef.current?.focus({ preventScroll: true }) })
   }, [panelOpen])
 
   const openMembers = () => {
@@ -31,7 +31,7 @@ export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActi
 
   const closeMembers = () => {
     setPanelOpen(false)
-    queueMicrotask(() => { triggerRef.current?.focus() })
+    queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) })
   }
 
   return (

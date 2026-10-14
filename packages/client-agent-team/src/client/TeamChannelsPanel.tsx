@@ -141,7 +141,7 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
   const closeForm = () => {
     if (mutating) return
     setFormOpen(false)
-    queueMicrotask(() => { triggerRef.current?.focus() })
+    queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) })
   }
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -166,7 +166,7 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
         setSelected(new Set())
         setFormOpen(false)
         await refresh()
-        queueMicrotask(() => { triggerRef.current?.focus() })
+        queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) })
       } else {
         setError(result.error.message)
       }

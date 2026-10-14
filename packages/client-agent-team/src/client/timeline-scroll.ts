@@ -9,6 +9,30 @@ export interface TimelineScroll {
   isPinned: () => boolean
   /** Scroll the timeline to the latest fact immediately. */
   scrollToBottom: () => void
+  /**
+   * Bring one descendant row to the middle of the timeline. `smooth` asks for an
+   * animated move; the opening jump wants an instant one.
+   */
+  centerOn: (node: HTMLElement, options?: { readonly smooth?: boolean }) => void
+}
+
+/**
+ * Centre one row inside a scroll container by moving that container's own
+ * `scrollTop`, never by asking an ancestor to scroll.
+ *
+ * `Element.scrollIntoView` walks up the ancestor chain and scrolls every
+ * scrollable box it meets, so centring a Message inside `.timeline` also
+ * disturbs whatever scrolls the page around it — the sidebar, the panel host,
+ * the window. Setting `scrollTop` on the container states the intent exactly:
+ * this box, this row, this many pixels. The container is the only thing that
+ * moves.
+ *
+ * The caller keeps ownership of the clamp: `scrollTop` is silently clamped to
+ * the container's range by the DOM, so a row near either end lands as close to
+ * the middle as the content allows rather than overscrolling the box.
+ */
+function centerInContainer(container: HTMLElement, node: HTMLElement): void {
+  container.scrollTop = node.offsetTop - container.clientHeight / 2 + node.clientHeight / 2
 }
 
 /**
@@ -34,6 +58,20 @@ export function useTimelineScroll(contentKey: string): TimelineScroll {
     if (element !== null) element.scrollTop = element.scrollHeight
   }, [])
 
+  // The animated branch still animates the container itself: `scrollTo` is the
+  // container's own method, so an ancestor is never asked to move. Browsers
+  // without it (jsdom, older engines) silently keep the instant path.
+  const centerOn = useCallback((node: HTMLElement, options?: { readonly smooth?: boolean }) => {
+    const element = ref.current
+    if (element === null) return
+    if (options?.smooth === true && typeof element.scrollTo === 'function') {
+      const top = node.offsetTop - element.clientHeight / 2 + node.clientHeight / 2
+      element.scrollTo({ top, behavior: 'smooth' })
+      return
+    }
+    centerInContainer(element, node)
+  }, [])
+
   useEffect(() => {
     const element = ref.current
     if (element === null) return
@@ -49,5 +87,5 @@ export function useTimelineScroll(contentKey: string): TimelineScroll {
     }
   }, [contentKey])
 
-  return { ref, onScroll, isPinned: () => pinnedRef.current, scrollToBottom }
+  return { ref, onScroll, isPinned: () => pinnedRef.current, scrollToBottom, centerOn }
 }

@@ -4,7 +4,21 @@
   height: 100%;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  /* `overflow: clip` rather than `hidden`: it forbids scrolling this box
+     entirely, so a focus move or a stray scroll can never shift the outer
+     frame, while `hidden` would quietly turn the surface into a scroll
+     container that a stray focus can scroll. `position: relative` anchors the
+     absolutely positioned layers inside the surface to this box rather than to
+     the page.
+     ⚠ The mention menu (`composer.module.css .mentionMenu`) is an absolutely
+     positioned descendant of this element: it opens upward from the composer
+     and overlaps the timeline. It stays inside the surface while the surface is
+     full height, which is what `height: 100%` above gives it — but this clip
+     would cut that menu off the moment the surface is ever laid out shorter
+     than the menu's own reach. Verified statically only: jsdom loads no
+     stylesheets, so the geometry itself needs a real-browser check. */
+  overflow: clip;
+  position: relative;
 }
 
 .surfaceHeader {

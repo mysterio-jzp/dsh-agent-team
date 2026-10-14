@@ -566,24 +566,29 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // because the first paint can still be growing: a jump made against a timeline
   // that has not finished laying out would be undone by the pin-to-bottom policy,
   // so every later commit re-centres it until the pulse releases the target.
+  //
+  // The move is the timeline's own `scrollTop`, never `scrollIntoView`: that
+  // method walks up the ancestor chain and scrolls every scrollable box it
+  // meets, so centring a Message here would also drag the panel host and the
+  // window. See `centerOn` in timeline-scroll.ts.
   useLayoutEffect(() => {
     if (pendingJump === undefined) return
     const node = document.querySelector(`[data-message-ref="${pendingJump}"]`)
-    if (node === null) return
-    node.scrollIntoView({ block: 'center' })
+    if (!(node instanceof HTMLElement)) return
+    timeline.centerOn(node)
     // The reader now sits on one Message rather than at the tail, so the shared
     // scroll policy has to hear it: otherwise the next arriving fact counts them
     // as pinned and pulls the view back to the bottom, undoing the jump.
     timelineOnScroll()
     setFlashedMessage(pendingJump)
-  }, [pendingJump, currentFacts, readFacts, timelineOnScroll])
+  }, [pendingJump, currentFacts, readFacts, timelineOnScroll, timeline])
   /** Take the reader to the Message a reply answers, when it is on screen. */
   const jumpToMessage = useCallback((messageRef: AgentTeamMessageRef): void => {
     const node = document.querySelector(`[data-message-ref="${messageRef}"]`)
-    if (node === null) return
-    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    if (!(node instanceof HTMLElement)) return
+    timeline.centerOn(node, { smooth: true })
     setFlashedMessage(messageRef)
-  }, [])
+  }, [timeline])
   // One stable callback for every row: TeamMessage is memoized, so a fresh
   // closure per row would re-render the whole timeline on any page render.
   const handleReply = useCallback((messageRef: AgentTeamMessageRef): void => { setReplyTarget(messageRef) }, [])
