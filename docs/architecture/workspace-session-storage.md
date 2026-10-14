@@ -2,7 +2,7 @@
 
 English | [中文](workspace-session-storage.zh.md)
 
-Team reads the existing Harness Workspace projection and does not create a second Workspace store or Session tree. The Client does not create Workspaces; users return to ordinary Session UI for that. Member sessions appear in the ordinary list, but cold Members cannot resume there because the ambient shipped preset registry declares no `team-member` definition; resume through the Team panel or restart with a healthy bundle.
+Team reads the existing Harness Workspace projection and does not create a second Workspace store or Session tree. The Client does not create Workspaces; users return to ordinary Session UI for that. Member sessions appear in the ordinary list, but cold Members cannot resume there because the ambient shipped preset registry declares no `team-member` definition; resume through the Team page or restart with a healthy bundle.
 
 For Workspace, Session, storage, persistence, or Thread Inbox changes, read the relevant Team source/tests and Harness `workspace.md`, `session.md`, `storage.md`, `persistence.md`, and `defensive-patterns.md`. The ledger remains the only Team authority, and recovery changes require failure-window or composition evidence.
 

@@ -29,11 +29,10 @@ Client remote service
 - Client 按 `code` 分支，绝不解析 message 文本。message 只是人类诊断，不是契约。未知 code 与未分类的 Host 异常以 `gateway/internal` 到达，因此每个分支都保留通用 fallback。attachment preview 把 not-found 结算为过期 chip。其它失败一律不缓存，下一次渲染重试 Host。
 
 ## Client plugin 和 slot composition
-Team browser plugin 是 external Client plugin。Shipped Shell 继续拥有 outer layout。Team 增加一个 additive footer entry 和一个 global panel，并动态 shadow 三个 seats：
+Team browser plugin 是 external Client plugin。Shipped Shell 继续拥有 outer layout。Team 增加一个 additive footer entry、自己不拥有 panel，并动态 shadow 三个 seats：
 
 ```text
 sidebar.footer.action       additive Team entry, order 100
-main (key agent-team)       Team panel, priority -100
 sidebar.workspaces          Team shadow, priority -100
 main (key conversation)     Team shadow, priority -100
 sidebar.settings            Team shadow, priority -100
@@ -45,14 +44,14 @@ Browser activation 顺序是：
 Client plugin apply
   → ctx.remote.$mount(agentTeamRemote)
   → ctx.inject(['remote.agentTeam'], ...)
-  → register Team entry, the panel it opens, and mode shadows
+  → register Team entry and mode shadows
 ```
 
 `dsh.client.inject` 描述 client module graph；它不保证 apply order、service readiness 或 slot declaration order。如果 declaration 可能稍后出现，使用 `ctx.slots.inject()`。registration 跟随 declaration lifetime，并随 owning fiber disposal。
 
-Team entry 与 Team mode 是同一件事：入口是侧边栏底部、shipped 设置行旁边的一行，选中它即选中 Team panel，而正是这次选中进入 mode；另一个 panel 拿走中栏即离开 mode。
+Team mode 拥有 conversation seat，而不是一个 panel：`TeamNavigation.mode` 是 mode 是否成立的唯一判据，它的 seat 是 key 为 `conversation` 的 `main` shadow —— 该 shadow 在 mode 成立且没有嵌入 Member Session 视图时绘制。侧边栏底部、shipped 设置行旁边的入口先清空占据中栏的 global panel，再翻转 mode；保持这个 selection 为空也是 Shell 右侧栏可用的前提，因为只要有任何 panel 被选中，Shell 就不画右栏里的 Session 内容。因此另一个 panel 拿走中栏即结束 mode。
 
-selection 为 null 时 Team 不介入：嵌入的 Member Session 视图会清空 panel 来独占中栏，mode 必须活过这一段。离开 mode 则由 mode 自己的退出动作清空 panel。恢复的 mode 会重新选中自己的 panel，除非挂载时已有 panel 被选中：那时那个 panel 保留中栏，mode 主动让位。
+selection 为 null 时 Team 不介入：嵌入的 Member Session 视图会清空 panel 来独占中栏，mode 必须活过这一段。恢复的 mode 通过自己的 seat 绘制，不选中任何东西；挂载时已有 panel 被选中时，那个 panel 保留中栏，mode 主动让位。
 
 Slot parent 的 `children` declaration 同时是 render site 和 render authority。两个存活的 parent entries 不能声明同一个 child slot。特别是 Team 的 `sidebar.workspaces` shadow 不得重新声明 shipped `sidebar.workspaces.directoryFlow`。即使 Team entry priority 更高，Harness SlotCore 也会拒绝这个 duplicate。不要复制 private WorkspaceBrowser、ConversationRoot、Shell 或 private CSS 来规避它。
 

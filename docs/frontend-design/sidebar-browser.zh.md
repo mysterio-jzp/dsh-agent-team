@@ -46,7 +46,7 @@ Agent 行上的破坏性动作按上下文分档。非创建 workspace 显示「
 
 嵌入的 Member Session 输入面就是 shipped composer 本身，不做任何修改。Team 不注册任何 member-session composer surface：没有 shadow、没有 trigger sources、没有 dock strip。键盘契约、命令与引用菜单、附件都与普通会话完全一致。
 
-Team 是 shell 的一个 global panel，而不是与它们并排的另一个座位。它的入口是侧边栏底部、设置行旁边的一行（`sidebar.footer.action`，order 100，用 Team 自己的名字与 shipped 的 preset 图形），选中它就是进入 mode。模式成立期间这一行就是出口：文案翻成「对话」，并携带 `data-team-action="leave"`。
+Team 占用 conversation 座位，而不是作为自己的 panel 与它并排：它的入口是侧边栏底部、设置行旁边的一行（`sidebar.footer.action`，order 100，用 Team 自己的名字与 shipped 的 preset 图形），选中它会清空任何被选中的 panel 并进入 mode，mode 的座位是 key 为 `conversation` 的 `main` shadow。模式成立期间这一行就是出口：文案翻成「对话」，并携带 `data-team-action="leave"`。
 
 Team 模式让 rail 与 shipped 新建会话按钮一同让位。两者指向的都是 profile 而不是 Team，于是模式成立时整条 rail 隐藏，离开即恢复。显隐不锚文案而锚模式属性与 shipped 的 `panelList` 类名子串，因为 SlotCore 摘不掉别的插件注册的列表行，入口文案又是本地化的；浏览器测试把转换两端都钉住。
 

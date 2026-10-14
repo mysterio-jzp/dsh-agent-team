@@ -55,7 +55,7 @@ import { TeamMemberAvatars } from './member-avatars.ts'
 import { TeamReplyCapabilities, type TeamReplyCapabilitiesFace } from './reply-capabilities.ts'
 import { TeamEnvironmentCheck } from './environment-check.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
-import { TEAM_PANEL_ID, TeamNavigation } from './navigation.ts'
+import { TEAM_ENTRY_ID, TeamNavigation } from './navigation.ts'
 import { TeamChangeStream, TeamReadStream, type TeamChangeListener, type TeamChangeScope } from './team-changes.ts'
 import { TeamQueries, type TeamQueryIdentity } from './team-queries.ts'
 import { TeamDraftStore } from './drafts.ts'
@@ -118,21 +118,39 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Leaving the mode hands the column back: the entry's own label, not a second control. */
-function leaveTeamFromUi(ctx: ClientContext, navigation: TeamNavigation): void {
-  navigation.actions().exitMemberSession()
-  // The panel clears first: the mode flip is what the ownership effect reads, and
-  // a still-selected Team panel at that instant would put the mode straight back.
+/**
+ * Enter the mode from its own entry. Team mode owns the conversation seat
+ * rather than a panel of its own, so the entry clears whatever global panel
+ * holds the column and then flips the mode: the mode's seat is the `main`
+ * shadow registered under the reserved 'conversation' key, and the shell draws
+ * the right rail only while no panel is selected. Clearing first also keeps the
+ * ownership effect below from reading the mode's own arrival as a foreign panel
+ * taking the column.
+ * @param ctx - client root context carrying the layout store.
+ * @param navigation - the mode store this entry flips.
+ */
+function enterTeamFromUi(ctx: ClientContext, navigation: TeamNavigation): void {
   ctx.layout.selectPanel(null)
+  navigation.actions().enterTeam()
+}
+
+/**
+ * Leaving the mode stands the Team seat down on its own: the mode is the one
+ * criterion the seat reads, so the entry only has to close an embedded Member
+ * Session view (its column ownership) and flip the mode.
+ * @param navigation - the mode store this entry flips.
+ */
+function leaveTeamFromUi(navigation: TeamNavigation): void {
+  navigation.actions().exitMemberSession()
   navigation.actions().leaveTeam()
 }
 
 /**
- * Register the Team's entry and the seat it opens: one action at the sidebar's
- * foot, beside the shipped Settings row, plus the main seat that action selects.
- * The main seat lives for the life of the client rather than with the mode,
- * because a panel can only be selected while its `main` entry is live; the mode
- * follows the selection instead (see the ownership effect in `applyUi`).
+ * Register the Team's entry at the sidebar's foot, beside the shipped Settings
+ * row. The entry owns no panel: the mode's own seat is the `main` shadow
+ * registered under the reserved 'conversation' key, which paints while
+ * `teamNavigation.mode` is 'team' and no Member Session view is embedded (see
+ * the panel-ownership effect in `applyUi`).
  */
 function registerTeamPanel(
   ctx: ClientContext,
@@ -147,37 +165,29 @@ function registerTeamPanel(
   const sharedRemotes = teamSharedRemotes(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities)
   ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({
     name: 'sidebar.footer.action',
-    id: TEAM_PANEL_ID,
+    id: TEAM_ENTRY_ID,
     order: 100,
     locale: NS,
     inject: () => ({
       navigation,
       ...navigation.actions(),
-      // Entering the mode is selecting the panel it is entered as: the ownership
-      // effect turns that selection into the mode, so the entry needs no second
-      // path in.
-      enterTeam: () => { ctx.layout.selectPanel(TEAM_PANEL_ID) },
-      // And the entry is the way out: the mode's own exit clears the selection
-      // before leaving, so the ownership effect cannot put the mode straight back.
-      leaveTeam: () => { leaveTeamFromUi(ctx, navigation) },
+      // The mode's own entry: it takes the column for the conversation seat the
+      // Team stands in for, and the mode is what the seat reads.
+      enterTeam: () => { enterTeamFromUi(ctx, navigation) },
+      // And the entry is the way out, closing an embedded Member Session view
+      // with it.
+      leaveTeam: () => { leaveTeamFromUi(navigation) },
     }),
   }, TeamFooterAction as never))
-  ctx.slots.inject('main', () => ctx.slots.register({
-    name: 'main',
-    key: TEAM_PANEL_ID,
-    priority: -100,
-    locale: NS,
-    inject: () => teamSeatInject(ctx, navigation, reads, sharedRemotes, 'main'),
-  }, TeamConversation as never))
 }
 
 /**
  * Embed one Member's Session in the conversation seat while staying in Team
- * mode: the conversation shadow stands down for Member Session views, so the
- * shipped conversation root renders the selected Member Session inside the Team
- * shell. The Team panel yields the column first — a panel that stayed selected
- * would render the Team page over the Member conversation — and the mode keeps
- * the sidebar, so the reader comes back to the Team page they left.
+ * mode: the Team seat stands down for Member Session views, so the shipped
+ * conversation root renders the selected Member Session inside the Team shell.
+ * The view clears the panel to own the column — a global panel that held it
+ * would paint over the Member conversation — and the mode keeps the sidebar, so
+ * the reader comes back to the Team page they left when the view closes.
  */
 function openMemberSessionImpl(
   ctx: ClientContext,
@@ -323,10 +333,10 @@ function teamSeatInject(
     navigation,
     ...extraInject?.(),
     ...navigation.actions(),
-    // Leaving Team mode is also leaving its panel: the entry is a
-    // destination, and the mode's own exit hands the column back to the
-    // conversation instead of leaving the Team panel selected behind it.
-    leaveTeam: () => { leaveTeamFromUi(ctx, navigation) },
+    // Leaving Team mode is also closing the Member Session view it may be
+    // showing: the entry is a destination, and the mode's own exit stands the
+    // Team seat down instead of leaving a Member view behind it.
+    leaveTeam: () => { leaveTeamFromUi(navigation) },
     ...sharedRemotes,
     ...(name === 'main' ? {
       // A committed durable read consumes this reader's mention markers; the
@@ -485,9 +495,6 @@ function applyUi(ctx: ClientContext): void {
       if (departed === undefined || snapshot.memberSessionId !== undefined) return
       if (currentMainSessionId(ctx) !== departed) return
       if (returnTo !== undefined && (ctx.sessions as unknown as ISessions).list.getSnapshot().byId[returnTo] !== undefined) ctx.uiWorkspace.openSession(returnTo)
-      // The Member view owned the column through a cleared panel; the Team page
-      // takes it back, so the mode is entered as the panel it names again.
-      if (snapshot.mode === 'team' && ctx.layout.panelInfo.getSnapshot().activePanelId === null) ctx.layout.selectPanel(TEAM_PANEL_ID)
     }
     const unsubscribe = navigation.subscribe(restore)
     return () => {
@@ -536,32 +543,19 @@ function applyUi(ctx: ClientContext): void {
   registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'main', TeamConversation as never, undefined, 'conversation')
   registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups }))
 
-  // The Team entry stands at the sidebar's foot and the panel it selects is what
-  // Team mode is entered as, so the selection and the mode are one fact: picking
-  // the entry enters the mode, and another panel taking the column leaves it. A
-  // null selection is left alone — a Member Session view clears the panel to own
-  // the column, and the mode has to survive that — while the mode's own exit
-  // clears the panel itself.
+  // One criterion says whether Team mode stands: `TeamNavigation.mode`, the
+  // store the Team seat's own registration reads. The mode owns the
+  // conversation seat instead of a panel, so a global panel taking the column is
+  // the one thing that ends it — the shell would paint that panel over the Team
+  // seat anyway, and the right rail it hides belongs to the conversation the
+  // Team stands in for. A null selection is left alone: that is the mode's own
+  // column, and a Member Session view clears the panel to own it in turn.
   ctx.effect(() => {
     const sync = (): void => {
-      const active = ctx.layout.panelInfo.getSnapshot().activePanelId
-      const snapshot = navigation.getSnapshot()
-      if (active === TEAM_PANEL_ID) {
-        // Asking for the Team page while a Member Session holds the column is a
-        // request for that page: the embedded view closes, the Team seat stays.
-        if (snapshot.memberSessionId !== undefined) navigation.actions().exitMemberSession()
-        if (snapshot.mode !== 'team') navigation.actions().enterTeam()
-        return
-      }
-      if (active !== null && snapshot.mode === 'team') navigation.actions().leaveTeam()
+      if (ctx.layout.panelInfo.getSnapshot().activePanelId === null) return
+      if (navigation.getSnapshot().mode === 'team') navigation.actions().leaveTeam()
     }
     const unsubscribe = ctx.layout.panelInfo.subscribe(sync)
-    // A reload keeps the mode it was left in, so it re-selects the panel that
-    // mode is entered as. A restored Member Session view owns the column
-    // instead: the panel stays clear until that view closes.
-    const restored = navigation.getSnapshot()
-    if (restored.mode === 'team' && restored.memberSessionId === undefined
-      && ctx.layout.panelInfo.getSnapshot().activePanelId === null) ctx.layout.selectPanel(TEAM_PANEL_ID)
     sync()
     return unsubscribe
   }, 'agent-team: panel ownership')

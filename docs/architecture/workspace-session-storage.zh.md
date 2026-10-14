@@ -4,7 +4,7 @@
 
 Team 读取现有 Harness Workspace projection。它不创建第二套 Workspace store 或 Session tree。当前 Client 不调用 `ctx.workspaces.pickDirectory()` 或 `ctx.workspaces.create()`。需要创建 Workspace 时，用户回到普通 Session UI。
 
-Member sessions 出现在普通 Session list 中。Host 保持 Member Agent live 时，它们可继续读取。Cold Member session（suspended Member、activation failed，或 Host 尚未完成 restoring）无法通过 generic Session UI resume。这条路径会在 ambient shipped preset registry 中解析 session 记录的 preset。这个 registry 刻意不声明 bundle-private `team-member` 定义。因此 resume 会明确失败，也不会用错误 composition 重建 history。请通过 Team panel resume 这些 Members，或使用健康的 bundle 重启。不要给 ambient registry 增加 Team fallback。
+Member sessions 出现在普通 Session list 中。Host 保持 Member Agent live 时，它们可继续读取。Cold Member session（suspended Member、activation failed，或 Host 尚未完成 restoring）无法通过 generic Session UI resume。这条路径会在 ambient shipped preset registry 中解析 session 记录的 preset。这个 registry 刻意不声明 bundle-private `team-member` 定义。因此 resume 会明确失败，也不会用错误 composition 重建 history。请通过 Team 页面 resume 这些 Members，或使用健康的 bundle 重启。不要给 ambient registry 增加 Team fallback。
 
 修改 Workspace、Session、storage、persistence 或 Thread Inbox 时，先读相关 Team source/tests。再读下面五篇：
 

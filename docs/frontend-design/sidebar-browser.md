@@ -34,7 +34,7 @@ The dialog body keeps one block rhythm — the mode switch is its first block, a
 
 The embedded Member Session input surface is the shipped composer itself, unmodified: the Team registers no member-session composer surface at all — no shadow, no trigger sources, no dock strip. The keyboard contract, command and reference menus, and attachments are exactly the ordinary session's.
 
-Team is one of the shell's global panels rather than a seat beside them. Its entry is a row at the sidebar's foot, beside Settings (`sidebar.footer.action`, order 100, wearing the Team's own name and the shipped preset glyph), and selecting it is what enters the mode. While the mode stands the same row is the way out: its label flips to 「对话 / Conversations」 and it carries `data-team-action="leave"`.
+Team takes the conversation seat rather than standing beside it as a panel of its own: its entry is a row at the sidebar's foot, beside Settings (`sidebar.footer.action`, order 100, wearing the Team's own name and the shipped preset glyph), and choosing it clears any selected panel and enters the mode, whose seat is the `main` shadow keyed `conversation`. While the mode stands the same row is the way out: its label flips to 「对话 / Conversations」 and it carries `data-team-action="leave"`.
 
 Team mode stands the rail down with the shipped New Session button. Both address the profile rather than the Team, so the whole rail hides while `html[data-agent-team-mode='team']` stands and returns the moment the mode is left. The rule keys off the mode attribute and the shipped `panelList` class substring, because SlotCore cannot withdraw another plugin's list row and the entry's label is localized; the browser test pins the transition from both sides.
 
