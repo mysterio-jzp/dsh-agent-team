@@ -354,6 +354,16 @@ export class MemberRuntime {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
+    // The Member's long description / persona, beside `memory.md` in the same
+    // private namespace. Scaffolded rather than required: the file is the
+    // prompt-side source of truth and never a ledger fact, so a Member without
+    // one behaves exactly as it did before this existed, and the Human's first
+    // open finds a file that is already there instead of creating it by hand.
+    try {
+      await writeFile(join(path, 'agent.md'), '# Member persona\n\nThis file is the long description of the Member it sits beside: who it is, how it works, and what it should prefer. It is read into that Member\'s own context only.\n\nIt is NOT the short description on the roster — that one lives in the ledger and the two never sync. Changes here apply the next time the Member is activated.\n\n## Role\n- <what this Member is for>\n', { flag: 'wx' })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
   }
 
   /** Irreversibly remove one Member: archive its Session and delete its private namespace. */
