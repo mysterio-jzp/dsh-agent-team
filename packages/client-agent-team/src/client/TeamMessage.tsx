@@ -2,7 +2,8 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { MarkdownText, Modal, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { AgentTeamChannelRef, AgentTeamClientMember, AgentTeamMemberId, AgentTeamMessageAttachment, AgentTeamMessageRef, AgentTeamTaskRef, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamChannelRef, AgentTeamClientMember, AgentTeamMemberId, AgentTeamMessageArtifact, AgentTeamMessageAttachment, AgentTeamMessageRef, AgentTeamTaskRef, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
+import type { UseResource } from '@deepseek-ai/dsh-client-resources/client'
 import type { TeamConversationProps } from './slots.ts'
 import type { ResolvedMemberRef } from './refs.ts'
 import { cachedAttachmentDataUrl, formatByteSize, loadAttachmentDataUrl } from './attachment-preview.ts'
@@ -12,6 +13,8 @@ import { formatMessageTime, isSingleBrandedRef, memberHue, planMessageBody, shou
 import { useAvatarImage } from './avatar-image.ts'
 import { useMemberAvatarUrl, type TeamMemberAvatars } from './member-avatars.ts'
 import { MemberAvatarSeat } from './MemberAvatarSeat.tsx'
+import { TeamArtifactCards } from './ArtifactCard.tsx'
+import type { TeamArtifactSeat } from './artifact-seat.ts'
 import css from './conversation.module.css'
 
 export interface TeamMessageProps {
@@ -58,6 +61,16 @@ export interface TeamMessageProps {
       hairline-separated entry stays self-identifying. */
   readonly showGroupedTime?: boolean
   readonly attachments?: readonly AgentTeamMessageAttachment[] | undefined
+  /**
+   * The artifacts this Message's author declared, as facts (a Session and a
+   * path). Absent or empty draws no card at all: the entry is something a
+   * Message either carries or does not.
+   */
+  readonly artifacts?: readonly AgentTeamMessageArtifact[] | undefined
+  /** The right-rail seat an artifact card opens its file through; absent draws no card. */
+  readonly artifactSeat?: TeamArtifactSeat | undefined
+  /** The shipped `file` provider's live state for one address, as every slot gets it. */
+  readonly useResource?: UseResource | undefined
   /** The Human's uploaded avatar; only the Human's own row draws it, and absent
    * or undecodable bytes draw the initial on the business-tinted chip. */
   readonly avatarUrl?: string | undefined
@@ -135,7 +148,7 @@ function initialOfName(name: string): string {
   return name.replace('@', '').slice(0, 1).toUpperCase()
 }
 
-export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, memberAvatarRef, memberAvatars, memberByHandle, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, loadAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
+export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, memberAvatarRef, memberAvatars, memberByHandle, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, artifacts, artifactSeat, useResource, loadAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
   const avatarStyle = human ? undefined : { '--team-avatar-hue': memberHue(memberId) } as CSSProperties
   // A seat may draw a picture, but only its own author's: the Human's row reads
   // the profile's bytes and a Member's row reads that Member's. The two sources
@@ -371,6 +384,12 @@ export const TeamMessage = memo(function TeamMessage({ senderName, memberId, hum
           {attachments !== undefined && attachments.length > 0 && <TeamAttachmentStrip
             attachments={attachments}
             {...(loadAttachment === undefined ? {} : { loadAttachment })}
+            {...(t === undefined ? {} : { t })}
+          />}
+          {artifacts !== undefined && artifactSeat !== undefined && useResource !== undefined && <TeamArtifactCards
+            artifacts={artifacts}
+            seat={artifactSeat}
+            useResource={useResource}
             {...(t === undefined ? {} : { t })}
           />}
           {children}

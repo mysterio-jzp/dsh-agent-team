@@ -3,7 +3,7 @@ import type { AgentTeamChangesRequest } from '@contexera/dsh-agent-team/types'
 import { afterEach, expect, vi } from 'vitest'
 import { useState } from 'react'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import type { AgentTeamAddMemberRequest, AgentTeamCreateChannelRequest, AgentTeamMemberDiagnostic, AgentTeamReplyRequest, AgentTeamSendMessageRequest, AgentTeamTask } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamAddMemberRequest, AgentTeamCreateChannelRequest, AgentTeamMemberDiagnostic, AgentTeamMessageArtifact, AgentTeamReplyRequest, AgentTeamSendMessageRequest, AgentTeamTask, AgentTeamThreadFact, AgentTeamThreadHistoryRequest } from '@contexera/dsh-agent-team/types'
 import { COMMON_NS, LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { en as commonEn, zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/index.ts'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -89,6 +89,7 @@ interface SeededMessage {
   readonly occurredAt: string
   readonly sender?: 'human' | 'agent'
   readonly mentions?: readonly string[]
+  readonly artifacts?: readonly AgentTeamMessageArtifact[]
 }
 
 export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: string; workspaceId?: string; initialChannels?: boolean; remainingUnreadCounts?: readonly number[]; seededMessages?: readonly SeededMessage[]; seedTaskRef?: string; seedThreadRef?: string; seedTaskStatus?: AgentTeamTask['status']; seedFollowers?: readonly string[]; humanProfile?: HumanProfileSeed; humanProfileFailure?: string; environment?: EnvironmentSeed; environmentFailure?: string; memberAvatarRefs?: Readonly<Record<string, string>>; memberAvatarBytes?: Readonly<Record<string, string>> }) {
@@ -101,6 +102,10 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   locale.register(COMMON_NS, { zh: commonZh, en: commonEn })
   runtime.ctx.provide('locale', locale)
   runtime.slots.installLocale(locale)
+  // The real Web composition installs the client-resources plugin. This focused
+  // slot harness supplies its standard hook as an empty registry would: none.
+  const noResourceProvider = createSnapshotStore({ status: 'none' as const, value: undefined, failure: undefined })
+  runtime.slots.provideRoot({ keyedHooks: { resource: () => noResourceProvider } })
   // The layout face: the shipped frame's panel store is the runtime's own
   // panelInfo source (the same one `usePanelInfo` reads), so a spec selects a
   // global panel exactly the way the shipped sidebar and plugin manager do.
@@ -215,7 +220,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   const seedTaskRef = options?.seedTaskRef ?? 'task:1'
   const seedThreadRef = options?.seedThreadRef ?? 'thread:1'
   let viewItems: Array<Record<string, unknown>> = (options?.seededMessages ?? []).map((seed, index) => ({
-    message: { messageRef: `message:seed-${index}`, channelRef: 'channel:engineering', threadRef: seedThreadRef, taskRef: seedTaskRef, sender: seed.sender === 'agent' ? 'member:builder' : 'member:human', body: seed.body, topLevel: true, sequence: index + 1, occurredAt: seed.occurredAt },
+    message: { messageRef: `message:seed-${index}`, channelRef: 'channel:engineering', threadRef: seedThreadRef, taskRef: seedTaskRef, sender: seed.sender === 'agent' ? 'member:builder' : 'member:human', body: seed.body, topLevel: true, sequence: index + 1, occurredAt: seed.occurredAt, ...(seed.artifacts === undefined ? {} : { artifacts: seed.artifacts }) },
     mentions: seed.mentions ?? [],
     task: { taskRef: seedTaskRef, channelRef: 'channel:engineering', threadRef: seedThreadRef,
       status: options?.seedTaskStatus ?? 'todo', resolution: 'open' },
@@ -398,12 +403,12 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
       readThroughSequence: (top.thread as { revision: number }).revision, remainingUnreadCount, consumedDirectMarkers: [],
     } }
   })
-  const loadThreadHistory = vi.fn(async ({ taskRef, threadRef }: { taskRef?: string; threadRef?: string }) => {
+  const loadThreadHistory = vi.fn(async ({ taskRef, threadRef }: AgentTeamThreadHistoryRequest) => {
     const top = viewItems.find(item => (threadRef !== undefined && (item.thread as { threadRef: string }).threadRef === threadRef)
       || (taskRef !== undefined && (item.task as { taskRef?: string } | undefined)?.taskRef === taskRef)) ?? viewItems[0]
     if (threadHistoryFailure !== undefined) return { ok: false as const, error: { message: threadHistoryFailure } }
     if (top === undefined) return { ok: false as const, error: { message: 'thread missing' } }
-    return { ok: true as const, value: { task: top.task, thread: top.thread, anchor: top.message, anchorMentions: [], claims: viewClaims, facts: [], cursor: 0, hasMore: false } }
+    return { ok: true as const, value: { task: top.task, thread: top.thread, anchor: top.message, anchorMentions: [], claims: viewClaims, facts: [] as AgentTeamThreadFact[], cursor: 0, hasMore: false } }
   })
   /** One-shot history-read failure; cleared by the next successful read. */
   let threadHistoryFailure: string | undefined

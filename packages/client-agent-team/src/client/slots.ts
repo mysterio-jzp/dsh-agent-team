@@ -70,6 +70,7 @@ import type { TeamDraftStore } from './drafts.ts'
 import type { TeamReplyCapabilitiesSource } from './reply-capabilities.ts'
 import type { TeamHumanIdentitySource } from './human-identity.ts'
 import type { TeamMemberAvatars } from './member-avatars.ts'
+import type { TeamArtifactSeat } from './artifact-seat.ts'
 
 export interface TeamNavigationSource {
   getSnapshot: () => TeamNavigationSnapshot
@@ -208,6 +209,13 @@ export type TeamConversationProps = PropsRuntime<'main'> & PropsLocale<'team'> &
   threadObservations: (request: AgentTeamThreadObservationsRequest) => Promise<RemoteResult<AgentTeamThreadObservations>>
   /** Agent-card session jump, shared by every slot; message member chips reuse it. */
   openMemberSession: (sessionId: AgentTeamClientMemberStatus['member']['sessionId'], reportFailure?: (message: string) => void) => void
+  /**
+   * The shell seat a Message artifact card opens its file through: the shipped
+   * right rail, addressed by the Session on screen. Cards read the file's own
+   * state with the `useResource` standard prop and never with a reader of their
+   * own, so the panel and the card cannot disagree about one file.
+   */
+  artifactSeat: TeamArtifactSeat
 }
 
 export type TeamSettingsProps = PropsRuntime<'sidebar.settings'> & PropsLocale<'team'> & {

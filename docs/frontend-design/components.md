@@ -19,6 +19,13 @@ Bodies over the 600-character formatter threshold use a persistent wrapper with 
 
 That same wrapper carries `data-document`: the threshold that folds a body also calls it a document, so its Markdown reads on the document rhythm (Typography table above) while short messages keep the chat grid, and the preview stays eight lines of whatever the content-font axis sets.
 
+## Message artifacts and Thread views
+Artifact cards point to files; they never copy file contents into the Message. Each names the file and path, and opens it in the shipped right rail. The card follows the file resource state: `loading` disables it; `none`, a failed read, or a rail refusal shows a reason and a copy-path action. The card for the file shown in the expanded rail carries `aria-current` and keeps a visible focus style.
+
+A Thread has three counted tabs: discussion, artifacts, and the Human to-do board. Only the selected tab is a Tab stop; Left/Right arrows wrap through the tabs. The artifact index merges available Message facts and older history newest first, with distinct loading, empty, and retryable history-error states. The composer remains mounted across views, preserving its draft.
+
+Changing views hides an open preview and clears the card's current state. If a preview was open, focus moves to the equivalent visible artifact card in the new view, or to the selected tab when none exists. Escape collapses the preview and returns focus to its trigger; collapsing the right rail also returns focus to that card. The shipped rail is the only file viewer.
+
 ## Message runs
 A run groups consecutive same-sender Messages and its Thread entry row. Activity and unread boundaries break runs. An entry row in a grouped row gets a hairline; ordinary continuation does not. Runs have no hover box, fill, shadow, or permanent border—only two-pixel spacing.
 

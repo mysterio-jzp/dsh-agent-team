@@ -48,6 +48,10 @@ interface TeamChannelPageProps {
   readonly resolveTaskRefs: TeamConversationProps['resolveTaskRefs']
   readonly resolveThreadRefs: TeamConversationProps['resolveThreadRefs']
   readonly openMemberSession: TeamConversationProps['openMemberSession']
+  /** The right-rail seat one Message artifact card opens its file through. */
+  readonly artifactSeat: TeamConversationProps['artifactSeat']
+  /** The shipped `file` provider's live state, threaded down to the same cards. */
+  readonly useResource: TeamConversationProps['useResource']
   readonly backToChannels: TeamConversationProps['backToChannels']
   readonly t: TeamConversationProps['t']
 }
@@ -100,7 +104,7 @@ function unreadCounts(inbox: AgentTeamInbox): ReadonlyMap<AgentTeamThreadRef, nu
   return new Map(inbox.items.filter(item => item.unreadCount > 0).map(item => [item.thread.threadRef, item.unreadCount]))
 }
 
-export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvatarUrl, memberAvatars, loadChannels, subscribeChanges, loadMembers, loadInbox, drafts, putAttachment, getAttachment, sendMessage, selectThread, selectChannel, backToChannels, resolveTaskRefs, resolveThreadRefs, openMemberSession, t }: TeamChannelPageProps) {
+export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvatarUrl, memberAvatars, loadChannels, subscribeChanges, loadMembers, loadInbox, drafts, putAttachment, getAttachment, sendMessage, selectThread, selectChannel, backToChannels, resolveTaskRefs, resolveThreadRefs, openMemberSession, artifactSeat, useResource, t }: TeamChannelPageProps) {
   const [view, setView] = useState<AgentTeamView>()
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [unreadByThread, setUnreadByThread] = useState<ReadonlyMap<AgentTeamThreadRef, number>>(new Map())
@@ -434,6 +438,9 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
                 body={item.message.body}
                 attachments={item.message.attachments}
                 loadAttachment={getAttachment}
+                artifacts={item.message.artifacts}
+                artifactSeat={artifactSeat}
+                useResource={useResource}
                 t={t}
                 occurredAt={item.message.occurredAt}
                 mentionNames={mentionNamesOf(item.mentions, handleByMember, humanName)}

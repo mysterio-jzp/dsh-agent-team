@@ -24,6 +24,7 @@ const UI06_SHOTS = join(BROWSER_ARTIFACTS, 'ui-06')
 const UI07_SHOTS = join(BROWSER_ARTIFACTS, 'ui-07')
 const UI08_SHOTS = join(BROWSER_ARTIFACTS, 'ui-08')
 const UI09_SHOTS = join(BROWSER_ARTIFACTS, 'ui-09')
+const UI10_SHOTS = join(BROWSER_ARTIFACTS, 'ui-10')
 let scaffold: WebScaffold | undefined
 let browser: Browser | undefined
 
@@ -120,6 +121,55 @@ async function resolveAliasColor(page: Page, alias: string): Promise<string> {
     probe.remove()
     return resolved
   }, alias)
+}
+
+/** Measure one rendered text color against its composited runtime background. */
+async function measureRuntimeTextContrast(page: Page, selector: string): Promise<{
+  readonly foreground: string
+  readonly background: string
+  readonly ratio: number
+}> {
+  return page.evaluate(sel => {
+    const element = document.querySelector(sel)
+    if (element === null) throw new Error(`contrast target not found: ${sel}`)
+    type RGBA = [number, number, number, number]
+    const parse = (value: string): RGBA => {
+      const parts = value.match(/[0-9.]+/g)?.map(Number) ?? []
+      return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0, parts[3] ?? 1]
+    }
+    const composite = (source: RGBA, behind: RGBA): RGBA => {
+      const alpha = source[3] + behind[3] * (1 - source[3])
+      if (alpha === 0) return [0, 0, 0, 0]
+      return [
+        (source[0] * source[3] + behind[0] * behind[3] * (1 - source[3])) / alpha,
+        (source[1] * source[3] + behind[1] * behind[3] * (1 - source[3])) / alpha,
+        (source[2] * source[3] + behind[2] * behind[3] * (1 - source[3])) / alpha,
+        alpha,
+      ]
+    }
+    const backgrounds: RGBA[] = []
+    for (let node: Element | null = element; node !== null; node = node.parentElement) {
+      const color = parse(getComputedStyle(node).backgroundColor)
+      if (color[3] > 0) backgrounds.push(color)
+    }
+    let background: RGBA = [255, 255, 255, 1]
+    for (const layer of backgrounds.reverse()) background = composite(layer, background)
+    const foreground = parse(getComputedStyle(element).color)
+    const foregroundRgb = composite(foreground, background)
+    const luminance = (color: RGBA): number => {
+      const linear = (channel: number): number => {
+        const normalized = channel / 255
+        return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4
+      }
+      return 0.2126 * linear(color[0]) + 0.7152 * linear(color[1]) + 0.0722 * linear(color[2])
+    }
+    const foregroundLuminance = luminance(foregroundRgb)
+    const backgroundLuminance = luminance(background)
+    const ratio = (Math.max(foregroundLuminance, backgroundLuminance) + 0.05)
+      / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05)
+    const print = (color: RGBA): string => `rgb(${Math.round(color[0])}, ${Math.round(color[1])}, ${Math.round(color[2])})`
+    return { foreground: print(foregroundRgb), background: print(background), ratio }
+  }, selector)
 }
 
 /**
@@ -277,6 +327,7 @@ async function installLocalBundle(clearArtifacts = true): Promise<void> {
   await mkdir(UI07_SHOTS, { recursive: true })
   await mkdir(UI08_SHOTS, { recursive: true })
   await mkdir(UI09_SHOTS, { recursive: true })
+  await mkdir(UI10_SHOTS, { recursive: true })
 }
 
 it('drives the complete opt-in Agent Team journey in real Web', async () => {
@@ -3410,5 +3461,168 @@ it('configures the jev endpoint from the Team page in real Web', async () => {
   await page.setViewportSize({ width: 1440, height: 960 })
   await settleLayout(page)
 
+  expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
+}, 180_000)
+
+/**
+ * The Team browser receives a real Message artifact claimed from a persisted
+ * `deliverables/presented` Session event. This fixture writes the event shape a
+ * successful Harness `present` records; it intentionally proves delivery and
+ * preview, not model-tool invocation.
+ */
+it('opens a persisted present artifact from a Team Message in real Web', async () => {
+  await installLocalBundle(false)
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'artifact-preview')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('artifact-preview')
+  await channelDialog.getByLabel('说明').fill('Persisted artifact preview E2E')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  await page.getByRole('button', { name: '# artifact-preview', exact: true }).click()
+  await page.getByRole('heading', { name: '# artifact-preview', exact: true }).waitFor()
+
+  await page.getByRole('button', { name: '添加 Agent', exact: true }).click()
+  const memberDialog = page.getByRole('dialog', { name: '添加 Agent' })
+  await memberDialog.getByLabel('名称').fill('artifact-author')
+  await memberDialog.getByLabel('说明').fill('Publishes a real file artifact')
+  await memberDialog.getByRole('button', { name: '创建 Agent' }).click()
+  await page.getByText('artifact-author', { exact: true }).waitFor({ timeout: 20_000 })
+
+  const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
+  const channel = scaffold.ctx.agentTeam.view({ workspaceId }).channels.find((row: { name: string }) => row.name === 'artifact-preview')!
+  const memberStatus = scaffold.ctx.agentTeam.members({ workspaceId }).find((row: { member: { handle: string } }) => row.member.handle === 'artifact-author')!
+  const author = scaffold.ctx.agents.get(memberStatus.member.sessionId)!
+  await expect.poll(() => scaffold!.ctx.agentTeam.memberForAgent(author) !== undefined, { timeout: 20_000 }).toBe(true)
+  const sessionCwd = author.session.header.cwd
+  if (sessionCwd === undefined) throw new Error('artifact author Session has no workspace cwd')
+  const artifactDirectory = join(sessionCwd, 'deliverables')
+  await mkdir(artifactDirectory, { recursive: true })
+  const artifactPath = join(artifactDirectory, 'artifact-preview.md')
+  const artifactBody = '# Persisted artifact preview\n\nREAL-PRESENTED-ARTIFACT-CONTENT\n'
+  await writeFile(artifactPath, artifactBody, 'utf8')
+  const turn = author.session.snapshotEvents().reduce((latest, event) => event.type === 'turn/start' ? Math.max(latest, event.data.turn) : latest, 0) + 1
+  const callId = 'artifact-ui-e2e-present'
+  author.session.append('turn/start', { turn })
+  author.session.append('deliverables/presented', {
+    turn,
+    callId: callId as never,
+    files: [{ path: artifactPath, description: 'Persisted E2E artifact' }],
+  })
+  author.session.append('turn/end', { turn, reason: { kind: 'completed' } })
+  const persistedPresentation = author.session.snapshotEvents().find(event => event.type === 'deliverables/presented' && event.data.turn === turn)
+  expect(persistedPresentation?.data.files).toEqual([{ path: artifactPath, description: 'Persisted E2E artifact' }])
+
+  const sent = await scaffold.ctx.agentTeam.sendMessageForAgent(author, {
+    requestId: 'artifact-ui-e2e-message' as never,
+    workspaceId,
+    channelRef: channel.channelRef,
+    asTask: true,
+    body: 'REAL-PRESENTED-ARTIFACT-MESSAGE: inspect the attached artifact in the right rail.',
+    recipients: [scaffold.ctx.agentTeam.status().humanMemberId],
+  })
+  if (sent.kind !== 'committed') throw new Error(`artifact E2E message was not committed: ${sent.kind}`)
+  expect(sent.message.artifacts).toEqual([{
+    sessionId: memberStatus.member.sessionId,
+    path: artifactPath,
+    description: 'Persisted E2E artifact',
+  }])
+
+  const taskEntry = page.locator('[data-thread-entry] button').filter({ hasText: 'Task #1' })
+  await expect.poll(() => taskEntry.count(), { timeout: 20_000 }).toBe(1)
+  await taskEntry.click()
+  await page.locator(`[data-team-thread="${sent.thread.threadRef}"]`).waitFor({ timeout: 20_000 })
+  const artifactTab = page.locator('[role="tab"][data-view="artifacts"]')
+  await expect.poll(() => artifactTab.textContent()).toContain('产物 1')
+  await artifactTab.click()
+  const artifactCard = page.locator('button[data-artifact-address]').first()
+  await expect.poll(() => artifactCard.textContent()).toContain('artifact-preview.md')
+  const artifactAddress = await artifactCard.getAttribute('data-artifact-address')
+  expect(artifactAddress).toContain(artifactPath)
+  const [metaContrast, panelTitleContrast] = await Promise.all([
+    measureRuntimeTextContrast(page, '[class*="aMeta"]'),
+    measureRuntimeTextContrast(page, '[class*="artifactPanelTitle"]'),
+  ])
+  const secondaryLabelColor = await resolveAliasColor(page, '--dsw-alias-label-secondary')
+  expect(metaContrast.foreground).toBe(secondaryLabelColor)
+  expect(panelTitleContrast.foreground).toBe(secondaryLabelColor)
+  expect(metaContrast.ratio).toBeGreaterThanOrEqual(4.5)
+  expect(panelTitleContrast.ratio).toBeGreaterThanOrEqual(4.5)
+  console.log('Artifact light runtime contrast:', JSON.stringify({ secondaryLabelColor, metaContrast, panelTitleContrast }))
+  const lightBaseColor = await resolveAliasColor(page, '--dsw-alias-bg-base')
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await expect.poll(() => resolveAliasColor(page, '--dsw-alias-bg-base'), { timeout: 10_000 }).not.toBe(lightBaseColor)
+  const [darkMetaContrast, darkPanelTitleContrast] = await Promise.all([
+    measureRuntimeTextContrast(page, '[class*="aMeta"]'),
+    measureRuntimeTextContrast(page, '[class*="artifactPanelTitle"]'),
+  ])
+  const darkSecondaryLabelColor = await resolveAliasColor(page, '--dsw-alias-label-secondary')
+  expect(darkMetaContrast.foreground).toBe(darkSecondaryLabelColor)
+  expect(darkPanelTitleContrast.foreground).toBe(darkSecondaryLabelColor)
+  expect(darkMetaContrast.ratio).toBeGreaterThanOrEqual(4.5)
+  expect(darkPanelTitleContrast.ratio).toBeGreaterThanOrEqual(4.5)
+  console.log('Artifact dark runtime contrast:', JSON.stringify({ darkSecondaryLabelColor, darkMetaContrast, darkPanelTitleContrast }))
+  await page.screenshot({ path: join(UI10_SHOTS, 'artifact-index-dark.png'), fullPage: true })
+  await page.emulateMedia({ colorScheme: 'light' })
+  await expect.poll(() => resolveAliasColor(page, '--dsw-alias-bg-base'), { timeout: 10_000 }).toBe(lightBaseColor)
+  await artifactCard.click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor()
+  await expect.poll(() => page.getByText('REAL-PRESENTED-ARTIFACT-CONTENT', { exact: false }).isVisible(), { timeout: 20_000 }).toBe(true)
+  await settleLayout(page)
+  await page.screenshot({ path: join(UI10_SHOTS, 'artifact-preview-desktop.png'), fullPage: true })
+
+  // Escape closes the real preview and returns focus to the card that opened it.
+  await page.keyboard.press('Escape')
+  await page.locator('[data-sidebar-right-open="true"]').waitFor({ state: 'detached' })
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-artifact-address'))).toBe(artifactAddress)
+  await expect.poll(() => page.locator('button[data-artifact-address][aria-current="true"]').count()).toBe(0)
+
+  // The shipped right-rail collapse button is the close control; it follows the
+  // same focus/current contract as Escape.
+  await artifactCard.click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor()
+  await page.locator('button[data-sidebar-right-toggle]').click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor({ state: 'detached' })
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-artifact-address'))).toBe(artifactAddress)
+  await expect.poll(() => page.locator('button[data-artifact-address][aria-current="true"]').count()).toBe(0)
+
+  // Discussion has an equivalent inline card, so the view switch focuses that
+  // card; switching to To-dos has no equivalent and focuses the selected tab.
+  await artifactCard.click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor()
+  const discussionTab = page.locator('[role="tab"][data-view="thread"]')
+  await discussionTab.click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor({ state: 'detached' })
+  await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('data-artifact-address'))).toBe(artifactAddress)
+  await expect.poll(() => page.locator('button[data-artifact-address][aria-current="true"]').count()).toBe(0)
+
+  await artifactTab.click()
+  const currentArtifactCard = page.locator('button[data-artifact-address]').first()
+  await currentArtifactCard.click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor()
+  const boardTab = page.locator('[role="tab"][data-view="board"]')
+  await boardTab.click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor({ state: 'detached' })
+  await expect.poll(() => page.evaluate(() => (document.activeElement as HTMLElement | null)?.id)).toBe('team-view-tab-board')
+  await expect.poll(() => page.locator('button[data-artifact-address][aria-current="true"]').count()).toBe(0)
+
+  // Capture the actual preview at the required narrow viewport as well.
+  await artifactTab.click()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await settleLayout(page)
+  const narrowCard = page.locator('button[data-artifact-address]').first()
+  await narrowCard.scrollIntoViewIfNeeded()
+  await narrowCard.click()
+  await page.locator('[data-sidebar-right-open="true"]').waitFor()
+  await expect.poll(() => page.getByText('REAL-PRESENTED-ARTIFACT-CONTENT', { exact: false }).isVisible(), { timeout: 20_000 }).toBe(true)
+  await settleLayout(page)
+  await page.screenshot({ path: join(UI10_SHOTS, 'artifact-preview-narrow.png'), fullPage: true })
+  const narrowWidth = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }))
+  expect(narrowWidth.scrollWidth).toBeLessThanOrEqual(narrowWidth.clientWidth)
   expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
 }, 180_000)

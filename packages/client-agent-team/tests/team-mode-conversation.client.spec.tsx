@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.setConfig({ testTimeout: 30_000 })
 import { cleanup, fireEvent, waitFor, within } from '@testing-library/react'
 import { usePinnedBrowserLanguages } from '@deepseek-ai/dsh-client-test-runtime'
+import type { AgentTeamMessageArtifact, AgentTeamThreadFact } from '@contexera/dsh-agent-team/types'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { runtimeWithTeam } from './harness.tsx'
 import { TEAM_DRAFTS_STORAGE_KEY } from '../src/client/drafts.ts'
 
@@ -107,6 +109,65 @@ describe('Team conversation surfaces', () => {
     fireEvent.click(b.view.getByRole('button', { name: '返回频道' }))
     expect(await b.view.findByRole('heading', { name: '# backend' })).toBeTruthy()
     await waitFor(() => expect(b.view.queryByText('agent reply')).toBeNull())
+    await b.runtime.dispose()
+  })
+
+  it('lists discussion artifacts newest first and keeps the count and keyboard tab path accessible', async () => {
+    const older: AgentTeamMessageArtifact = { sessionId: 'session:builder' as SessionId, path: '/workspace/deliverables/older.md' }
+    const newer: AgentTeamMessageArtifact = { sessionId: 'session:builder' as SessionId, path: '/workspace/deliverables/newer.md' }
+    const oldest: AgentTeamMessageArtifact = { sessionId: 'session:builder' as SessionId, path: '/workspace/deliverables/oldest-history.md' }
+    const b = await runtimeWithTeam({
+      mode: 'team', workspaceId: 'w1', initialChannels: true,
+      seededMessages: [
+        { body: 'older artifact', occurredAt: '2026-08-20T09:00:00.000Z', artifacts: [older] },
+        { body: 'newer artifact', occurredAt: '2026-08-21T09:00:00.000Z', artifacts: [newer] },
+      ],
+    })
+    const baseHistory = b.loadThreadHistory.getMockImplementation()
+    expect(baseHistory).toBeDefined()
+    const oldestHistoryFact: AgentTeamThreadFact = {
+      kind: 'message',
+      sequence: 0,
+      message: {
+        messageRef: 'message:oldest-history' as never,
+        channelRef: 'channel:engineering' as never,
+        threadRef: 'thread:1' as never,
+        taskRef: 'task:1' as never,
+        sender: 'member:human' as never,
+        body: 'oldest artifact',
+        artifacts: [oldest],
+        topLevel: true,
+        sequence: 0,
+        occurredAt: '2026-08-19T09:00:00.000Z',
+      },
+      mentions: [],
+      occurredAt: '2026-08-19T09:00:00.000Z',
+    }
+    b.loadThreadHistory.mockImplementation(async request => {
+      const result = await baseHistory!(request)
+      if (!result.ok) return result
+      if (request.beforeSequence === undefined) {
+        return { ...result, value: { ...result.value, cursor: 1, hasMore: true } }
+      }
+      return { ...result, value: { ...result.value, facts: [oldestHistoryFact], cursor: 0, hasMore: false } }
+    })
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    fireEvent.click((await b.view.findAllByRole('button', { name: '打开 Task #1' }))[0]!)
+
+    const discussionTab = await b.view.findByRole('tab', { name: '讨论 2' })
+    const artifactsTab = await b.view.findByRole('tab', { name: '产物 2' })
+    fireEvent.keyDown(discussionTab, { key: 'ArrowRight' })
+    await waitFor(() => expect(artifactsTab.getAttribute('aria-selected')).toBe('true'))
+    expect(document.activeElement).toBe(artifactsTab)
+    await waitFor(() => expect(b.view.getByRole('tab', { name: '产物 3' })).toBeTruthy())
+
+    const panel = b.view.container.querySelector('#team-view-panel-artifacts')!
+    const cards = Array.from(panel.querySelectorAll<HTMLButtonElement>('[data-artifact-address]'))
+    expect(cards).toHaveLength(3)
+    expect(cards[0]?.textContent).toContain('newer.md')
+    expect(cards[1]?.textContent).toContain('older.md')
+    expect(cards[2]?.textContent).toContain('oldest-history.md')
+    expect(b.loadThreadHistory.mock.calls.some(([request]) => request.beforeSequence !== undefined)).toBe(true)
     await b.runtime.dispose()
   })
 

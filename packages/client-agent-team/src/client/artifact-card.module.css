@@ -1,0 +1,152 @@
+/* --------------------------------------------------------------------------
+ * 产物条目（需求 8）：Message 气泡内的一张卡，点击 ⇒ 右侧面板打开该文件。
+ *
+ * 形态冻结在原型 `.scratch/active/proto-c-artifact-jump/prototype/
+ * artifact-jump.html`（`.artifactCard`）；这里把原型的 token 兜底值换成真实
+ * DSH token（映射表：`proto-kit/tokens.css` 每行的注释）。
+ *
+ * 一处**有意偏离**原型字面量：失败态的小字不用 `state-warn-label`（该 token
+ * 在 proto-kit 里明写「⛔ 只作描边，不作小字」；作小字在 warn-tertiary 上只有
+ * 2.59:1），改用 proto-kit 派生的 amber 深档 `rgb(120 53 15)`（同一底上
+ * 8.39:1）。这是判据「本批新增的面必须达标」的要求。
+ *
+ * ⚠ 派生档是**本地自定义属性、两档都要给**：浅色值 `rgb(120 53 15)` 落在深色底
+ * 上是暗对暗，所以深色档交回 shipped 的 `state-warn-label`（它深色档的值
+ * 247,173,49 配 warn-tertiary 深底 8.08:1）。两档都走产品自己的开关
+ * `body[data-ds-dark-theme]`（由 `ui-theme/src/boot-theme.ts` 装上，harness 各
+ * `.module.css` 同形，例：`ui-plan/src/client/PlanPreview.module.css:23`）。
+ * ------------------------------------------------------------------------ */
+
+.artifactList {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  min-width: 0;
+}
+.artifactPanel {
+  align-content: start;
+  box-sizing: border-box;
+  display: grid;
+  gap: 8px;
+  margin: 0 auto;
+  max-width: 820px;
+  min-width: 0;
+  padding: 10px 16px 16px;
+  width: 100%;
+}
+.artifactPanelTitle {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 16px;
+  margin: 0;
+}
+.artifactPanelList { gap: 10px; margin-top: 0; }
+.artifactItem {
+  /* Warning ink: derived deep amber in the light theme, the shipped token in the
+     dark one — see the header. Declared here so both the icon and the warn block
+     read one value. */
+  --team-artifact-warn-ink: rgb(120 53 15);
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+:global(body[data-ds-dark-theme]) .artifactItem { --team-artifact-warn-ink: var(--dsw-alias-state-warn-label); }
+.artifactCard {
+  background: var(--dsw-alias-bg-base);
+  border: 0;
+  border-radius: var(--dsw-radius-md, 12px);
+  box-shadow: 0 0 0 1px var(--dsw-alias-border-l2), var(--dsw-elevation-soft);
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 2px 10px;
+  /* The middle track is the only one that may shrink: without `minmax(0, 1fr)`
+     a long path sets a min-content floor and pushes the card past the bubble. */
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  margin: 0;
+  padding: 8px 10px;
+  text-align: left;
+  width: 100%;
+}
+.artifactCard:hover { background: var(--dsw-alias-interactive-bg-hover); }
+/* "this is the file the panel is showing" — a ring, so the card stays the same
+   material whether or not it is current. */
+.artifactCard[aria-current='true'] {
+  box-shadow: 0 0 0 1.5px var(--dsw-alias-state-business-primary);
+}
+.artifactCard:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+/* Reading: the card states it cannot vouch for the file yet, and takes no click. */
+.artifactCard[disabled] { cursor: default; }
+.aIcon {
+  align-items: center;
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  border-radius: var(--dsw-radius-sm, 8px);
+  color: var(--dsw-alias-label-secondary);
+  display: flex;
+  font-size: 11px;
+  font-weight: 600;
+  grid-row: span 2;
+  height: 28px;
+  justify-content: center;
+  width: 28px;
+}
+.aIcon[data-tone='warn'] {
+  background: var(--dsw-alias-state-warn-tertiary);
+  color: var(--team-artifact-warn-ink);
+}
+.aTitle {
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aMeta {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aOpen {
+  align-self: center;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  grid-row: span 2;
+  justify-self: end;
+}
+/* Why a card cannot show its file, and the way out. */
+.artifactWarn {
+  background: var(--dsw-alias-state-warn-tertiary);
+  border-radius: var(--dsw-radius-sm, 8px);
+  color: var(--team-artifact-warn-ink);
+  display: grid;
+  font-size: 12.5px;
+  gap: 6px;
+  justify-items: start;
+  padding: 10px 12px;
+}
+.artifactWarn b { color: var(--dsw-alias-label-primary); }
+.artifactCopy {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  border: 0;
+  border-radius: var(--dsw-radius-xs, 4px);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 8px;
+}
+.artifactCopy:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}

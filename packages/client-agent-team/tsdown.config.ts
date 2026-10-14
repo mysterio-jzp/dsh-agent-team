@@ -32,10 +32,28 @@ const teamRemote = {
   },
 }
 
+// The Workspace path wire layer is one of the preset's INLINE_SAFE packages —
+// a `file:` address is a pure fold with no runtime identity to share, so the
+// bundle inlines it rather than asking the module table for a specifier it
+// cannot answer for. This bundle's build facade points the specifier at the
+// Harness declaration, and that emitted `.d.ts` keeps the source spelling of
+// its own relative import (`./file-address.ts`), which a declaration file
+// cannot answer for: rolldown fails to resolve it. The sibling source is what
+// the runtime facade resolves the same package to, so the entry is pinned here,
+// exactly as the Remote specifier above is, and the wire layer compiles from
+// the same source the Harness builds for its clients.
+const workspacePathTarget = resolve(harnessDir, 'packages/util/workspace-path/src/index.ts')
+const workspacePath = {
+  name: 'dsh-agent-team-workspace-path-entrypoint',
+  resolveId(source: string) {
+    return source === '@deepseek-ai/dsh-util-workspace-path' ? workspacePathTarget : null
+  },
+}
+
 export default async (options: Parameters<typeof bundle>[0]) => {
   const configs = await bundle(options)
   return configs.map(entry => ({
     ...entry,
-    plugins: [...(entry.plugins ?? []), teamRemote],
+    plugins: [...(entry.plugins ?? []), workspacePath, teamRemote],
   }))
 }

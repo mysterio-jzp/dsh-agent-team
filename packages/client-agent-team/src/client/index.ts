@@ -44,6 +44,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-client-resources/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import { TeamSettingsSection } from './TeamSettingsSection.tsx'
 import { TeamContextJudgeCheck } from './context-judge.ts'
 import { TeamJudgeForm, TeamJudgeFormSeat, type TeamJudgeSection } from './judge-form.ts'
@@ -52,6 +54,7 @@ import { TeamHumanIdentity } from './human-identity.ts'
 // by every seat that draws that Member. Kept apart from the Human's identity so
 // a row cannot reach the wrong person's bytes.
 import { TeamMemberAvatars } from './member-avatars.ts'
+import { createTeamArtifactSeat, type TeamArtifactSeat } from './artifact-seat.ts'
 import { TeamReplyCapabilities, type TeamReplyCapabilitiesFace } from './reply-capabilities.ts'
 import { TeamEnvironmentCheck } from './environment-check.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
@@ -104,6 +107,23 @@ function currentMainSessionId(ctx: ClientContext): AgentTeamClientMemberStatus['
  * target.
  */
 const openedMemberSessions = new WeakMap<ClientContext, Set<string>>()
+
+/**
+ * One artifact seat per Client, built on first use rather than at apply: the
+ * shipped right rail is a separate client module and `dsh.client.inject`
+ * promises no activation order, so the service is read when the Team seat is
+ * first injected. A shell without the rail still gets a seat, which answers
+ * every card with the readable `no-session` failure instead of throwing.
+ */
+const artifactSeats = new WeakMap<ClientContext, TeamArtifactSeat>()
+
+function artifactSeatOf(ctx: ClientContext): TeamArtifactSeat {
+  const existing = artifactSeats.get(ctx)
+  if (existing !== undefined) return existing
+  const seat = createTeamArtifactSeat(ctx.get('sidebarRight'))
+  artifactSeats.set(ctx, seat)
+  return seat
+}
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -545,7 +565,7 @@ function applyUi(ctx: ClientContext): void {
   registerTeamPanel(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities)
 
   registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.workspaces', TeamWorkspaceBrowser as never)
-  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'main', TeamConversation as never, undefined, 'conversation')
+  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'main', TeamConversation as never, () => ({ artifactSeat: artifactSeatOf(ctx) }), 'conversation')
   registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups, memberAvatars }))
 
   // One criterion says whether Team mode stands: `TeamNavigation.mode`, the

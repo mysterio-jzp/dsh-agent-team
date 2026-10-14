@@ -2,8 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import type { AgentTeamChannelRef, AgentTeamMemberId, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { zh } from '../src/client/locales.ts'
+import type { ResourceSnapshot, UseResource } from '@deepseek-ai/dsh-client-resources/client'
 import type { TeamConversationProps } from '../src/client/slots.ts'
+import { createTeamArtifactSeat } from '../src/client/artifact-seat.ts'
 import { rememberResolvedThreadRef, type ResolvedThreadRef } from '../src/client/refs.ts'
 import { TeamMessage } from '../src/client/TeamMessage.tsx'
 
@@ -526,5 +529,25 @@ describe('TeamMessage reply quote and action', () => {
     } finally {
       Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
     }
+  })
+})
+
+describe('TeamMessage artifact entry', () => {
+  it('draws the Message\'s artifact cards only when the rail seat and the resource hook travel with them', () => {
+    const seat = createTeamArtifactSeat(undefined)
+    const useResource = (() => ({ status: 'live', value: {}, failure: undefined })) as unknown as UseResource
+    const artifact = { sessionId: 'session:builder' as SessionId, path: '/work/alpha/deliverables/run/report.md' }
+    // All three facts: the entry is drawn from the Message's own artifacts, and
+    // a shell that hands over no seat draws no card rather than a dead one.
+    const wired = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="done" artifacts={[artifact]} artifactSeat={seat} useResource={useResource} t={t} />,
+    )
+    expect(wired.container.querySelector('[data-artifacts]')?.getAttribute('data-artifacts')).toBe('1')
+    expect(wired.container.textContent).toContain('report.md')
+    cleanup()
+    const bare = render(
+      <TeamMessage senderName="Builder" memberId={'member:builder' as AgentTeamMemberId} human={false} body="done" artifacts={[artifact]} t={t} />,
+    )
+    expect(bare.container.querySelector('[data-artifacts]')).toBeNull()
   })
 })

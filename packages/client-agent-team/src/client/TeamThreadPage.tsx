@@ -21,6 +21,7 @@ import type { TeamDraftKey, TeamDraftStore } from './drafts.ts'
 import { TeamComposer } from './TeamComposer.tsx'
 import { diagnosticText, TeamPresenceDot } from './TeamPresenceDot.tsx'
 import { TeamMessage } from './TeamMessage.tsx'
+import { TeamArtifactCards } from './ArtifactCard.tsx'
 import { TeamRunDivider } from './TeamRunDivider.tsx'
 import { firstSentence, formatActivity, formatClaimState, formatRiskClass, formatTaskStatus, formatTaskTitle, mentionNameOf, mentionNamesOf, mentionedMemberIds, mentionsHuman, taskStatusDot, type MentionHandle } from './team-formatters.ts'
 import { TeamStateDot } from './TeamStateDot.tsx'
@@ -35,6 +36,7 @@ import { rosterChannelName, rosterMember } from './refs.ts'
 import css from './conversation.module.css'
 import threadCss from './thread.module.css'
 import todoCss from './human-todos.module.css'
+import artifactCss from './artifact-card.module.css'
 
 interface TeamThreadPageProps {
   readonly workspaceId: WorkspaceId
@@ -67,6 +69,10 @@ interface TeamThreadPageProps {
   readonly loadHumanTodos: TeamConversationProps['loadHumanTodos']
   readonly changeHumanTodo: TeamConversationProps['changeHumanTodo']
   readonly openMemberSession: TeamConversationProps['openMemberSession']
+  /** The right-rail seat one Message artifact card opens its file through. */
+  readonly artifactSeat: TeamConversationProps['artifactSeat']
+  /** The shipped `file` provider's live state, threaded down to the same cards. */
+  readonly useResource: TeamConversationProps['useResource']
   readonly t: TeamConversationProps['t']
 }
 
@@ -137,16 +143,16 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const {
     workspaceId, humanName, humanAvatarUrl, channelRef, taskRef, threadRef, taskNumber, backToWorkspace, selectChannel, selectThread, resolveTaskRefs, resolveThreadRefs, openMemberSession, putAttachment,
     loadChannels, readThread, loadThreadHistory, threadObservations,
-    subscribeChanges, loadMembers, drafts, getAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, loadHumanTodos, changeHumanTodo, t,
+    subscribeChanges, loadMembers, drafts, getAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, loadHumanTodos, changeHumanTodo, artifactSeat, useResource, t,
   } = props
   const threadRequest = { threadRef, ...(taskRef === undefined ? {} : { taskRef }) }
   const [projection, setProjection] = useState<ReadProjection>()
   const [channelView, setChannelView] = useState<AgentTeamView>()
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
-  // Which view of the Thread the reader is in. The composer and the timeline
-  // stay mounted either way: switching to the checklist must not cost a
-  // half-written reply, and the board reads the same facts the timeline does.
-  const [view, setView] = useState<'thread' | 'board'>('thread')
+  // Which view of the Thread the reader is in. The composer stays mounted
+  // across the discussion, artifact index, and to-do board, so switching views
+  // does not cost a half-written reply.
+  const [view, setView] = useState<'thread' | 'artifacts' | 'board'>('thread')
   // This Thread's Human to-dos, and the idempotent notice a repeat action
   // writes. Both are the board's alone; the timeline reads neither.
   const [todos, setTodos] = useState<readonly AgentTeamHumanTodo[]>()
@@ -165,8 +171,13 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const [currentFacts, setCurrentFacts] = useState<readonly AgentTeamThreadFact[]>([])
   const [olderFacts, setOlderFacts] = useState<readonly AgentTeamThreadFact[]>([])
   const [readFacts, setReadFacts] = useState<readonly AgentTeamThreadReadFact[]>([])
-  const [historyCursor, setHistoryCursor] = useState<number>()
   const [historyHasMore, setHistoryHasMore] = useState(false)
+  const [artifactHistoryLoading, setArtifactHistoryLoading] = useState(false)
+  const [artifactHistoryError, setArtifactHistoryError] = useState(false)
+  const historyCursorRef = useRef<number>()
+  const historyHasMoreRef = useRef(false)
+  const historyRequestRef = useRef(false)
+  const artifactHistoryRequestRef = useRef(false)
   // A bounded read acknowledges at most 20 unread facts; larger backlogs need
   // continuation reads. Reads also never self-wake a change scope, so a
   // backlog beyond a handful of batches would otherwise linger forever. The
@@ -205,6 +216,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const [error, setError] = useState<string>()
   const mountedRef = useRef(false)
   const currentFactsRef = useRef<readonly AgentTeamThreadFact[]>([])
+  const activeTabRef = useRef<HTMLButtonElement>(null)
   const sequenceRef = useRef(0)
   const readRequestIdRef = useRef<AgentTeamRequestId>(mintRequestId())
   const projectionRef = useRef<ReadProjection>()
@@ -214,6 +226,21 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // The hook returns a fresh object per render, but this callback is stable: the
   // opening jump depends on it without re-running on every render.
   const timelineOnScroll = timeline.onScroll
+
+  const selectView = useCallback((next: 'thread' | 'artifacts' | 'board'): boolean => {
+    if (next === view) return false
+    const address = artifactSeat.currentAddress()
+    const closed = artifactSeat.closePreview(false)
+    setView(next)
+    if (closed) queueMicrotask(() => {
+      const equivalent = address === undefined || typeof document === 'undefined' ? undefined
+        : Array.from(document.querySelectorAll<HTMLButtonElement>('[data-artifact-address]'))
+          .find(card => card.dataset.artifactAddress === address && card.closest('[hidden]') === null)
+      const target = equivalent ?? activeTabRef.current
+      target?.focus({ preventScroll: true })
+    })
+    return closed
+  }, [artifactSeat, view])
 
   const updateProjection = (next: ReadProjection): void => {
     projectionRef.current = next
@@ -445,7 +472,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
    */
   const startAnsweringTodo = (todo: AgentTeamHumanTodo): void => {
     setAnsweringTodo(todo)
-    setView('thread')
+    selectView('thread')
     timeline.scrollToBottom()
   }
 
@@ -485,8 +512,13 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     currentFactsRef.current = []
     setOlderFacts([])
     setReadFacts([])
-    setHistoryCursor(undefined)
     setHistoryHasMore(false)
+    historyCursorRef.current = undefined
+    historyHasMoreRef.current = false
+    historyRequestRef.current = false
+    artifactHistoryRequestRef.current = false
+    setArtifactHistoryLoading(false)
+    setArtifactHistoryError(false)
     setAutoReadExhausted(false)
     setNewFactsCount(0)
     setPendingJump(undefined)
@@ -527,12 +559,14 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
           currentFactsRef.current = merged
           return merged
         })
-        setHistoryCursor(history.value.cursor)
+        historyCursorRef.current = history.value.cursor
+        historyHasMoreRef.current = history.value.hasMore
         setHistoryHasMore(history.value.hasMore)
       } else {
         // A history read that rejected or was refused must not take the only way
         // back to older facts with it: the affordance stands, and pressing it
         // pages from the oldest fact on screen under its own error surface.
+        historyHasMoreRef.current = true
         setHistoryHasMore(true)
       }
       if (observations !== undefined && observations.ok) setFollowerIds(new Set(observations.value.followers))
@@ -593,13 +627,15 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
 
   // The selected tab is the tab stop, so Left/Right move both focus and
   // selection together the way the platform's tablist does.
-  const activeTabRef = useRef<HTMLButtonElement>(null)
   const handleTabKeys = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
     event.preventDefault()
-    const next = view === 'thread' ? 'board' : 'thread'
-    setView(next)
-    queueMicrotask(() => { activeTabRef.current?.focus({ preventScroll: true }) })
+    const order = ['thread', 'artifacts', 'board'] as const
+    const index = order.indexOf(view)
+    const offset = event.key === 'ArrowRight' ? 1 : -1
+    const next = order[(index + offset + order.length) % order.length]!
+    const closed = selectView(next)
+    if (!closed) queueMicrotask(() => { activeTabRef.current?.focus({ preventScroll: true }) })
   }
 
   // The pulse on a to-do a jump landed on is also the target's lifetime, so a
@@ -610,25 +646,59 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     return () => { clearTimeout(timer) }
   }, [flashedTodo])
 
-  const loadOlder = async (): Promise<void> => {
-    if (historyHasMore === false && historyCursor === undefined) return
-    const beforeSequence = historyCursor ?? minSequence(currentFactsRef.current)
-    if (beforeSequence === undefined) return
+  const loadOlder = useCallback(async (): Promise<boolean> => {
+    if (historyRequestRef.current || (!historyHasMoreRef.current && historyCursorRef.current === undefined)) return false
+    const beforeSequence = historyCursorRef.current ?? minSequence(currentFactsRef.current)
+    if (beforeSequence === undefined) return false
+    historyRequestRef.current = true
     setLoading(true)
     try {
-      const result = await loadThreadHistory({ workspaceId, ...threadRequest, beforeSequence, limit: 20 })
-      if (!mountedRef.current) return
-      if (!result.ok) { setError(result.error.message); return }
+      const result = await loadThreadHistory({ workspaceId, threadRef, ...(taskRef === undefined ? {} : { taskRef }), beforeSequence, limit: 20 })
+      if (!mountedRef.current) return false
+      if (!result.ok) {
+        setArtifactHistoryError(true)
+        setError(result.error.message)
+        return false
+      }
       setOlderFacts(current => mergeFacts(current, result.value.facts))
-      setHistoryCursor(result.value.cursor)
+      historyCursorRef.current = result.value.cursor
+      historyHasMoreRef.current = result.value.hasMore
       setHistoryHasMore(result.value.hasMore)
+      setArtifactHistoryError(false)
       setError(undefined)
+      return true
     } catch (cause) {
-      if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause))
+      if (mountedRef.current) {
+        setArtifactHistoryError(true)
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+      return false
     } finally {
+      historyRequestRef.current = false
       if (mountedRef.current) setLoading(false)
     }
-  }
+  }, [loadThreadHistory, taskRef, threadRef, workspaceId])
+
+  const loadAllArtifactHistory = useCallback(async (): Promise<void> => {
+    if (artifactHistoryRequestRef.current || !historyHasMoreRef.current) return
+    artifactHistoryRequestRef.current = true
+    setArtifactHistoryLoading(true)
+    setArtifactHistoryError(false)
+    try {
+      while (mountedRef.current && historyHasMoreRef.current) {
+        const previousCursor = historyCursorRef.current
+        if (!await loadOlder()) break
+        if (historyHasMoreRef.current && historyCursorRef.current === previousCursor) break
+      }
+    } finally {
+      artifactHistoryRequestRef.current = false
+      if (mountedRef.current) setArtifactHistoryLoading(false)
+    }
+  }, [loadOlder])
+
+  useEffect(() => {
+    if (view === 'artifacts' && projection !== undefined) void loadAllArtifactHistory()
+  }, [loadAllArtifactHistory, olderFacts, projection, view])
 
   const activeProjection = projection
   const task = activeProjection?.task
@@ -640,6 +710,11 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // message that answered each one so a row can find its own to-do.
   const listedTodos = todos ?? []
   const answeredTodos = useAnsweredTodos(listedTodos)
+  const artifactRows = useMemo(() => [...mergeFacts(currentFacts, olderFacts)].reverse().flatMap(fact => fact.kind !== 'message'
+    ? []
+    : (fact.message.artifacts ?? []).map((artifact, index) => ({ artifact, rowKey: `${fact.message.messageRef}:${index}` }))), [currentFacts, olderFacts])
+  const threadArtifacts = useMemo(() => artifactRows.map(row => row.artifact), [artifactRows])
+  const threadArtifactRowKeys = useMemo(() => artifactRows.map(row => row.rowKey), [artifactRows])
   const effectiveChannelRef = task?.channelRef ?? channelRef
   const channelMemberIds = useMemo(() => new Set(channelView?.members.filter(item => item.channelRef === effectiveChannelRef).map(item => item.memberId) ?? []), [channelView, effectiveChannelRef])
   const channelMembers = members.filter(status => channelMemberIds.size === 0 || channelMemberIds.has(status.member.memberId))
@@ -750,9 +825,9 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // the checklist and pulses that entry: the mark's whole purpose is to close
   // the loop between the two views, so it must cross the tab as well.
   const openTodo = useCallback((todoRef: AgentTeamHumanTodoRef): void => {
-    setView('board')
+    selectView('board')
     setFlashedTodo(todoRef)
-  }, [])
+  }, [selectView])
   const handleOpenReplyTo = useCallback((messageRef: AgentTeamMessageRef): void => { jumpToMessage(messageRef) }, [jumpToMessage])
   // Roster chips resolve synchronously from loaded data: channel names from
   // the Channel view, member facts from the member list. Anything outside the
@@ -823,6 +898,9 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         body={fact.message.body}
         attachments={fact.message.attachments}
         loadAttachment={getAttachment}
+        artifacts={fact.message.artifacts}
+        artifactSeat={artifactSeat}
+        useResource={useResource}
         t={t}
         occurredAt={fact.message.occurredAt}
         mentionNames={stableMentionNames(fact.mentions, mentionHandlesMap, humanName)}
@@ -1167,23 +1245,46 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
           </div>
         </DisclosureRow>
       </section>}
-      {/* The Thread's views. Only the two this batch lands: the checklist lives
-          inside the Thread rather than at a top-level page, because a to-do is
-          one fact of this discussion and reading it away from the work loses
-          the context that made it an ask. */}
+      {/* The Thread's discussion, artifact index, and Human to-do views share one tablist. */}
       <div className={todoCss.viewTabs} role="tablist" aria-label={t('viewTabs')} onKeyDown={handleTabKeys}>
         <button type="button" role="tab" className={todoCss.viewTab} data-view="thread" id="team-view-tab-thread"
           aria-selected={view === 'thread'} aria-controls="team-view-panel-thread" tabIndex={view === 'thread' ? 0 : -1}
           ref={view === 'thread' ? activeTabRef : undefined}
-          onClick={() => { setView('thread') }}>{t('viewThreadTab', { count: currentFacts.length })}</button>
+          onClick={() => { selectView('thread') }}>{t('viewThreadTab', { count: currentFacts.length })}</button>
+        <button type="button" role="tab" className={todoCss.viewTab} data-view="artifacts" id="team-view-tab-artifacts"
+          aria-selected={view === 'artifacts'} aria-controls="team-view-panel-artifacts" tabIndex={view === 'artifacts' ? 0 : -1}
+          ref={view === 'artifacts' ? activeTabRef : undefined}
+          onClick={() => { selectView('artifacts') }}>{t('viewArtifactsTab', { count: threadArtifacts.length })}</button>
         <button type="button" role="tab" className={todoCss.viewTab} data-view="board" id="team-view-tab-board"
           aria-selected={view === 'board'} aria-controls="team-view-panel-board" tabIndex={view === 'board' ? 0 : -1}
           ref={view === 'board' ? activeTabRef : undefined}
-          onClick={() => { setView('board') }}>{t('viewBoardTab', { count: listedTodos.length })}</button>
+          onClick={() => { selectView('board') }}>{t('viewBoardTab', { count: listedTodos.length })}</button>
       </div>
     </div>
 
-    {view === 'board'
+    {view === 'artifacts'
+      ? <section id="team-view-panel-artifacts" role="tabpanel" aria-labelledby="team-view-tab-artifacts" className={css.timeline} aria-label={t('threadArtifactsLabel')}>
+        <div className={css.timelineContent}>
+        <div className={artifactCss.artifactPanel}>
+          <h2 className={artifactCss.artifactPanelTitle}>{t('threadArtifactsLabel')}</h2>
+          {threadArtifacts.length > 0 && <TeamArtifactCards
+            artifacts={threadArtifacts}
+            rowKeys={threadArtifactRowKeys}
+            listClassName={artifactCss.artifactPanelList}
+            seat={artifactSeat}
+            useResource={useResource}
+            t={t}
+          />}
+          {threadArtifacts.length === 0 && !artifactHistoryLoading && !historyHasMore && <p>{t('threadArtifactsEmpty')}</p>}
+          {artifactHistoryLoading && <p role="status">{t('threadArtifactsLoading')}</p>}
+          {artifactHistoryError && <div role="alert" className={css.errorState}>
+            <span>{t('threadArtifactsHistoryError')}</span>
+            <Button size="sm" variant="outline" disabled={artifactHistoryLoading} onClick={() => { void loadAllArtifactHistory() }}>{t('threadArtifactsHistoryRetry')}</Button>
+          </div>}
+        </div>
+        </div>
+      </section>
+      : view === 'board'
       ? <section id="team-view-panel-board" role="tabpanel" aria-labelledby="team-view-tab-board" className={todoCss.boardPanel}>
         <HumanTodoBoard
           workspaceId={workspaceId}
