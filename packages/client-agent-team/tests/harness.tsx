@@ -477,6 +477,59 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
     inboxHasMore = options?.hasMore ?? false
     wakeAll()
   }
+  // The Human to-do ledger as the page sees it: a list per Workspace, and the
+  // Workspace-wide per-Channel counts the sidebar badges read. Both answer from
+  // one seed, so a spec can state a to-do once and see the list and the badge
+  // agree — which is the whole point of the Host owning the count.
+  let todoRows: ReadonlyArray<Record<string, unknown>> = []
+  let todoFailure: string | undefined
+  const todoCounts = (workspaceId: string) => {
+    const perChannel = new Map<string, number>()
+    for (const row of todoRows) {
+      if (row.workspaceId !== workspaceId) continue
+      const state = row.state as string
+      // Only an unsettled to-do is owed; a settled one stays in the list as the
+      // record that it was done and is counted nowhere.
+      if (state !== 'pending' && state !== 'claimed' && state !== 'answered') continue
+      const channelRef = row.channelRef as string
+      perChannel.set(channelRef, (perChannel.get(channelRef) ?? 0) + 1)
+    }
+    return [...perChannel].map(([channelRef, count]) => ({ channelRef, count }))
+  }
+  const humanTodos = vi.fn(async (request: { workspaceId: string; threadRef?: string }) => {
+    if (todoFailure !== undefined) return { ok: false as const, error: { message: todoFailure } }
+    const scoped = todoRows.filter(row => row.workspaceId === request.workspaceId)
+      .filter(row => request.threadRef === undefined || row.threadRef === request.threadRef)
+    return {
+      ok: true as const,
+      value: {
+        todos: scoped,
+        channelCounts: request.threadRef === undefined ? todoCounts(request.workspaceId) : [],
+      },
+    }
+  })
+  const changeHumanTodo = vi.fn(async (request: { workspaceId: string; todoRef: string; action: string }) => {
+    if (todoFailure !== undefined) return { ok: false as const, error: { message: todoFailure } }
+    const index = todoRows.findIndex(row => row.todoRef === request.todoRef)
+    if (index < 0) return { ok: false as const, error: { message: `unknown to-do ${request.todoRef}` } }
+    const current = todoRows[index]!
+    const next = request.action === 'claim'
+      ? { ...current, state: current.state === 'pending' ? 'claimed' : current.state, claimedBy: 'member:human' }
+      : request.action === 'close'
+        ? { ...current, state: 'closed' }
+        : { ...current, state: 'answered' }
+    // `changed` is the whole idempotence signal: a repeat writes nothing and
+    // says so, and the page turns that into its notice rather than a success.
+    const changed = JSON.stringify(next) !== JSON.stringify(current)
+    todoRows = todoRows.map((row, at) => (at === index ? next : row))
+    wakeAll()
+    return { ok: true as const, value: { changed, todo: next } }
+  })
+  const seedHumanTodos = (rows: ReadonlyArray<Record<string, unknown>>, options?: { readonly failure?: string }): void => {
+    todoRows = rows
+    todoFailure = options?.failure
+    wakeAll()
+  }
   const changes = vi.fn(async function* (request: AgentTeamChangesRequest, signal?: AbortSignal) {
     let pending = false
     let resume: (() => void) | undefined
@@ -607,7 +660,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   // refuses by contract.
   runtime.remote.provideNamespaces({
     session: { modelCatalog },
-    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, readThread, threadHistory: loadThreadHistory, threadObservations, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar },
+    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, humanTodos, changeHumanTodo, readThread, threadHistory: loadThreadHistory, threadObservations, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar },
   })
   Object.assign(runtime.remote, {
     $stream: <T,>(options: ConstructorParameters<typeof RemoteStream<T>>[1]) => new RemoteStream(connection, options),
@@ -650,5 +703,5 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
   const failThreadHistory = (message?: string): void => { threadHistoryFailure = message }
-  return { runtime, team, view, panelInfo: runtime.panelInfo, selectPanel, disposeWorkspace, disposeSettings, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, publishAgentReply, publishPresence, publishWorkspaceUpdate, publishGlobalUpdate, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, openSession, failThreadHistory }
+  return { runtime, team, view, panelInfo: runtime.panelInfo, selectPanel, disposeWorkspace, disposeSettings, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, publishAgentReply, publishPresence, publishWorkspaceUpdate, publishGlobalUpdate, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, humanTodos, changeHumanTodo, seedHumanTodos, openSession, failThreadHistory }
 }

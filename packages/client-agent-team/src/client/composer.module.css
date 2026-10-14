@@ -3,6 +3,14 @@
   flex-direction: column;
   align-items: center;
   padding: 0 var(--dsh-composer-side-clearance, 16px) 8px;
+  /* `position: relative` so the composer's own floating layers resolve against
+     this box rather than the page. ⛔ Deliberately no `overflow: clip` here:
+     the mention menu (`.mentionMenu`) is an absolutely positioned descendant
+     that opens *upward* out of `.inputArea`, so clipping either this element or
+     `.card` would cut the menu off at the card's top edge — the one thing the
+     suggestion list cannot survive. The outer frame is already kept still by
+     `.surface`'s clip; the composer does not need a second one. */
+  position: relative;
 }
 
 .card {

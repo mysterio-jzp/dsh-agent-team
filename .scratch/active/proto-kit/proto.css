@@ -1,0 +1,518 @@
+/* ==========================================================================
+ * 界面正稿 · 共享外壳与组件样式（原型专用）
+ * 真实实现落到 packages/client-agent-team/src/client/*.module.css。
+ * 每个类名下方注释写明它该落在哪个组件。
+ * ========================================================================== */
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--proto-preview-surface);
+  color: var(--proto-label-primary);
+  font: 14px/1.5 -apple-system, "SF Pro Text", "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+  margin: 0;
+  padding: 20px 16px 56px;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--proto-link); }
+
+/* --------------------------------------------------------------------------
+ * 原型控制条（⛔ 不进产品：只用于看状态、切主题、对齐画布尺寸）
+ * ------------------------------------------------------------------------ */
+.toolbar {
+  align-items: center;
+  background: var(--proto-bg-base);
+  border-radius: var(--proto-radius-md);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 0 auto 18px;
+  max-width: 1440px;
+  padding: 12px 16px;
+}
+.toolbar h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.toolbar .lead { color: var(--proto-label-secondary); font-size: 12px; }
+.toolbar .spacer { flex: 1; }
+.toolbar .note {
+  color: var(--proto-label-tertiary); font-size: 12px; max-width: 620px;
+}
+.seg {
+  border-radius: var(--proto-radius-sm);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  display: flex; overflow: hidden;
+}
+.seg button {
+  background: transparent; border: 0; color: var(--proto-label-secondary);
+  cursor: pointer; font: inherit; font-size: 12px; padding: 6px 10px;
+}
+.seg button + button { box-shadow: -1px 0 0 var(--proto-elevation-stroke); }
+.seg button[aria-pressed="true"] {
+  background: var(--proto-business); color: var(--proto-label-foreground); font-weight: 600;
+}
+.toolbar label { align-items: center; color: var(--proto-label-secondary); display: flex; font-size: 12px; gap: 6px; }
+.toolbar input[type="checkbox"] { accent-color: var(--proto-business); }
+
+/* --------------------------------------------------------------------------
+ * 画布：桌面 / 移动两个座位（原型只按这两个宽度验收）
+ * ------------------------------------------------------------------------ */
+.stage { display: grid; gap: 22px; justify-content: center; margin: 0 auto; max-width: 1440px; }
+.frameWrap { display: grid; gap: 8px; }
+.frameLabel { color: var(--proto-label-secondary); font-size: 12px; text-align: center; }
+.frameLabel b { color: var(--proto-label-primary); font-weight: 600; }
+
+/* 帧高用 --frame-h 覆盖（原型里同一页画好几帧，每帧装的东西不一样）；
+   移动档一律 780px，且忽略 --frame-h —— 那就是"手机屏"的固定高度。 */
+.frame {
+  --frame-h: 860px;
+  background: var(--proto-bg-base);
+  border-radius: var(--proto-radius-lg);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  display: flex;
+  height: var(--frame-h);
+  overflow: hidden;
+  max-width: 100%;
+  width: 1408px;
+}
+.frame[data-device="mobile"] { --frame-h: 780px; width: 390px; }
+
+/* --------------------------------------------------------------------------
+ * 左侧栏（落地：SidebarRoot 座位里的 Team 栏）
+ * ------------------------------------------------------------------------ */
+.sidebar {
+  background: var(--proto-sidebar);
+  box-shadow: 1px 0 0 var(--proto-border-l1);
+  display: flex; flex: none; flex-direction: column;
+  gap: 2px; overflow-y: auto; padding: 12px 8px; width: 248px;
+}
+.sidebarHead {
+  align-items: center; display: flex; gap: 8px; padding: 4px 8px 10px;
+}
+.sidebarHead .workspace {
+  font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.groupTitle {
+  color: var(--proto-label-tertiary); font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; padding: 14px 8px 6px;
+}
+/* 列表行：shipped 的 12px 档（--dsw-radius-md），hover 用交互底 */
+.navRow {
+  align-items: center; border-radius: var(--proto-radius-md);
+  color: var(--proto-label-primary); cursor: pointer; display: flex; gap: 8px;
+  min-height: 32px; padding: 6px 8px; text-decoration: none;
+}
+.navRow:hover, .navRow:focus-visible { background: var(--proto-nav-hover); }
+.navRow[aria-current="page"] { background: var(--proto-nav-active); font-weight: 600; }
+.navRow[aria-current="page"] .navIcon { background: var(--proto-nav-active-accent); }
+.navRow .navIcon {
+  align-items: center; background: var(--proto-nav-hover-solid); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: flex; flex: none; font-size: 11px; font-weight: 600;
+  height: 20px; justify-content: center; width: 20px;
+}
+.navRow .navText { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navRow .navMeta { color: var(--proto-label-tertiary); flex: none; font-size: 11px; }
+
+/* 计数徽标：只有一份声明（落地 countBadge.module.css .badge 同一条语言） */
+.badge {
+  align-items: center; background: var(--proto-label-primary); border-radius: 999px;
+  color: var(--proto-label-foreground); display: inline-flex; flex: none;
+  font-size: 11px; font-weight: 600; height: 18px; justify-content: center;
+  min-width: 18px; padding: 0 5px;
+}
+.badge[data-tone="human"] { background: rgb(180, 83, 9); }  /* 白字 5.02:1：shipped 的 business 底只有 4.28:1 */
+.badge[data-tone="quiet"] { background: var(--proto-hover-solid); color: var(--proto-label-secondary); }
+
+/* 成员行（落地：侧栏 Agents 行 + 名册行共用） */
+.memberRow {
+  align-items: center; border-radius: var(--proto-radius-md); display: flex; gap: 8px;
+  padding: 6px 8px;
+}
+.memberRow:hover { background: var(--proto-nav-hover); }
+.memberRow .who { flex: 1; min-width: 0; }
+.memberRow .name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memberRow .state { color: var(--proto-label-tertiary); font-size: 11px; }
+.memberRow[data-state="working"] .state { color: var(--proto-business); }
+.memberRow[data-state="suspended"] .name { color: var(--proto-label-tertiary); }
+
+/* --------------------------------------------------------------------------
+ * 头像座位（落地：TeamMemberAvatar.tsx + avatar-stack.module.css）
+ * 尺寸三档，同一条色相规则：hsl(memberHue 42% 46%)，首字母回退。
+ * ------------------------------------------------------------------------ */
+/* 明度沿既有 46%（hsl(memberHue 42% 46%)）：原型画的就是"今天会落地的样子"。
+   ⛔ 46% 配白字不合 AA —— 360 个色相里 186 度（52%）低于 4.5:1，最差 hue 60 仅 2.54:1；
+   若要修，达标值见《无障碍与几何基线》§三（明度 33% 全色相 ≥4.70:1），独立一笔再动。 */
+.avatar {
+  align-items: center; background: hsl(var(--hue, 212) 42% 46%);
+  border-radius: 50%; color: #fff; display: inline-flex; flex: none;
+  font-weight: 600; justify-content: center;
+}
+.avatar[data-size="sm"] { font-size: 9px; height: 18px; width: 18px; }
+.avatar[data-size="md"] { font-size: 11px; height: 24px; width: 24px; }
+.avatar[data-size="lg"] { font-size: 14px; height: 32px; width: 32px; }
+.avatar[data-size="xl"] { font-size: 20px; height: 48px; width: 48px; }
+.avatar[data-photo] { background: hsl(var(--hue, 212) 42% 46%); object-fit: cover; }
+.avatarRing { box-shadow: 0 0 0 2px var(--proto-bg-base); }
+.avatarWrap { display: inline-flex; flex: none; position: relative; }
+/* 在场点：右下角，2px 描边画底 */
+.avatarWrap .presence {
+  background: var(--proto-success); border: 2px solid var(--proto-bg-base);
+  border-radius: 50%; bottom: -1px; height: 9px; position: absolute; right: -1px; width: 9px;
+}
+.avatarWrap[data-presence="idle"] .presence { background: var(--proto-idle); }
+
+/* --------------------------------------------------------------------------
+ * 主区（讨论 / task 页）
+ * ------------------------------------------------------------------------ */
+.main { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+
+.pageHead {
+  align-items: flex-start; box-shadow: 0 1px 0 var(--proto-border-l1);
+  display: flex; flex: none; gap: 12px; padding: 12px 16px;
+}
+.pageHead .back { color: var(--proto-label-secondary); font-size: 12px; }
+.pageHead h2 { font-size: 16px; font-weight: 600; margin: 2px 0 0; }
+.pageHead .sub { color: var(--proto-label-secondary); font-size: 12px; margin: 4px 0 0; }
+.pageHead .actions { display: flex; flex: none; gap: 8px; margin-left: auto; }
+
+/* 视图切换（讨论 ⇄ 待办 ⇄ 产物）：分段控件，28px 高 */
+.tabs {
+  align-items: center; background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  display: inline-flex; gap: 2px; padding: 2px;
+}
+.tabs button {
+  background: transparent; border: 0; border-radius: 6px; color: var(--proto-label-secondary);
+  cursor: pointer; font: inherit; font-size: 12px; padding: 4px 10px;
+}
+.tabs button[aria-selected="true"] {
+  background: var(--proto-bg-base); box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  color: var(--proto-label-primary); font-weight: 600;
+}
+
+/* 只工作域说明条（需求 7）：这一域能在哪些目录干活 */
+.workspaceScope {
+  align-items: center; background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: flex; flex-wrap: wrap;
+  font-size: 12px; gap: 6px 8px; margin: 10px 16px 0; padding: 7px 10px;
+}
+.workspaceScope .roots { display: flex; flex-wrap: wrap; gap: 6px; }
+.rootChip {
+  background: var(--proto-bg-base); border-radius: 6px; box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  color: var(--proto-label-primary); font-size: 12px; padding: 1px 7px;
+}
+.rootChip[data-primary] { box-shadow: 0 0 0 1px var(--proto-business); color: var(--proto-business); font-weight: 600; }
+.workspaceScope .tag {
+  background: var(--proto-bg-base); border-radius: 999px; box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  color: var(--proto-label-tertiary); font-size: 11px; margin-left: auto; padding: 1px 8px;
+}
+
+/* 时间线 */
+.timeline { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 18px; scroll-behavior: smooth; }
+.timeline[data-compact] { padding-inline: 12px; }
+
+.daySeparator, .unreadBoundary {
+  align-items: center; color: var(--proto-label-caption); display: flex;
+  font-size: 11px; gap: 10px; margin: 16px 0 10px;
+}
+.daySeparator::before, .daySeparator::after,
+.unreadBoundary::before, .unreadBoundary::after {
+  background: var(--proto-border-l2); content: ""; flex: 1; height: 1px;
+}
+.unreadBoundary { color: var(--proto-business); }
+.unreadBoundary::before, .unreadBoundary::after {
+  background: color-mix(in srgb, var(--proto-business) 35%, transparent);
+}
+
+/* Activity 行：非气泡形态（气泡化不改它） */
+.activityRow {
+  align-items: baseline; color: var(--proto-label-secondary); display: flex;
+  flex-wrap: wrap; font-size: 12px; gap: 6px; margin: 6px 0; padding-left: 32px;
+}
+.activityRow .who { color: var(--proto-label-primary); font-weight: 600; }
+.activityRow .at { color: var(--proto-label-caption); font-size: 11px; }
+
+/* 消息行：一条消息一个气泡；气泡**不分侧**，归属只由身份行说 */
+.messageRow { display: flex; gap: 8px; margin-top: 12px; }
+.messageRow[data-grouped] { margin-top: 2px; }
+.messageRow[data-grouped] .identity { visibility: hidden; }
+.messageRow .identity {
+  align-items: center; display: flex; flex: none; gap: 6px; padding-top: 2px; width: 24px;
+}
+.messageCol { min-width: 0; flex: 1; }
+.identityLine {
+  align-items: baseline; display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 0 0 4px 2px; min-height: 20px;
+}
+.messageRow[data-grouped] .identityLine { display: none; }
+.identityLine .author { font-size: 13px; font-weight: 600; }
+.identityLine .role {
+  background: var(--proto-hover-solid); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); font-size: 11px; padding: 0 6px;
+}
+.identityLine .at { color: var(--proto-label-caption); font-size: 11px; }
+/* 身份行上的操作条：`@media (hover: hover)` 内才隐藏，触屏常显 */
+.identityLine .rowActions { display: flex; gap: 2px; margin-left: auto; }
+@media (hover: hover) {
+  .identityLine .rowActions { opacity: 0; transition: opacity 80ms ease; }
+  .messageRow:hover .rowActions, .messageRow:focus-within .rowActions { opacity: 1; }
+}
+
+/* 气泡本体：shipped 配方 —— --dsw-specific-bubble + --dsw-radius-xl，
+   左右同一个底、同一个圆角，8px 12px 内距。 */
+.bubble {
+  background: var(--proto-bubble); border-radius: var(--proto-radius-xl);
+  color: var(--proto-label-primary); max-width: 100%; overflow-wrap: anywhere;
+  padding: 8px 12px;
+}
+.bubble p { margin: 0 0 8px; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble ul { margin: 4px 0 8px; padding-left: 20px; }
+.bubble code {
+  background: var(--proto-hover); border-radius: var(--proto-radius-xs);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; padding: 1px 4px;
+}
+.bubble .ref {
+  background: var(--proto-hover-solid); border-radius: 6px; color: var(--proto-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 0 4px;
+}
+.bubble blockquote {
+  border-left: 2px solid var(--proto-border-l4); color: var(--proto-label-secondary);
+  margin: 0 0 8px; padding: 2px 0 2px 10px;
+}
+
+/* 「有人@我」标记：⛔ 不改变气泡归属，只作为气泡第一行 */
+.messageRow[data-mentions-me] .bubble {
+  box-shadow: 0 0 0 1px var(--proto-warn-label);
+}
+.mentionsMeBadge {
+  align-items: center; background: var(--proto-warn-tertiary); border-radius: 999px;
+  color: var(--proto-warn-text); display: flex; font-size: 11px; font-weight: 600;
+  margin: 0 0 6px auto; padding: 1px 8px; width: fit-content;
+}
+
+/* 引用块（需求 2）：气泡内顶部，一行截断，点击跳原文 */
+.quoteBlock {
+  align-items: stretch; background: var(--proto-bg-base); border-radius: var(--proto-radius-sm);
+  cursor: pointer; display: flex; gap: 8px; margin: 0 0 6px; padding: 4px 8px 4px 6px;
+  text-align: left; width: 100%;
+}
+.quoteBlock:hover { background: var(--proto-hover-solid); }
+.quoteBlock .rule { background: var(--proto-border-l4); border-radius: 2px; flex: none; width: 2px; }
+.quoteBlock .qText {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.quoteBlock .qWho { color: var(--proto-label-primary); font-size: 12px; font-weight: 600; }
+.quoteBlock .qWhat { color: var(--proto-label-secondary); font-size: 12px; }
+
+/* 行内提及芯片 */
+.mention {
+  background: var(--proto-mention-chip); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-primary); font-size: 13px; font-weight: 500; padding: 0 4px;
+}
+.mention[data-mention-human] { background: var(--proto-mention-mine); color: var(--proto-mention-mine-text); }
+
+/* 消息操作（回复 / 复制 / 引用）：28px 圆形纯图标控件 */
+.iconBtn {
+  align-items: center; background: transparent; border: 0; border-radius: 999px;
+  color: var(--proto-label-secondary); cursor: pointer; display: inline-flex;
+  height: 28px; justify-content: center; width: 28px;
+}
+.iconBtn:hover { background: var(--proto-hover); color: var(--proto-label-primary); }
+
+/* 小胶囊按钮（行内动作） */
+.pillBtn {
+  align-items: center; background: transparent; border: 0; border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke); color: var(--proto-label-primary);
+  cursor: pointer; display: inline-flex; font: inherit; font-size: 12px; gap: 4px; padding: 3px 10px;
+}
+.pillBtn:hover { background: var(--proto-hover); }
+.pillBtn[data-variant="primary"] {
+  background: var(--proto-business); box-shadow: none; color: var(--proto-label-foreground); font-weight: 600;
+}
+.pillBtn[data-variant="primary"]:hover { background: color-mix(in srgb, var(--proto-business) 88%, #000); }
+.pillBtn[data-variant="quiet"] { box-shadow: none; color: var(--proto-label-secondary); }
+.pillBtn[aria-pressed="true"] { background: var(--proto-business-tertiary); box-shadow: 0 0 0 1px var(--proto-business); color: var(--proto-business); font-weight: 600; }
+
+/* --------------------------------------------------------------------------
+ * 产物条目（需求 8）：气泡内的一张卡，点击 ⇒ 右侧面板打开
+ * ------------------------------------------------------------------------ */
+.artifactCard {
+  background: var(--proto-bg-base); border: 0; border-radius: var(--proto-radius-md);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  cursor: pointer; display: grid; gap: 2px 10px;
+  grid-template-columns: 28px 1fr auto; margin: 6px 0 0; padding: 8px 10px; text-align: left; width: 100%;
+}
+.artifactCard:hover { background: var(--proto-hover); }
+.artifactCard[aria-current="true"] { box-shadow: 0 0 0 1.5px var(--proto-business); }
+.artifactCard .aIcon {
+  align-items: center; background: var(--proto-hover-solid); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: flex; font-size: 11px; font-weight: 600;
+  grid-row: span 2; height: 28px; justify-content: center; width: 28px;
+}
+.artifactCard .aTitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifactCard .aMeta {
+  color: var(--proto-label-tertiary); font-size: 11px; grid-column: 2;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.artifactCard .aOpen { color: var(--proto-label-tertiary); font-size: 12px; grid-row: span 2; }
+.artifactCard .aRange {
+  background: var(--proto-hover-solid); border-radius: var(--proto-radius-xs);
+  color: var(--proto-label-secondary); font-size: 11px; padding: 0 4px;
+}
+
+/* --------------------------------------------------------------------------
+ * 右侧预览面板（需求 8：复用 shipped 的 documentpreview tab）
+ * ------------------------------------------------------------------------ */
+.previewPane {
+  background: var(--proto-preview-surface); box-shadow: -1px 0 0 var(--proto-border-l1);
+  display: flex; flex: none; flex-direction: column; min-width: 0; width: 420px;
+}
+.previewPane[hidden] { display: none; }
+.previewHead {
+  align-items: center; display: flex; flex: none; gap: 8px;
+  padding: 10px 12px; box-shadow: 0 1px 0 var(--proto-border-l1);
+}
+.previewHead .docName { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.previewHead .docPath { color: var(--proto-label-tertiary); font-size: 11px; }
+.previewTabs { align-items: center; box-shadow: 0 1px 0 var(--proto-border-l1); display: flex; flex: none; gap: 2px; padding: 6px 8px; }
+.previewTabs button {
+  background: transparent; border: 0; border-radius: 6px; color: var(--proto-label-secondary);
+  cursor: pointer; font: inherit; font-size: 12px; padding: 3px 9px;
+}
+.previewTabs button[aria-selected="true"] { background: var(--proto-bg-base); color: var(--proto-label-primary); font-weight: 600; }
+.docBody {
+  background: var(--proto-bg-base); flex: 1; margin: 8px; overflow: auto;
+  border-radius: var(--proto-radius-md); padding: 14px 16px;
+}
+.docBody h1 { font-size: 18px; margin: 0 0 10px; }
+.docBody h2 { font-size: 14px; margin: 16px 0 6px; }
+.docBody p, .docBody li { font-size: 13px; line-height: 1.65; }
+.docBody p { margin: 0 0 8px; }
+.docBody code { background: var(--proto-hover); border-radius: var(--proto-radius-xs); font-size: 12px; padding: 1px 4px; }
+.docBody .hit { background: color-mix(in srgb, var(--proto-warn-primary) 24%, transparent); border-radius: 3px; }
+
+/* --------------------------------------------------------------------------
+ * 人类待办项（需求 9）：与 claim 项**样式与语义都分开**
+ * ------------------------------------------------------------------------ */
+.todoList { align-content: start; display: grid; gap: 10px; min-height: 0; overflow-y: auto; padding: 14px 16px; }
+.todoCard {
+  background: var(--proto-bg-base); border-radius: var(--proto-radius-md);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  display: grid; gap: 8px; padding: 12px 14px;
+}
+.todoCard[data-state="claimed"] { box-shadow: 0 0 0 1px var(--proto-business), var(--proto-elevation-soft); }
+.todoCard[data-state="closed"] { opacity: .62; }
+.todoHead { align-items: flex-start; display: flex; gap: 10px; }
+.todoHead .tTitle { font-size: 14px; font-weight: 600; }
+.todoHead .tOrigin { color: var(--proto-label-tertiary); font-size: 11px; margin-top: 2px; }
+.todoHead .tTitleRow { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.todoBody { color: var(--proto-label-secondary); font-size: 13px; }
+.todoFoot { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.todoFoot .grow { flex: 1; }
+.todoFoot .actor { align-items: center; color: var(--proto-label-secondary); display: flex; font-size: 12px; gap: 6px; }
+
+/* 状态签：待办用它，claim 用下面的 .claimMark —— 两者形状不同 */
+.stateTag {
+  align-items: center; border-radius: var(--proto-radius-sm); display: inline-flex;
+  font-size: 11px; font-weight: 600; gap: 4px; padding: 2px 8px;
+}
+.stateTag[data-state="pending"] { background: var(--proto-warn-tertiary); color: var(--proto-warn-text); }
+.stateTag[data-state="claimed"] { background: var(--proto-business-tertiary); color: var(--proto-tag-claimed-text); }
+.stateTag[data-state="answered"] { background: color-mix(in srgb, var(--proto-success) 14%, transparent); color: var(--proto-success); }
+.stateTag[data-state="closed"] { background: var(--proto-hover-solid); color: var(--proto-label-secondary); }
+.stateTag .dot { border-radius: 50%; height: 6px; width: 6px; background: currentColor; }
+
+/* 成员 Claim 行：左侧竖条 + 方形标记，与待办卡明确不同 */
+.claimRow {
+  background: var(--proto-bg-base); border-radius: var(--proto-radius-sm);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  display: grid; gap: 4px; padding: 10px 12px 10px 14px; position: relative;
+}
+.claimRow::before {
+  background: var(--proto-border-l4); border-radius: 2px; content: "";
+  bottom: 10px; left: 5px; position: absolute; top: 10px; width: 3px;
+}
+.claimRow .cHead { align-items: center; display: flex; gap: 6px; }
+.claimRow .cWho { font-size: 12px; font-weight: 600; }
+.claimRow .cMark {
+  border-radius: 3px; background: var(--proto-hover-solid); color: var(--proto-label-secondary);
+  font-size: 10px; font-weight: 600; padding: 1px 5px;
+}
+.claimRow .cText { color: var(--proto-label-secondary); font-size: 12px; }
+
+/* --------------------------------------------------------------------------
+ * 成员编辑页（需求 6）
+ * ------------------------------------------------------------------------ */
+.editor { display: grid; gap: 16px; padding: 16px; overflow-y: auto; }
+.field { display: grid; gap: 6px; }
+.field > .label { align-items: center; display: flex; font-size: 13px; font-weight: 600; gap: 6px; }
+.field > .hint { color: var(--proto-label-tertiary); font-size: 12px; }
+.input {
+  background: var(--proto-bg-base); border: 0; border-radius: var(--proto-radius-sm);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke); color: var(--proto-label-primary);
+  font: inherit; font-size: 13px; padding: 8px 10px; width: 100%;
+}
+.input:focus-visible, .pillBtn:focus-visible, .iconBtn:focus-visible,
+.navRow:focus-visible, .artifactCard:focus-visible, .quoteBlock:focus-visible,
+.tabs button:focus-visible, .seg button:focus-visible, .todoCard button:focus-visible {
+  outline: var(--proto-focus-ring); outline-offset: 2px;
+}
+textarea.input { min-height: 64px; resize: vertical; }
+.avatarEditor { align-items: flex-start; display: flex; gap: 14px; }
+.avatarDrop {
+  align-items: center; background: var(--proto-hover); border-radius: 50%;
+  color: var(--proto-label-secondary); display: flex; flex-direction: column;
+  font-size: 11px; height: 64px; justify-content: center; text-align: center; width: 64px;
+}
+.fileRow {
+  align-items: center; background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  display: flex; gap: 8px; font-size: 12px; padding: 6px 10px;
+}
+.fileRow .meta { color: var(--proto-label-tertiary); margin-left: auto; }
+.hairline { background: var(--proto-border-l2); height: 1px; }
+
+/* --------------------------------------------------------------------------
+ * 只读说明卡 / 诊断
+ * ------------------------------------------------------------------------ */
+.noteCard {
+  background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: grid; font-size: 12.5px; gap: 6px; padding: 10px 12px;
+}
+.noteCard b { color: var(--proto-label-primary); }
+.warnCard {
+  background: var(--proto-warn-tertiary); border-radius: var(--proto-radius-sm);
+  color: var(--proto-warn-label); display: grid; font-size: 12.5px; gap: 6px; padding: 10px 12px;
+}
+.warnCard b { color: var(--proto-label-primary); }
+.emptyState {
+  align-items: center; color: var(--proto-label-tertiary); display: grid; font-size: 13px;
+  gap: 8px; justify-items: center; padding: 40px 20px; text-align: center;
+}
+.visuallyHidden {
+  clip: rect(0 0 0 0); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px;
+}
+.annotation {
+  color: var(--proto-label-tertiary); font-size: 11.5px; margin: 6px 16px 0; padding-left: 8px;
+  box-shadow: inset 2px 0 0 var(--proto-border-l3);
+}
+.sectionLabel {
+  color: var(--proto-label-tertiary); font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; margin: 16px 16px 0;
+}
+
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .previewPane { display: none; }
+}
+
+/* --------------------------------------------------------------------------
+ * 原型提示条（⛔ 不进产品）：落地对应 shipped 的 toast 表面
+ * （--dsw-alias-toast-bg + --dsw-alias-toast-label）
+ * ------------------------------------------------------------------------ */
+.protoToast {
+  background: var(--proto-label-primary); border-radius: var(--proto-radius-md);
+  bottom: 24px; box-shadow: var(--proto-elevation-prominent); color: var(--proto-bg-base);
+  font-size: 13px; left: 50%; padding: 9px 14px; position: fixed;
+  transform: translateX(-50%); z-index: 40;
+}
+.protoToast[hidden] { display: none; }

@@ -615,3 +615,77 @@ describe('team tools render absolute event instants in UTC+8', () => {
     expect(reply).not.toContain('+08:00')
   })
 })
+
+describe('team_todo renders the Human checklist without claiming work it did not do', () => {
+  const TODO = 'todo:5f0c1b7a-0000-4000-8000-000000000001'
+  const counts = [{ channelRef: CHANNEL, count: 2 }]
+  const pending = { todoRef: TODO, channelRef: CHANNEL, threadRef: THREAD, title: 'Approve the release', state: 'pending', requester: 'member:me' }
+
+  it('list names the asks this Member raised and labels the counts as Host-derived', () => {
+    const text = renderText(teamTools().get('team_todo')!, { action: 'list' }, {
+      kind: 'listed', action: 'list', todos: [pending, { ...pending, todoRef: 'todo:5f0c1b7a-0000-4000-8000-000000000002', title: 'Sign off the note' }], channelCounts: counts,
+    })
+    expect(text).toContain('Human todos — 2 ask(s) you raised')
+    expect(text).toContain(`${TODO} · pending · ${CHANNEL} · ${THREAD} — "Approve the release" (requester member:me)`)
+    expect(text).toContain('Channel counts — unsettled todos, derived by the Host')
+    expect(text).toContain(`${CHANNEL} · 2 unsettled`)
+    // No write token: todos are not revision-fenced, and a checklist read is not a mutation basis.
+    expect(text).not.toContain('baseRevision')
+    expect(text).not.toContain('revision')
+  })
+
+  it('an empty checklist says so instead of rendering a bare heading', () => {
+    const text = renderText(teamTools().get('team_todo')!, { action: 'list' }, { kind: 'listed', action: 'list', todos: [], channelCounts: counts })
+    expect(text).toContain('No open ask: nothing you dispatched is waiting on the Human.')
+  })
+
+  it('a dispatch that created the todo states the commit and the affected todo alone', () => {
+    const claimed = { ...pending, todoRef: 'todo:5f0c1b7a-0000-4000-8000-000000000003', state: 'claimed', claimedBy: 'member:human', claimedSequence: 41 }
+    const text = renderText(teamTools().get('team_todo')!, { action: 'dispatch', threadRef: THREAD, title: 'Approve the release' }, {
+      kind: 'committed', action: 'dispatch', created: true, todo: pending, todos: [pending, claimed],
+      channelCounts: counts, occurredAt: '2026-10-14T01:00:00.000Z',
+    })
+    expect(text).toContain('Committed — todo created.')
+    expect(text).toContain('Committed at 2026-10-14T09:00:00+08:00')
+    expect(text).toContain(`"Approve the release" (requester member:me)`)
+    // The affected todo leads; the rest of the checklist is never appended, so
+    // an action result cannot be mistaken for a fresh directory read.
+    expect(text).not.toContain('claimed by')
+    expect(text).not.toContain('No change')
+  })
+
+  it('a checklist row carries the claim and the answered reply', () => {
+    const claimed = { ...pending, state: 'claimed', claimedBy: 'member:human', claimedSequence: 41 }
+    const text = renderText(teamTools().get('team_todo')!, { action: 'list' }, { kind: 'listed', action: 'list', todos: [claimed], channelCounts: counts })
+    expect(text).toContain('claimed by member:human (sequence 41)')
+    const answered = { ...claimed, state: 'answered', answeredMessageRef: 'message:9a1d' }
+    const withAnswer = renderText(teamTools().get('team_todo')!, { action: 'list' }, { kind: 'listed', action: 'list', todos: [answered], channelCounts: counts })
+    expect(withAnswer).toContain('answered by message:9a1d')
+  })
+
+  it('a duplicated ask reports plainly that nothing was created', () => {
+    const text = renderText(teamTools().get('team_todo')!, { action: 'dispatch', threadRef: THREAD, title: 'approve   the release' }, {
+      kind: 'committed', action: 'dispatch', created: false, todo: pending, todos: [pending], channelCounts: counts,
+    })
+    expect(text).toContain('No change —')
+    expect(text).toContain(`${TODO} already stands for this ask — no new todo was created and nothing was written.`)
+    // The outcome must never read as a creation, and a reuse carries no instant of its own.
+    expect(text).not.toContain('Committed')
+    expect(text).not.toContain('Committed at')
+  })
+
+  it('retiring an ask commits once and reports the repeat as no change', () => {
+    const closed = { ...pending, state: 'closed', resolvedBy: 'member:me', resolvedSequence: 44 }
+    const committed = renderText(teamTools().get('team_todo')!, { action: 'close', todoRef: TODO }, {
+      kind: 'committed', action: 'close', created: true, todo: closed, todos: [closed], channelCounts: [{ channelRef: CHANNEL, count: 0 }],
+      occurredAt: '2026-10-14T01:05:00.000Z',
+    })
+    expect(committed).toContain('Committed — todo closed.')
+    expect(committed).toContain(`closed by member:me (sequence 44)`)
+    const repeat = renderText(teamTools().get('team_todo')!, { action: 'close', todoRef: TODO }, {
+      kind: 'committed', action: 'close', created: false, todo: closed, todos: [closed], channelCounts: [{ channelRef: CHANNEL, count: 0 }],
+    })
+    expect(repeat).toContain(`No change — ${TODO} is already closed — nothing was written.`)
+    expect(repeat).not.toContain('Committed')
+  })
+})

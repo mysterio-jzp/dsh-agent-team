@@ -3,6 +3,8 @@ import type {
   AgentTeamClientMemberStatus,
   AgentTeamChannelRef,
   AgentTeamConfirmationToken,
+  AgentTeamHumanTodo,
+  AgentTeamHumanTodoRef,
   AgentTeamMemberId,
   AgentTeamMessageRef,
   AgentTeamRequestId,
@@ -22,6 +24,7 @@ import { TeamMessage } from './TeamMessage.tsx'
 import { TeamRunDivider } from './TeamRunDivider.tsx'
 import { firstSentence, formatActivity, formatClaimState, formatRiskClass, formatTaskStatus, formatTaskTitle, mentionNameOf, mentionNamesOf, mentionedMemberIds, mentionsHuman, taskStatusDot, type MentionHandle } from './team-formatters.ts'
 import { TeamStateDot } from './TeamStateDot.tsx'
+import { HumanTodoAnswerMark, HumanTodoBoard, isUnsettledTodo, listedState, useAnsweredTodos, type HumanTodoTimes } from './HumanTodoBoard.tsx'
 import { mintRequestId, uploadComposerFiles } from './requests.ts'
 import { daySeparatorLabel, isRunGap, timelineDayKey } from './team-separators.ts'
 import { useTimelineScroll } from './timeline-scroll.ts'
@@ -31,6 +34,7 @@ import { hostThreadRefLookup, jumpToThread } from './refs.ts'
 import { rosterChannelName, rosterMember } from './refs.ts'
 import css from './conversation.module.css'
 import threadCss from './thread.module.css'
+import todoCss from './human-todos.module.css'
 
 interface TeamThreadPageProps {
   readonly workspaceId: WorkspaceId
@@ -60,6 +64,8 @@ interface TeamThreadPageProps {
   readonly resolveThreadRefs: TeamConversationProps['resolveThreadRefs']
   readonly resolveMessageRefs: TeamConversationProps['resolveMessageRefs']
   readonly replyCapabilities: TeamConversationProps['replyCapabilities']
+  readonly loadHumanTodos: TeamConversationProps['loadHumanTodos']
+  readonly changeHumanTodo: TeamConversationProps['changeHumanTodo']
   readonly openMemberSession: TeamConversationProps['openMemberSession']
   readonly t: TeamConversationProps['t']
 }
@@ -131,12 +137,28 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const {
     workspaceId, humanName, humanAvatarUrl, channelRef, taskRef, threadRef, taskNumber, backToWorkspace, selectChannel, selectThread, resolveTaskRefs, resolveThreadRefs, openMemberSession, putAttachment,
     loadChannels, readThread, loadThreadHistory, threadObservations,
-    subscribeChanges, loadMembers, drafts, getAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, t,
+    subscribeChanges, loadMembers, drafts, getAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, loadHumanTodos, changeHumanTodo, t,
   } = props
   const threadRequest = { threadRef, ...(taskRef === undefined ? {} : { taskRef }) }
   const [projection, setProjection] = useState<ReadProjection>()
   const [channelView, setChannelView] = useState<AgentTeamView>()
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
+  // Which view of the Thread the reader is in. The composer and the timeline
+  // stay mounted either way: switching to the checklist must not cost a
+  // half-written reply, and the board reads the same facts the timeline does.
+  const [view, setView] = useState<'thread' | 'board'>('thread')
+  // This Thread's Human to-dos, and the idempotent notice a repeat action
+  // writes. Both are the board's alone; the timeline reads neither.
+  const [todos, setTodos] = useState<readonly AgentTeamHumanTodo[]>()
+  const [todoNotice, setTodoNotice] = useState<string>()
+  const [todoPending, setTodoPending] = useState(false)
+  // The to-do a jump from its answering message landed on, held for one pulse.
+  const [flashedTodo, setFlashedTodo] = useState<AgentTeamHumanTodoRef>()
+  const todoRequestIds = useRef(new Map<string, AgentTeamRequestId>())
+  // The reply the composer is writing as the answer to a to-do: `answer` is a
+  // link between an existing message and the to-do, so the reply has to land
+  // first and its ref is what answers.
+  const [answeringTodo, setAnsweringTodo] = useState<AgentTeamHumanTodo>()
   // Current Thread followers; the composer ranks them first because a mention
   // to a follower delivers directly instead of entering the invite detour.
   const [followerIds, setFollowerIds] = useState<ReadonlySet<AgentTeamMemberId>>(() => new Set())
@@ -346,6 +368,109 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     }
   }
 
+  /**
+   * This Thread's to-dos. A failed read keeps what is already on screen rather
+   * than emptying the checklist, and reports through the page's error surface:
+   * the list is a record the reader is working through, so losing it would cost
+   * them their place.
+   */
+  const refreshTodos = async (): Promise<void> => {
+    try {
+      const result = await loadHumanTodos({ workspaceId, threadRef })
+      if (!mountedRef.current) return
+      if (result.ok) setTodos(result.value.todos)
+      else setError(result.error.message)
+    } catch (cause) {
+      if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause))
+    }
+  }
+
+  /**
+   * The instant each to-do's sequences happened. The ledger stores positions,
+   * not clocks, so the page answers from the facts it already holds — a
+   * sequence whose fact has not been loaded leaves the instant unstated rather
+   * than guessed, and the line drops it rather than printing a wrong time.
+   */
+  const todoTimes = useMemo(() => {
+    const instantBySequence = new Map<number, string>()
+    for (const fact of [...readFacts.map(entry => entry.fact), ...currentFacts]) {
+      const occurredAt = fact.kind === 'message' ? fact.message.occurredAt : fact.occurredAt
+      if (fact.kind === 'activity' || fact.kind === 'message') instantBySequence.set(fact.sequence, occurredAt)
+    }
+    return (todo: AgentTeamHumanTodo): HumanTodoTimes => ({
+      dispatchedAt: undefined,
+      claimedAt: todo.claimedSequence === undefined ? undefined : instantBySequence.get(todo.claimedSequence),
+    })
+  }, [readFacts, currentFacts])
+
+  /**
+   * One to-do transition. Every action here names a target state rather than an
+   * event, so the Host answers `changed: false` for a repeat instead of failing
+   * — and that answer is the point: the reader has to see that pressing again
+   * wrote nothing, which is what stops a second press from reading as a second
+   * record.
+   */
+  const mutateTodo = async (todo: AgentTeamHumanTodo, action: 'claim' | 'close'): Promise<void> => {
+    if (todoPending) return
+    setTodoPending(true)
+    setError(undefined)
+    setTodoNotice(undefined)
+    // One requestId per (to-do, action): a retry after a transport failure
+    // replays the same intent instead of minting a second one.
+    const key = `${todo.todoRef}:${action}`
+    const requestId = todoRequestIds.current.get(key) ?? mintRequestId()
+    todoRequestIds.current.set(key, requestId)
+    try {
+      const result = await changeHumanTodo({ requestId, workspaceId, todoRef: todo.todoRef, action })
+      if (!result.ok) { setError(result.error.message); return }
+      todoRequestIds.current.delete(key)
+      setTodos(current => current === undefined ? current
+        : current.map(entry => entry.todoRef === result.value.todo.todoRef ? result.value.todo : entry))
+      // `changed` false is not a failure: it is the Host saying the state
+      // already held, and the notice says so in the same words the prototype
+      // uses so the reader can tell "nothing happened" from "something broke".
+      if (!result.value.changed) setTodoNotice(action === 'claim' ? t('humanTodoClaimAlready') : t('humanTodoCloseAlready'))
+      else setTodoNotice(action === 'claim' ? t('humanTodoClaimed') : t('humanTodoClosed'))
+    } catch (cause) {
+      if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setTodoPending(false)
+    }
+  }
+
+  /**
+   * "Answer in the Thread" is a handoff, not a mutation of its own: the answer
+   * is a real reply, and the Host binds the to-do to that message's ref. So the
+   * press targets the composer, and the binding happens when the reply lands.
+   */
+  const startAnsweringTodo = (todo: AgentTeamHumanTodo): void => {
+    setAnsweringTodo(todo)
+    setView('thread')
+    timeline.scrollToBottom()
+  }
+
+  /** Bind the reply that just landed to the to-do that was waiting for it. */
+  const settleAnsweredTodo = async (messageRef: AgentTeamMessageRef): Promise<void> => {
+    const target = answeringTodo
+    if (target === undefined) return
+    const requestId = mintRequestId()
+    try {
+      const result = await changeHumanTodo({ requestId, workspaceId, todoRef: target.todoRef, action: 'answer', messageRef })
+      if (!mountedRef.current) return
+      if (result.ok) {
+        setTodos(current => current === undefined ? current
+          : current.map(entry => entry.todoRef === result.value.todo.todoRef ? result.value.todo : entry))
+      }
+      // The reply itself committed either way: an unbound answer is a worse
+      // record, not a failed message, so it surfaces rather than rolls back.
+      else setError(result.error.message)
+    } catch (cause) {
+      if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setAnsweringTodo(undefined)
+    }
+  }
+
   useEffect(() => {
     mountedRef.current = true
     // The previous mount's supplemental round must not answer for this one.
@@ -416,6 +541,9 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
       await drainUnread()
     })()
     void refreshSupplemental()
+    // The checklist is its own read, so a slow one never holds up the timeline:
+    // the Thread opens on the conversation and the board fills in behind it.
+    void refreshTodos()
     const disposers = [
       subscribeChanges({ kind: 'thread', threadRef }, update => {
         if (!mountedRef.current) return
@@ -423,11 +551,14 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         void refreshPassiveFacts()
         // Attention changes wake this scope too; keep the mention ranking current.
         void refreshFollowers()
+        // A dispatch or a transition lands on this Thread's own scope.
+        void refreshTodos()
       }),
       subscribeChanges({ kind: 'workspace', workspaceId }, update => {
         if (!mountedRef.current) return
         if (update.type === 'failed') { setError(update.message); return }
         void refreshSupplemental()
+        void refreshTodos()
       }),
       // Presence transitions commit nothing: only the member rows move, so
       // the roster refreshes alone — the supplemental fetch's channel view
@@ -460,6 +591,25 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     if (timeline.isPinned()) setNewFactsCount(0)
   }
 
+  // The selected tab is the tab stop, so Left/Right move both focus and
+  // selection together the way the platform's tablist does.
+  const activeTabRef = useRef<HTMLButtonElement>(null)
+  const handleTabKeys = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return
+    event.preventDefault()
+    const next = view === 'thread' ? 'board' : 'thread'
+    setView(next)
+    queueMicrotask(() => { activeTabRef.current?.focus({ preventScroll: true }) })
+  }
+
+  // The pulse on a to-do a jump landed on is also the target's lifetime, so a
+  // jump that is still settling can never outlive the mark that explains it.
+  useEffect(() => {
+    if (flashedTodo === undefined) return
+    const timer = setTimeout(() => { setFlashedTodo(undefined) }, 1200)
+    return () => { clearTimeout(timer) }
+  }, [flashedTodo])
+
   const loadOlder = async (): Promise<void> => {
     if (historyHasMore === false && historyCursor === undefined) return
     const beforeSequence = historyCursor ?? minSequence(currentFactsRef.current)
@@ -486,6 +636,10 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const resolvedTaskNumber = taskNumber ?? channelView?.taskNumbers.find(entry => entry.taskRef === task?.taskRef)?.taskNumber
   const taskTitle = activeProjection === undefined ? undefined : formatTaskTitle(activeProjection.anchor.body)
   const taskClaims = activeProjection?.claims ?? []
+  // The checklist in ledger order, and the answering targets keyed by the
+  // message that answered each one so a row can find its own to-do.
+  const listedTodos = todos ?? []
+  const answeredTodos = useAnsweredTodos(listedTodos)
   const effectiveChannelRef = task?.channelRef ?? channelRef
   const channelMemberIds = useMemo(() => new Set(channelView?.members.filter(item => item.channelRef === effectiveChannelRef).map(item => item.memberId) ?? []), [channelView, effectiveChannelRef])
   const channelMembers = members.filter(status => channelMemberIds.size === 0 || channelMemberIds.has(status.member.memberId))
@@ -566,27 +720,39 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // because the first paint can still be growing: a jump made against a timeline
   // that has not finished laying out would be undone by the pin-to-bottom policy,
   // so every later commit re-centres it until the pulse releases the target.
+  //
+  // The move is the timeline's own `scrollTop`, never `scrollIntoView`: that
+  // method walks up the ancestor chain and scrolls every scrollable box it
+  // meets, so centring a Message here would also drag the panel host and the
+  // window. See `centerOn` in timeline-scroll.ts.
   useLayoutEffect(() => {
     if (pendingJump === undefined) return
     const node = document.querySelector(`[data-message-ref="${pendingJump}"]`)
-    if (node === null) return
-    node.scrollIntoView({ block: 'center' })
+    if (!(node instanceof HTMLElement)) return
+    timeline.centerOn(node)
     // The reader now sits on one Message rather than at the tail, so the shared
     // scroll policy has to hear it: otherwise the next arriving fact counts them
     // as pinned and pulls the view back to the bottom, undoing the jump.
     timelineOnScroll()
     setFlashedMessage(pendingJump)
-  }, [pendingJump, currentFacts, readFacts, timelineOnScroll])
+  }, [pendingJump, currentFacts, readFacts, timelineOnScroll, timeline])
   /** Take the reader to the Message a reply answers, when it is on screen. */
   const jumpToMessage = useCallback((messageRef: AgentTeamMessageRef): void => {
     const node = document.querySelector(`[data-message-ref="${messageRef}"]`)
-    if (node === null) return
-    node.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    if (!(node instanceof HTMLElement)) return
+    timeline.centerOn(node, { smooth: true })
     setFlashedMessage(messageRef)
-  }, [])
+  }, [timeline])
   // One stable callback for every row: TeamMessage is memoized, so a fresh
   // closure per row would re-render the whole timeline on any page render.
   const handleReply = useCallback((messageRef: AgentTeamMessageRef): void => { setReplyTarget(messageRef) }, [])
+  // Jumping from an answering message back to the to-do it settled switches to
+  // the checklist and pulses that entry: the mark's whole purpose is to close
+  // the loop between the two views, so it must cross the tab as well.
+  const openTodo = useCallback((todoRef: AgentTeamHumanTodoRef): void => {
+    setView('board')
+    setFlashedTodo(todoRef)
+  }, [])
   const handleOpenReplyTo = useCallback((messageRef: AgentTeamMessageRef): void => { jumpToMessage(messageRef) }, [jumpToMessage])
   // Roster chips resolve synchronously from loaded data: channel names from
   // the Channel view, member facts from the member list. Anything outside the
@@ -670,7 +836,16 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         replyTarget={replyTarget === fact.message.messageRef}
         replyFlash={flashedMessage === fact.message.messageRef}
         {...(senderStatus === undefined ? {} : { senderTitle: senderStatus.member.description })}
-      />
+      >
+        {/* A message that answered a to-do says so where it stands, and the
+            mark goes back to the entry it settled: the answer lives in the
+            Thread, so the way back to what it answered has to live here too. */}
+        {answeredTodos.has(fact.message.messageRef) && <HumanTodoAnswerMark
+          todo={answeredTodos.get(fact.message.messageRef)!}
+          onOpen={openTodo}
+          t={t}
+        />}
+      </TeamMessage>
     }
     return <p className={threadCss.activityRow} key={factKey(fact)}><span className={threadCss.activityMark} aria-hidden="true" /><span className={threadCss.activityText}>{formatActivity(fact.activity, { t, actorName: memberName, claims: taskClaims })}</span></p>
   }
@@ -858,6 +1033,10 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         setReplyRequestId(undefined)
         setConfirmation(undefined)
         setStatusMessage(undefined)
+        // The reply that just landed is the answer to the to-do the reader
+        // pressed "answer" on: the binding is a second, separate fact about an
+        // existing message, so it is written after the message exists.
+        await settleAnsweredTodo(committed.message.messageRef)
         await refreshSupplemental()
       } else if (result.value.kind === 'confirmation_required') {
         setConfirmation(result.value.confirmationToken)
@@ -988,9 +1167,43 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
           </div>
         </DisclosureRow>
       </section>}
+      {/* The Thread's views. Only the two this batch lands: the checklist lives
+          inside the Thread rather than at a top-level page, because a to-do is
+          one fact of this discussion and reading it away from the work loses
+          the context that made it an ask. */}
+      <div className={todoCss.viewTabs} role="tablist" aria-label={t('viewTabs')} onKeyDown={handleTabKeys}>
+        <button type="button" role="tab" className={todoCss.viewTab} data-view="thread" id="team-view-tab-thread"
+          aria-selected={view === 'thread'} aria-controls="team-view-panel-thread" tabIndex={view === 'thread' ? 0 : -1}
+          ref={view === 'thread' ? activeTabRef : undefined}
+          onClick={() => { setView('thread') }}>{t('viewThreadTab', { count: currentFacts.length })}</button>
+        <button type="button" role="tab" className={todoCss.viewTab} data-view="board" id="team-view-tab-board"
+          aria-selected={view === 'board'} aria-controls="team-view-panel-board" tabIndex={view === 'board' ? 0 : -1}
+          ref={view === 'board' ? activeTabRef : undefined}
+          onClick={() => { setView('board') }}>{t('viewBoardTab', { count: listedTodos.length })}</button>
+      </div>
     </div>
 
-    <section ref={timeline.ref} onScroll={handleTimelineScroll} className={css.timeline} aria-label={t('timelineLabel')}>
+    {view === 'board'
+      ? <section id="team-view-panel-board" role="tabpanel" aria-labelledby="team-view-tab-board" className={todoCss.boardPanel}>
+        <HumanTodoBoard
+          workspaceId={workspaceId}
+          humanName={humanName}
+          todos={listedTodos}
+          loading={todos === undefined}
+          {...(error === undefined ? {} : { error })}
+          pending={todoPending}
+          memberName={memberName}
+          times={todoTimes}
+          {...(resolvedTaskNumber === undefined ? {} : { taskNumber: resolvedTaskNumber })}
+          {...(todoNotice === undefined ? {} : { notice: todoNotice })}
+          onClaim={todo => { void mutateTodo(todo, 'claim') }}
+          onAnswer={startAnsweringTodo}
+          onClose={todo => { void mutateTodo(todo, 'close') }}
+          {...(flashedTodo === undefined ? {} : { flashedTodoRef: flashedTodo })}
+          t={t}
+        />
+      </section>
+      : <section id="team-view-panel-thread" role="tabpanel" aria-labelledby="team-view-tab-thread" ref={timeline.ref} onScroll={handleTimelineScroll} className={css.timeline} aria-label={t('timelineLabel')}>
       <div className={css.timelineContent}>
         {loading && projection === undefined && error === undefined && <div className={css.emptySurface}><p className={css.loadingState}><span className={css.loadingMark} aria-hidden="true" />{t('loadingThread')}</p></div>}
         {projection === undefined && error !== undefined && <div className={css.errorState} role="alert"><span>{error}</span><Button size="sm" variant="outline" onClick={() => { void readCurrent() }}>{t('retry')}</Button></div>}
@@ -1007,7 +1220,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
           <button type="button" className={threadCss.newUpdatesJump} onClick={() => { setNewFactsCount(0); timeline.scrollToBottom() }}>{t('newUpdatesJump', { count: newFactsCount })}</button>
         </div>}
       </div>
-    </section>
+      </section>}
 
     {projection !== undefined && thread !== undefined ? (
       task?.resolution === 'closed'

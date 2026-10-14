@@ -1,0 +1,146 @@
+/* ==========================================================================
+ * dsh-agent-team 界面正稿 · 原型专用设计令牌
+ *
+ * 这些值**逐条抄自** DSH 主题的定义处
+ * （deepseek-harness/packages/client/ui-theme/src/styles/design-platform.css，
+ *  2026-10-14 现读）。原型把它们写成字面量只是为了单文件离线打开 ——
+ * 落地进 packages/client-agent-team/src/client/*.module.css 时，
+ * **必须**换回右侧注释里的那个 --dsw-* token，⛔ 不许落地这些字面量。
+ *
+ * 名字与 token 一一对应，看见 `--proto-bubble` 就知道该写
+ * `var(--dsw-specific-bubble)`。
+ * ========================================================================== */
+
+:root {
+  /* -- 面（surface） ---------------------------------------------------- */
+  --proto-bg-base: rgb(255, 255, 255);            /* --dsw-alias-bg-base */
+  --proto-sidebar: rgb(249, 250, 251);            /* --dsw-specific-sidebar-fill */
+  --proto-nav-hover: rgb(241, 243, 245);          /* --dsw-specific-sidebar-nav-item-hover */
+  --proto-nav-active: rgb(235, 238, 242);         /* --dsw-specific-sidebar-nav-item-active */
+  --proto-nav-active-accent: rgb(228, 237, 253);  /* --dsw-specific-sidebar-nav-item-active-accent */
+  --proto-preview-surface: rgb(235, 238, 242);    /* --dsw-alias-bg-document-preview */
+  --proto-layer-1: rgb(255, 255, 255);            /* --dsw-alias-bg-layer-1 */
+
+  /* -- 交互底（interactive） -------------------------------------------- */
+  --proto-hover: rgba(38, 49, 72, .06);           /* --dsw-alias-interactive-bg-hover */
+  --proto-hover-solid: rgb(241, 243, 245);        /* --dsw-alias-interactive-bg-hover-solid */
+
+  /* -- 文字（label） ---------------------------------------------------- */
+  --proto-label-primary: rgb(15, 17, 21);         /* --dsw-alias-label-primary */
+  --proto-label-secondary: rgb(97, 102, 107);     /* --dsw-alias-label-secondary */
+  --proto-label-tertiary: rgb(129, 133, 140);     /* --dsw-alias-label-tertiary */
+  --proto-label-caption: rgb(173, 178, 184);      /* --dsw-alias-label-caption */
+  --proto-label-foreground: rgb(255, 255, 255);   /* --dsw-alias-label-primary-foreground */
+
+  /* -- 中性边框（border，落地写 1px —— 见前端设计文档「中性描边宽度」） -- */
+  --proto-border-l1: rgba(0, 0, 0, .04);          /* --dsw-alias-border-l1 */
+  --proto-border-l2: rgba(0, 0, 0, .10);          /* --dsw-alias-border-l2 */
+  --proto-border-l3: rgba(0, 0, 0, .12);          /* --dsw-alias-border-l3 */
+  --proto-border-l4: rgba(0, 0, 0, .16);          /* --dsw-alias-border-l4 */
+
+  /* -- 状态 ------------------------------------------------------------- */
+  --proto-business: rgb(65, 118, 230);            /* --dsw-alias-state-business-primary */
+  --proto-business-tertiary: rgb(228, 237, 253);  /* --dsw-alias-state-business-tertiary */
+  --proto-success: rgb(34, 197, 94);              /* --dsw-alias-state-success-primary */
+  --proto-warn-primary: rgb(245, 158, 11);        /* --dsw-alias-state-warn-primary */
+  --proto-warn-tertiary: rgb(254, 245, 231);      /* --dsw-alias-state-warn-tertiary */
+  --proto-warn-label: rgb(221, 134, 41);          /* --dsw-alias-state-warn-label（⛔ 只作描边，不作小字：白底仅 2.79:1） */
+  --proto-warn-text: rgb(120, 53, 15);            /* 派生：小字用的 amber 深档 —— 白底 9.07:1／warn-tertiary 上 8.39:1 */
+  --proto-tag-claimed-text: rgb(30, 64, 175);     /* 派生：business-tertiary 底上的小字（7.17:1；直接用 business 只有 3.60:1） */
+  --proto-error: rgb(236, 19, 19);                /* --dsw-alias-state-error-primary */
+  --proto-idle: rgb(212, 212, 212);               /* --dsw-alias-state-idle-primary */
+  --proto-link: rgb(65, 118, 230);                /* --dsw-alias-link */
+
+  /* -- 圆角 / 阴影 ------------------------------------------------------ */
+  --proto-radius-xs: 4px;                         /* --dsw-radius-xs */
+  --proto-radius-sm: 8px;                         /* --dsw-radius-sm */
+  --proto-radius-md: 12px;                        /* --dsw-radius-md */
+  --proto-radius-lg: 16px;                        /* --dsw-radius-lg */
+  --proto-radius-xl: 20px;                        /* --dsw-radius-xl */
+  --proto-elevation-stroke: rgba(0, 0, 0, .10);   /* --dsw-elevation-stroke-color */
+  --proto-elevation-soft: 0 1px 2px rgba(16, 20, 28, .05);
+  --proto-elevation-prominent: 0 8px 24px rgba(16, 20, 28, .12);
+
+  /* -- 焦点环（全站一种蓝；落地写 token + 兜底值） ---------------------- */
+  --proto-focus-ring: 2px solid var(--proto-business);  /* --dsw-focus-ring-width/color */
+
+  /* -- Team 派生值（⛔ 不是 token：见于 conversation.module.css 的既有裁决） -- */
+  --proto-bubble: rgb(237, 243, 254);             /* --dsw-specific-bubble（浅色档） */
+  --proto-mention-chip: rgb(241, 243, 245);       /* --dsw-alias-markdown-tag */
+  --proto-mention-mine: rgb(243, 232, 220);       /* 提及人类：warn 派生，见说明 */
+  --proto-mention-mine-text: rgb(120, 53, 15);    /* 提及人类文字：warn-text 派生，9.07:1 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --proto-bg-base: rgb(21, 21, 23);
+    --proto-sidebar: rgb(33, 33, 35);
+    --proto-nav-hover: rgb(44, 44, 46);
+    --proto-nav-active: rgb(44, 44, 46);
+    --proto-nav-active-accent: rgb(52, 65, 91);
+    --proto-preview-surface: rgb(21, 21, 23);
+    --proto-layer-1: rgb(35, 35, 36);
+    --proto-hover: rgba(255, 255, 255, .08);
+    --proto-hover-solid: rgb(44, 44, 46);
+    --proto-label-primary: rgb(235, 238, 242);
+    --proto-label-secondary: rgb(173, 178, 184);
+    --proto-label-tertiary: rgb(151, 157, 166);
+    --proto-label-caption: rgb(129, 133, 140);
+    --proto-border-l1: rgba(255, 255, 255, .06);
+    --proto-border-l2: rgba(255, 255, 255, .10);
+    --proto-border-l3: rgba(255, 255, 255, .14);
+    --proto-border-l4: rgba(255, 255, 255, .18);
+    --proto-business: rgb(122, 170, 255);
+    --proto-business-tertiary: rgb(40, 49, 66);
+    --proto-link: rgb(122, 170, 255);
+    --proto-warn-tertiary: rgb(39, 36, 31);
+    --proto-warn-label: rgb(247, 173, 49);
+    --proto-warn-text: rgb(247, 173, 49);         /* 深色档下 amber 亮档本身达标（8.08:1） */
+    --proto-tag-claimed-text: rgb(122, 170, 255); /* 深色档的 business 亮档在深底上合规 */
+    --proto-elevation-stroke: rgba(255, 255, 255, .10);
+    --proto-elevation-soft: none;
+    --proto-bubble: rgb(44, 44, 46);              /* --dsw-specific-bubble（深色档） */
+    --proto-mention-chip: rgb(53, 54, 56);
+    --proto-mention-mine: rgb(74, 58, 34);
+    --proto-mention-mine-text: rgb(247, 173, 49);
+  }
+}
+
+:root[data-theme="dark"] {
+  --proto-bg-base: rgb(21, 21, 23);
+  --proto-sidebar: rgb(33, 33, 35);
+  --proto-nav-hover: rgb(44, 44, 46);
+  --proto-nav-active: rgb(44, 44, 46);
+  --proto-nav-active-accent: rgb(52, 65, 91);
+  --proto-preview-surface: rgb(21, 21, 23);
+  --proto-layer-1: rgb(35, 35, 36);
+  --proto-hover: rgba(255, 255, 255, .08);
+  --proto-hover-solid: rgb(44, 44, 46);
+  --proto-label-primary: rgb(235, 238, 242);
+  --proto-label-secondary: rgb(173, 178, 184);
+  --proto-label-tertiary: rgb(151, 157, 166);
+  --proto-label-caption: rgb(129, 133, 140);
+  --proto-border-l1: rgba(255, 255, 255, .06);
+  --proto-border-l2: rgba(255, 255, 255, .10);
+  --proto-border-l3: rgba(255, 255, 255, .14);
+  --proto-border-l4: rgba(255, 255, 255, .18);
+  --proto-business: rgb(122, 170, 255);
+  --proto-business-tertiary: rgb(40, 49, 66);
+  --proto-link: rgb(122, 170, 255);
+  --proto-warn-tertiary: rgb(39, 36, 31);
+  --proto-warn-label: rgb(247, 173, 49);
+  --proto-warn-text: rgb(247, 173, 49);
+  --proto-tag-claimed-text: rgb(122, 170, 255);
+  --proto-elevation-stroke: rgba(255, 255, 255, .10);
+  --proto-elevation-soft: none;
+  --proto-bubble: rgb(44, 44, 46);
+  --proto-mention-chip: rgb(53, 54, 56);
+  --proto-mention-mine: rgb(74, 58, 34);
+  --proto-mention-mine-text: rgb(247, 173, 49);
+}
+
+/* 圆角面一律配 corner-shape: round（平台按 superellipse(1.5) 弯圆角，
+   不配对会把正圆压成方圆）。 */
+.avatar, .pill, .badge, .dot, .iconBtn, .round {
+  corner-shape: round;
+}

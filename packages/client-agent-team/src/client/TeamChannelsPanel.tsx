@@ -13,6 +13,7 @@ import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/clie
 import { Button, IconArchiveOutlineRegular, IconEditOutlineRegular, IconPlusOutlineRegular, Input, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamSidebarProps } from './slots.ts'
 import { TeamPresenceDot } from './TeamPresenceDot.tsx'
+import { HumanTodoCountBadge } from './HumanTodoBoard.tsx'
 import { MultiMenuField } from './multi-menu-field.tsx'
 import { SortableRow, useSidebarRowDrag } from './sidebar-drag.tsx'
 import { moveSidebarItem, useSidebarOrder } from './sidebar-order.ts'
@@ -28,6 +29,8 @@ interface TeamChannelsPanelProps {
   readonly workspaceId: WorkspaceId
   readonly loadMembers: TeamSidebarProps['loadMembers']
   readonly loadChannels: TeamSidebarProps['loadChannels']
+  /** The Host's own per-Channel to-do counts; one row badge prints one of them. */
+  readonly loadHumanTodos: TeamSidebarProps['loadHumanTodos']
   /** Membership and channel facts change outside this panel; the workspace scope keeps the list fresh. */
   readonly subscribeChanges: TeamSidebarProps['subscribeChanges']
   readonly createChannel: TeamSidebarProps['createChannel']
@@ -40,8 +43,13 @@ interface TeamChannelsPanelProps {
 }
 
 export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
-  const { workspaceId, loadMembers, loadChannels, subscribeChanges, createChannel, updateChannel, creatingAgents, selectedChannelRef, selectChannel, t } = props
+  const { workspaceId, loadMembers, loadChannels, loadHumanTodos, subscribeChanges, createChannel, updateChannel, creatingAgents, selectedChannelRef, selectChannel, t } = props
   const [view, setView] = useState<AgentTeamView>()
+  // The Host's per-Channel unsettled to-do counts, keyed for the rows. A failed
+  // read keeps the last good map: a badge that folded to zero on a failed read
+  // would say "nothing owed" exactly when the reader cannot know.
+  const [todoCounts, setTodoCounts] = useState<ReadonlyMap<AgentTeamChannelRef, number>>(() => new Map())
+  const keptTodoCountsRef = useRef<ReadonlyMap<AgentTeamChannelRef, number>>(new Map())
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
@@ -79,9 +87,13 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
     const sequence = refreshSequenceRef.current + 1
     refreshSequenceRef.current = sequence
     if (!loadedRef.current) setLoading(true)
-    const [channelResult, memberResult] = await Promise.all([
+    const [channelResult, memberResult, todoResult] = await Promise.all([
       loadChannels({ workspaceId, limit: 1 }),
       loadMembers({ workspaceId }),
+      // The Workspace-wide shape is what a badge needs: the Host derives one
+      // count per Channel across every Thread under it, which no Client-side
+      // sum of the Threads it happens to have loaded could reproduce.
+      loadHumanTodos({ workspaceId }),
     ])
     // A response for a panel the user has already left changes nothing: the
     // key-remounted successor owns the roster and selection state now.
@@ -100,11 +112,18 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
         .map(status => status.member.memberId))
       setSelected(current => new Set([...current].filter(memberId => selectable.has(memberId))))
     }
+    if (todoResult.ok) {
+      const counts = new Map(todoResult.value.channelCounts.map(entry => [entry.channelRef, entry.count]))
+      keptTodoCountsRef.current = counts
+      setTodoCounts(counts)
+    } else {
+      setTodoCounts(keptTodoCountsRef.current)
+    }
     if (!channelResult.ok) setError(channelResult.error.message)
     else if (!memberResult.ok) setError(memberResult.error.message)
     else setError(undefined)
     setLoading(false)
-  }, [loadChannels, loadMembers, workspaceId])
+  }, [loadChannels, loadHumanTodos, loadMembers, workspaceId])
 
   useEffect(() => {
     mountedRef.current = true
@@ -141,7 +160,7 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
   const closeForm = () => {
     if (mutating) return
     setFormOpen(false)
-    queueMicrotask(() => { triggerRef.current?.focus() })
+    queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) })
   }
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -166,7 +185,7 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
         setSelected(new Set())
         setFormOpen(false)
         await refresh()
-        queueMicrotask(() => { triggerRef.current?.focus() })
+        queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) })
       } else {
         setError(result.error.message)
       }
@@ -241,6 +260,7 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
                   members={members}
                   joinedIds={joined}
                   selected={selectedChannelRef === channel.channelRef}
+                  todoCount={todoCounts.get(channel.channelRef) ?? 0}
                   updateChannel={updateChannel}
                   archiveChannel={props.archiveChannel}
                   onCommitted={() => { void refresh() }}
@@ -261,11 +281,13 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
  * One sidebar Channel row: the select button keeps the `#` identity while the
  * row menu carries the entry point; editing covers display facts and membership.
  */
-function ChannelRow({ channel, members, joinedIds, selected, updateChannel, archiveChannel, onCommitted, selectChannel, t }: {
+function ChannelRow({ channel, members, joinedIds, selected, todoCount, updateChannel, archiveChannel, onCommitted, selectChannel, t }: {
   readonly channel: AgentTeamChannel
   readonly members: readonly AgentTeamClientMemberStatus[]
   readonly joinedIds: ReadonlySet<AgentTeamMemberId>
   readonly selected: boolean
+  /** This Channel's unsettled to-do count, from the Host; zero draws no badge. */
+  readonly todoCount: number
   readonly updateChannel: TeamSidebarProps['updateChannel']
   readonly archiveChannel: TeamSidebarProps['archiveChannel']
   readonly onCommitted: () => Promise<void> | void
@@ -294,8 +316,12 @@ function ChannelRow({ channel, members, joinedIds, selected, updateChannel, arch
   return (
     <>
       <article className={css.channelRow} data-menu-open={menuOpen || undefined} aria-current={selected ? 'page' : undefined}>
-        <button type="button" className={css.channelSelect} aria-label={`# ${channel.name}`} onClick={() => { selectChannel(channel.channelRef) }}>
+        <button type="button" className={css.channelSelect} aria-label={todoCount > 0 ? t('channelWithTodos', { name: channel.name, count: todoCount }) : `# ${channel.name}`} onClick={() => { selectChannel(channel.channelRef) }}>
           <strong className={css.channelName}># {channel.name}</strong>
+          {/* The count lives on the control that owns it, so a reader who never
+              sees the capsule still meets the number. Zero draws nothing: an
+              absence of work is not a count reading zero. */}
+          <HumanTodoCountBadge count={todoCount} t={t} />
         </button>
         <span className={css.rowMenu}>
           <TeamRowMenu

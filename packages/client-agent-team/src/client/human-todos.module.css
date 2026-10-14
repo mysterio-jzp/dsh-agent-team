@@ -1,0 +1,263 @@
+/* Human to-dos (requirement 9). A to-do and a Member Claim answer different
+   questions — a to-do is a request aimed at the Human, a Claim is a Member's own
+   direction — so the two are told apart by shape as much as by wording: a
+   to-do is a rounded card with a state tag and its actions on the right, a
+   Claim is a row with a left rule and a square CLAIM mark. Someone who wrote
+   neither must be able to tell them apart at a glance. */
+
+.viewTabs {
+  align-items: center;
+  display: flex;
+  gap: 4px;
+  margin: 10px auto 0;
+  max-width: 880px;
+  min-width: 0;
+}
+
+.viewTab {
+  background: transparent;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  padding: 3px 10px;
+}
+.viewTab:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
+.viewTab[aria-selected='true'] {
+  background: var(--dsw-alias-interactive-bg-hover-solid);
+  color: var(--dsw-alias-label-primary);
+  font-weight: 600;
+}
+.viewTab:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.board {
+  align-content: start;
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px clamp(18px, 3vw, 36px) 24px;
+  scrollbar-gutter: stable;
+}
+
+/* The board fills the same grid row the timeline does, so switching tabs never
+   moves the page header or the composer. */
+.boardPanel {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The reading that says what the count on the Channel row means: the badge is
+   every unsettled to-do under that Channel, this screen is one Thread's list. */
+.boardNote {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-secondary);
+  display: grid;
+  font-size: 12.5px;
+  gap: 4px;
+  line-height: 1.6;
+  margin: 0 auto;
+  max-width: 840px;
+  padding: 10px 12px;
+  width: 100%;
+}
+
+.todoList {
+  align-content: start;
+  display: grid;
+  gap: 10px;
+  margin: 0 auto;
+  max-width: 840px;
+  width: 100%;
+}
+
+.todoCard {
+  background: var(--dsw-alias-bg-base);
+  border-radius: var(--dsw-radius-md, 12px);
+  box-shadow: 0 0 0 1px var(--dsw-alias-border-l2), var(--dsw-elevation-soft);
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+/* A claimed to-do keeps its place in the list and only marks itself: claiming
+   is a claim on nobody, so the card never locks another reader out. */
+.todoCard[data-state='claimed'] { box-shadow: 0 0 0 1px var(--dsw-alias-state-business-primary), var(--dsw-elevation-soft); }
+.todoCard[data-state='closed'] { opacity: .62; }
+
+.todoHead {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.todoHeadCopy { flex: 1; min-width: 0; }
+
+/* Identity seat: the deterministic Member hue and handle initial, the same
+   language the bubbles and the roster use, at the two sizes this board draws
+   (the requester beside the title, the claimer inside the footnote line). */
+.seat {
+  align-items: center;
+  background: hsl(var(--team-hue, 0) 42% 46%);
+  border-radius: 50%;
+  color: rgb(255 255 255);
+  display: inline-flex;
+  flex: none;
+  font-weight: 600;
+  justify-content: center;
+}
+.seat[data-seat='list'] { font-size: 12px; height: 26px; width: 26px; }
+.seat[data-seat='row'] { font-size: 10px; height: 18px; width: 18px; }
+
+.todoTitleRow {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.todoTitle {
+  color: var(--dsw-alias-label-primary);
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.todoOrigin {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  margin-top: 2px;
+}
+
+.todoBody {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.todoFoot {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.todoActor {
+  align-items: center;
+  color: var(--dsw-alias-label-secondary);
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+}
+.todoActor strong { color: var(--dsw-alias-label-primary); font-weight: 600; }
+
+.todoFootGrow { flex: 1; }
+
+/* The four state words carry the state on their own, so the state never rests
+   on a colour: grey the tag and the word still reads. */
+.stateTag {
+  align-items: center;
+  border-radius: var(--dsw-radius-sm);
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 600;
+  gap: 4px;
+  line-height: 16px;
+  padding: 2px 8px;
+}
+.stateTag[data-state='pending'] { background: var(--dsw-alias-state-warn-tertiary); color: var(--dsw-alias-state-warn-label); }
+.stateTag[data-state='claimed'] { background: var(--dsw-alias-state-business-tertiary, var(--dsw-alias-interactive-bg-hover-solid)); color: var(--dsw-alias-state-business-primary); }
+.stateTag[data-state='answered'] { background: var(--dsw-alias-interactive-bg-hover-solid); color: var(--dsw-alias-state-success-primary); }
+.stateTag[data-state='closed'] { background: var(--dsw-alias-interactive-bg-hover-solid); color: var(--dsw-alias-label-secondary); }
+.stateTag .dot { background: currentColor; border-radius: 50%; height: 6px; width: 6px; }
+
+/* The Human's own reply, kept under the to-do it answered: the answer lives in
+   the Thread as one message, and this states that binding rather than copying
+   the message a second time. */
+.answerCard {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-secondary);
+  display: grid;
+  font-size: 12.5px;
+  gap: 4px;
+  line-height: 1.6;
+  padding: 10px 12px;
+}
+.answerCard b { color: var(--dsw-alias-label-primary); }
+
+.todoEmpty {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  margin: 0 auto;
+  max-width: 840px;
+  padding: 8px 0;
+  width: 100%;
+}
+
+.todoError {
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 12px;
+  margin: 0 auto;
+  max-width: 840px;
+  width: 100%;
+}
+
+/* The idempotence notice: a repeat that wrote nothing is a success, not an
+   error, so it is a status line rather than an alert. */
+.todoStatus {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: var(--dsw-radius-sm);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  margin: 0 auto;
+  max-width: 840px;
+  padding: 8px 12px;
+  width: 100%;
+}
+
+/* The mark on the Thread message that answered a to-do, and the jump back. */
+.answerMark {
+  background: transparent;
+  border: 0;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  margin-top: 4px;
+  padding: 0;
+  text-align: left;
+}
+.answerMark:hover { color: var(--dsw-alias-label-primary); text-decoration: underline; }
+.answerMark:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+/* One to-do pulsing after a jump from its answering message. */
+.todoCard[data-flash] { box-shadow: 0 0 0 2px var(--dsw-alias-state-business-primary), var(--dsw-elevation-soft); }
+
+@media (prefers-reduced-motion: no-preference) {
+  .todoCard { transition: box-shadow 120ms ease-out; }
+}
+
+@media (max-width: 640px) {
+  .board { padding: 8px 12px 16px; scrollbar-gutter: auto; }
+  .viewTabs { padding: 0 12px; }
+}

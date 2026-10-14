@@ -170,7 +170,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
   const closeForm = () => {
     if (creating) return
     setFormOpen(false)
-    queueMicrotask(() => { triggerRef.current?.focus() })
+    queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) })
   }
 
   const provision = async (request: AgentTeamAddMemberRequest) => {
@@ -195,7 +195,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         } else {
           setRetryRequest(undefined)
         }
-        queueMicrotask(() => { triggerRef.current?.focus() })
+        queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) })
       } else {
         await refresh()
         setError(result.error.message)
@@ -241,7 +241,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         footer={<><Button variant="outline" disabled={creating} onClick={closeForm}>{t('cancel')}</Button>{!importing && <Button type="submit" form="team-agent-create-form" variant="primary" disabled={creating || handle.trim().length === 0}>{creating ? t('creatingAgent') : t('createAgent')}</Button>}</>}
       >
         <Button className={createCss.modeSwitch!} variant="outline" disabled={creating} aria-expanded={importing} onClick={() => { setImporting(value => !value); setError(undefined) }}>{importing ? t('createAgent') : t('importAgentTitle')}</Button>
-        {formOpen && importing ? <TeamAgentImport workspaceId={workspaceId} loadMembers={loadMembers} joinWorkspace={joinWorkspace} onPending={setCreating} onJoined={async () => { await refresh(); setFormOpen(false); queueMicrotask(() => { triggerRef.current?.focus() }) }} t={t} /> : <form id="team-agent-create-form" className={createCss.form} onSubmit={submit}>
+        {formOpen && importing ? <TeamAgentImport workspaceId={workspaceId} loadMembers={loadMembers} joinWorkspace={joinWorkspace} onPending={setCreating} onJoined={async () => { await refresh(); setFormOpen(false); queueMicrotask(() => { triggerRef.current?.focus({ preventScroll: true }) }) }} t={t} /> : <form id="team-agent-create-form" className={createCss.form} onSubmit={submit}>
           <label className={createCss.field}>
             <span>{t('agentName')}</span>
             <Input className={createCss.input!} value={handle} onChange={event => { setHandle(event.target.value); setRetryRequest(undefined) }} disabled={creating} autoFocus />

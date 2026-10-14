@@ -6,6 +6,8 @@ import type {
   AgentTeamArchiveMemberRequest,
   AgentTeamClientMemberStatus,
   AgentTeamInboxRequest,
+  AgentTeamHumanTodoActionRequest,
+  AgentTeamHumanTodoListRequest,
   AgentTeamSendMessageRequest,
   AgentTeamThreadHistoryRequest,
   AgentTeamThreadObservationsRequest,
@@ -231,6 +233,23 @@ function inboxQuery(request: AgentTeamInboxRequest): TeamQueryIdentity {
   }
 }
 
+/**
+ * The Human to-do query's identity: one key per Workspace and per scope, so a
+ * Thread's own list and the Workspace-wide Channel counts never share an answer.
+ * To-do facts move with any ledger commit — a dispatch can land in any Thread —
+ * so this query answers to the scope-less stream the way the Inbox does;
+ * presence wakes change no to-do and never reach it.
+ */
+function humanTodosQuery(request: AgentTeamHumanTodoListRequest): TeamQueryIdentity {
+  return {
+    key: `human-todos:${request.workspaceId}:${request.threadRef ?? 'all'}`,
+    covers: scope => scope === undefined
+      || (scope.kind === 'workspace' && scope.workspaceId === request.workspaceId)
+      || scope.kind === 'channel'
+      || scope.kind === 'thread',
+  }
+}
+
 /** Remote bindings shared by every Team slot; a surface-specific seat extends them below. */
 function teamSharedRemotes(
   ctx: ClientContext,
@@ -243,6 +262,12 @@ function teamSharedRemotes(
 ): Record<string, unknown> {
   return {
     loadChannels: (request: AgentTeamViewRequest) => ctx.remote.agentTeam.view(request),
+    // To-do facts move with any ledger commit in the Workspace — a dispatch can
+    // land in any Thread — so this query answers to the same broad surface the
+    // Inbox does, keyed by whether the caller asked for one Thread or the
+    // Workspace-wide counts so the two shapes never share an answer.
+    loadHumanTodos: (request: AgentTeamHumanTodoListRequest) => queries.read(humanTodosQuery(request), () => ctx.remote.agentTeam.humanTodos(request)),
+    changeHumanTodo: (request: AgentTeamHumanTodoActionRequest) => ctx.remote.agentTeam.changeHumanTodo(request),
     loadInbox: (request: AgentTeamInboxRequest) => queries.read(inboxQuery(request), () => ctx.remote.agentTeam.inbox(request)),
     subscribeReads: (listener: () => void) => reads.subscribe(listener),
     // Change subscriptions fold through the read layer so each dispatch

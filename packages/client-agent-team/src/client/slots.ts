@@ -13,6 +13,10 @@ import type {
   AgentTeamCreateChannelResult,
   AgentTeamInbox,
   AgentTeamInboxRequest,
+  AgentTeamHumanTodoActionRequest,
+  AgentTeamHumanTodoList,
+  AgentTeamHumanTodoListRequest,
+  AgentTeamHumanTodoResult,
   AgentTeamJoinWorkspaceRequest,
   AgentTeamJoinWorkspaceResult,
   AgentTeamLeaveWorkspaceRequest,
@@ -105,6 +109,12 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
     loadMembers: (request: AgentTeamMembersRequest) => Promise<RemoteResult<readonly AgentTeamClientMemberStatus[]>>
     /** Human direct-only Inbox slice; the badge sums each visible Workspace's total. */
     loadInbox: (request: AgentTeamInboxRequest) => Promise<RemoteResult<AgentTeamInbox>>
+    /**
+     * The Host's own per-Channel to-do counts, read with no Thread scope: one
+     * Channel row wears one number, and only the Host can derive it across
+     * every Thread under that Channel.
+     */
+    loadHumanTodos: (request: AgentTeamHumanTodoListRequest) => Promise<RemoteResult<AgentTeamHumanTodoList>>
     /** Fired after every committed durable Thread read; the badge refreshes without waiting for a changes wake. */
     subscribeReads: (listener: () => void) => () => void
     subscribeChanges: SubscribeTeamChanges
@@ -156,6 +166,13 @@ export type TeamConversationProps = PropsRuntime<'main'> & PropsLocale<'team'> &
   loadMembers: (request: AgentTeamMembersRequest) => Promise<RemoteResult<readonly AgentTeamClientMemberStatus[]>>
   /** Human direct-only Inbox slice; the Inbox page merges one call per visible Workspace. */
   loadInbox: (request: AgentTeamInboxRequest) => Promise<RemoteResult<AgentTeamInbox>>
+  /**
+   * The Human's to-do checklist: one Thread's detail, or the whole Workspace
+   * with the Host's own per-Channel counts when a badge needs the aggregate.
+   */
+  loadHumanTodos: (request: AgentTeamHumanTodoListRequest) => Promise<RemoteResult<AgentTeamHumanTodoList>>
+  /** Human-only to-do transitions: claim, answer, close. Each names a target state, so a repeat changes nothing. */
+  changeHumanTodo: (request: AgentTeamHumanTodoActionRequest) => Promise<RemoteResult<AgentTeamHumanTodoResult>>
   /** Human-only Thread Attention observations; the Thread composer ranks the returned followers first. */
   threadObservations: (request: AgentTeamThreadObservationsRequest) => Promise<RemoteResult<AgentTeamThreadObservations>>
   /** Agent-card session jump, shared by every slot; message member chips reuse it. */

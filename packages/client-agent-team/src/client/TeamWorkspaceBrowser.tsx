@@ -24,7 +24,7 @@ function InboxMark({ unread }: { readonly unread: number }) {
   </span>
 }
 
-export function TeamWorkspaceBrowser({ wide, expandSidebar, navigation, selectWorkspace, selectChannel, selectInbox, t, useWorkspaces, loadMembers, loadInbox, subscribeChanges, subscribeReads, addMember, loadChannels, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, archiveMember, joinWorkspace, leaveWorkspace, loadModels, openMemberSession }: TeamSidebarProps) {
+export function TeamWorkspaceBrowser({ wide, expandSidebar, navigation, selectWorkspace, selectChannel, selectInbox, t, useWorkspaces, loadMembers, loadInbox, loadHumanTodos, subscribeChanges, subscribeReads, addMember, loadChannels, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, archiveMember, joinWorkspace, leaveWorkspace, loadModels, openMemberSession }: TeamSidebarProps) {
   const navigationState = useSyncExternalStore(navigation.subscribe, navigation.getSnapshot, navigation.getSnapshot)
   const workspaces = useWorkspaces(state => state.items)
   const selected = navigationState.workspaceId
@@ -113,7 +113,7 @@ export function TeamWorkspaceBrowser({ wide, expandSidebar, navigation, selectWo
     if (!wide || pendingSection === undefined) return
     const node = pendingSection === 'agents' ? agentsRef.current : channelsRef.current
     setPendingSection(undefined)
-    queueMicrotask(() => { node?.querySelector<HTMLButtonElement>('button')?.focus() })
+    queueMicrotask(() => { node?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true }) })
   }, [wide, pendingSection])
 
   if (!wide) {
@@ -147,7 +147,7 @@ export function TeamWorkspaceBrowser({ wide, expandSidebar, navigation, selectWo
     <TeamWorkspaceSelector workspaces={workspaces} selectedId={selectedId} current={overviewIsCurrent} onSelect={selectWorkspace} t={t} />
     {selectedId !== undefined && <div className={css.workspaceSection}>
       <div ref={channelsRef}>
-        <TeamChannelsPanel key={selectedId} workspaceId={selectedId} loadMembers={loadMembers} loadChannels={loadChannels} subscribeChanges={subscribeChanges} createChannel={createChannel} updateChannel={updateChannel} archiveChannel={archiveChannel} creatingAgents={creatingAgents.filter(request => request.workspaceId === selectedId)} {...(navigationState.memberSessionId !== undefined || navigationState.channelRef === undefined ? {} : { selectedChannelRef: navigationState.channelRef })} selectChannel={selectChannel} t={t} />
+        <TeamChannelsPanel key={selectedId} workspaceId={selectedId} loadMembers={loadMembers} loadChannels={loadChannels} loadHumanTodos={loadHumanTodos} subscribeChanges={subscribeChanges} createChannel={createChannel} updateChannel={updateChannel} archiveChannel={archiveChannel} creatingAgents={creatingAgents.filter(request => request.workspaceId === selectedId)} {...(navigationState.memberSessionId !== undefined || navigationState.channelRef === undefined ? {} : { selectedChannelRef: navigationState.channelRef })} selectChannel={selectChannel} t={t} />
       </div>
       <div ref={agentsRef}>
         <TeamAgentsPanel key={selectedId} workspaceId={selectedId} loadMembers={loadMembers} subscribeChanges={subscribeChanges} addMember={addMember} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} joinWorkspace={joinWorkspace} leaveWorkspace={leaveWorkspace} loadModels={loadModels} {...(navigationState.memberSessionId === undefined ? {} : { memberSessionId: navigationState.memberSessionId })} openMemberSession={openMemberSession} onCreatingChange={(request, creating) => { setCreatingAgents(current => creating ? [...current.filter(item => item.requestId !== request.requestId), request] : current.filter(item => item.requestId !== request.requestId)) }} t={t} />

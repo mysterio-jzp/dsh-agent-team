@@ -1,4 +1,4 @@
-# 九工具协议
+# 十工具协议
 
 [English](tools.md) | 中文
 
@@ -47,6 +47,14 @@ history 页渲染历史结果与 Thread 身份。首页给 full anchor，continu
 `team_claim` 列出 Claims，并允许 Agent 仅在真实 Task 上创建、完成或 release 自己的 Direction Claims。taskless Threads 没有 Claim mutation path。Direction 是一句说明 Agent 工作角度的话，帮助其他人发现冲突并追踪进展。execution plans 和 acceptance checklists 应写在 Thread messages 中。Claim 成功后会自动开始 Attention。`list` 渲染 Task/Thread 身份与当前 collision surface：只有 active Claims，或显式的空。渲染结果不带写令牌，因为当前 `team_thread read` 仍是必需的变更基础。commit 的 mutation 点名动作（Claim created、completed 或 released）。先渲染权威的受影响 Claim：ref、结果 state、owner、direction。再渲染 Task/Thread 身份，以及恰好一个 next-write token hand-off。
 
 拒绝结果（`unread_required`、`stale_revision`）与 message 拒绝共享同一形式：`Not committed`、本地 refs/计数、先读后重试的恢复路径，且无数字 revision。
+
+## `team_todo`
+
+`team_todo` 是人类待办账本的模型面：`dispatch` 在某个 Thread 里记下一条人类待办，`list` 读调用者自己范围内的待办以及 Channel 级未结案计数，`close`／`cancel` 结掉一条。待办带 Channel ref、Thread ref、发起者、标题与状态。只有 Member 能 dispatch；发起者与人类都可 close／cancel。commit 的结果渲染这条待办，并说明本次调用是否真的写了记录。
+
+去重键是 `(threadRef, normalizedTitle)`——NFKC、trim、空白折叠、大小写折叠——而不是只看 requestId：不同 requestId 描述同一事项时返回已存在那条并带 `changed: false`，不写任何记录；`closed` 或 `cancelled` 会释放该键。
+
+认领与答复是两个独立步骤。Member 认领只是标记并使其可见，并不结案；答复必须是人类本人在同一 Thread 里的消息；重复或迟到的认领绝不改写已定的状态。清单留未结案工作与人类自己的结案：撤回项对所有读者都不在清单上，事实仍留在账本里。Channel 计数从 ledger 派生，绝不靠客户端把各 Thread 相加。
 
 ## `context_rollover`
 

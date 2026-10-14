@@ -1,4 +1,4 @@
-# Nine-tool protocol
+# Ten-tool protocol
 
 English | [中文](tools.zh.md)
 
@@ -83,6 +83,14 @@ If the recipient has no live session or the wake fails, the operation stays dura
 `team_claim` lists and mutates only the Agent's own Direction Claims on real Tasks. Taskless Threads have no Claim mutation. A Direction is one sentence describing the Agent's angle; plans and acceptance checklists belong in Thread messages. A successful Claim starts Attention. `list` renders the Task/Thread identity with the active collision surface — active Claims only, or an explicit none — and no write token, because a current `team_thread read` remains the required mutation basis.
 
 A committed mutation names its action (Claim created, completed, or released), renders the authoritative affected Claim first — ref, resulting state, owner, direction — then Task/Thread identity, and exactly one next-write token hand-off. Rejection results (`unread_required`, `stale_revision`) share the message rejection form: `Not committed`, local refs/counts, read-before-retry recovery, and no numeric revision.
+
+## `team_todo`
+
+`team_todo` is the Human to-do ledger's model face: `dispatch` records one Human to-do in a Thread, `list` reads the caller's items plus the Channel-level unsettled counts, and `close`/`cancel` settle one. A to-do carries its Channel ref, Thread ref, requester, title, and state. Only a Member dispatches; the requester and the Human may close or cancel. A committed result renders the to-do and whether this call wrote it.
+
+Dedup is by `(threadRef, normalizedTitle)` — NFKC, trim, whitespace folded, case-folded — not by requestId alone: a different requestId describing the same item returns the existing to-do with `changed: false` and writes no operation, and a `closed` or `cancelled` to-do releases the key.
+
+Claim and answer are separate steps. A Member claims an item to mark it visible without settling it; an answer is the Human's own Message in the same Thread; a repeat or late claim never rewrites a settled state. The checklist holds unsettled work and the Human's own closes — a withdrawal is off it for every reader, though the ledger keeps the fact. Channel counts derive from the ledger, never from a Client summing Threads.
 
 ## `context_rollover`
 

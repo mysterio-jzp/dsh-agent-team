@@ -46,6 +46,7 @@ export const AGENT_TEAM_TOOL_NAMES = Object.freeze([
   'team_thread',
   'team_message',
   'team_claim',
+  'team_todo',
   'team_view',
   'context_rollover',
   'context_checkpoint',

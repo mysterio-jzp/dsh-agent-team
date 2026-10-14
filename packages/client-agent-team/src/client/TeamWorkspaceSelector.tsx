@@ -54,7 +54,7 @@ export function TeamWorkspaceSelector({ workspaces, selectedId, current, onSelec
       const lists = document.querySelectorAll<HTMLElement>('body > [role="menu"]')
       const list = lists[lists.length - 1]
       if (list === undefined || list.contains(document.activeElement)) return
-      list.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
+      list.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus({ preventScroll: true })
     })
     return () => { cancelAnimationFrame(frame) }
   }, [open])

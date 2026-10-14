@@ -5,6 +5,7 @@ import { registerContextTools } from './context-tools.ts'
 import { service, workspaceOf, workspaceParam } from './host-access.ts'
 import type {
   AgentTeamClaimRef,
+  AgentTeamHumanTodoRef,
   AgentTeamMemberId,
   AgentTeamRequestId,
   AgentTeamMessageRef,
@@ -684,6 +685,165 @@ const teamClaim = defineTool({
   },
 })
 
+/** Model-facing view of one Human todo, shared by the checklist and every action outcome. */
+function todoView(todo: {
+  readonly todoRef: string
+  readonly channelRef: string
+  readonly threadRef: string
+  readonly title: string
+  readonly state: string
+  readonly requester: string
+  readonly claimedBy?: string | undefined
+  readonly claimedSequence?: number | undefined
+  readonly answeredMessageRef?: string | undefined
+  readonly resolvedBy?: string | undefined
+  readonly resolvedSequence?: number | undefined
+}): {
+  todoRef: string; channelRef: string; threadRef: string; title: string; state: string; requester: string
+  claimedBy?: string; claimedSequence?: number; answeredMessageRef?: string; resolvedBy?: string; resolvedSequence?: number
+} {
+  return {
+    todoRef: todo.todoRef, channelRef: todo.channelRef, threadRef: todo.threadRef, title: todo.title,
+    state: todo.state, requester: todo.requester,
+    ...(todo.claimedBy === undefined ? {} : { claimedBy: todo.claimedBy }),
+    ...(todo.claimedSequence === undefined ? {} : { claimedSequence: todo.claimedSequence }),
+    ...(todo.answeredMessageRef === undefined ? {} : { answeredMessageRef: todo.answeredMessageRef }),
+    ...(todo.resolvedBy === undefined ? {} : { resolvedBy: todo.resolvedBy }),
+    ...(todo.resolvedSequence === undefined ? {} : { resolvedSequence: todo.resolvedSequence }),
+  }
+}
+
+/** One checklist row: identity, state, and the origin the next action addresses. */
+function todoLine(todo: ReturnType<typeof todoView>): string {
+  const origin = todo.claimedBy === undefined ? '' : ` · claimed by ${todo.claimedBy}${todo.claimedSequence === undefined ? '' : ` (sequence ${todo.claimedSequence})`}`
+  const answer = todo.answeredMessageRef === undefined ? '' : ` · answered by ${todo.answeredMessageRef}`
+  const end = todo.resolvedBy === undefined ? '' : ` · ${todo.state} by ${todo.resolvedBy}${todo.resolvedSequence === undefined ? '' : ` (sequence ${todo.resolvedSequence})`}`
+  return `${todo.todoRef} · ${todo.state} · ${todo.channelRef} · ${todo.threadRef} — "${boundedSubject(todo.title)}" (requester ${todo.requester})${origin}${answer}${end}`
+}
+
+/**
+ * The Human's checklist, as a Member reaches it.
+ *
+ * "Human todo" is the ask a Member puts in front of the Human — not the
+ * Member's own work list. `dispatch` raises one and is deduplicated by Thread
+ * plus normalized title, so a second Member (or the same one, with another
+ * request id, spacing or case) describing the same outstanding ask does not
+ * create a second todo: the answer reports `created: false` and the render says
+ * plainly that nothing was new. A settled todo releases that key, so raising the
+ * same title again after a close is a genuinely new ask.
+ *
+ * `list` returns only the asks this Member dispatched — a withdrawal is off the
+ * checklist for every reader, while a closed ask stays as the record of the
+ * Human's own decision — plus a per-Channel count of every unsettled todo in
+ * the Workspace, a Host-derived number for a Channel badge rather than a
+ * client-side sum over Threads the client happens to hold.
+ *
+ * `close` and `cancel` retire an ask and are the Member's own: the Human's
+ * claim, answer and close happen in the Human's client, not here. Repeating an
+ * action that already holds writes nothing and reports `created: false`.
+ */
+const teamTodo = defineTool({
+  name: 'team_todo',
+  description: 'Raise, read and retire the asks you put in front of the Human — the Human todo checklist. dispatch raises one ask in one Thread; it is deduplicated by Thread plus title, so an ask that already stands is returned unchanged with created:false and nothing is written — say plainly that no todo was created. list shows the asks you dispatched plus the Host-derived count of unsettled todos per Channel (the number a Channel badge prints); a withdrawn ask is off the checklist while a closed one stays. close and cancel retire an ask you raised; the Human claims, answers and closes in their own client, and a settled todo frees its title for a later, genuinely new ask. Repeating an action that already holds writes nothing and reports created:false.',
+  parameters: {
+    action: { type: 'string', required: true, enum: ['dispatch', 'list', 'close', 'cancel'] },
+    threadRef: { type: 'string', description: "Full branded Thread ref exactly as returned by Team tools, including the 'thread:' prefix. An unambiguous abbreviation of the first 6+ UUID hex characters also resolves. dispatch requires it; list narrows to it when given." },
+    title: { type: 'string', description: 'dispatch only: the ask itself, in one line. Two asks whose titles differ only in spacing or case are the same ask.' },
+    todoRef: { type: 'string', description: "Full branded todo ref exactly as returned by team_todo, including the 'todo:' prefix. close and cancel require it." },
+    workspace: workspaceParam,
+  },
+  output: {
+    schema: { type: 'object', additionalProperties: false, properties: {
+      kind: { type: 'string', required: true }, action: { type: 'string', required: true },
+      created: { type: 'boolean' },
+      todo: { type: 'object', additionalProperties: false, properties: {
+        todoRef: { type: 'string', required: true }, channelRef: { type: 'string', required: true }, threadRef: { type: 'string', required: true },
+        title: { type: 'string', required: true }, state: { type: 'string', required: true }, requester: { type: 'string', required: true },
+        claimedBy: { type: 'string' }, claimedSequence: { type: 'number' }, answeredMessageRef: { type: 'string' },
+        resolvedBy: { type: 'string' }, resolvedSequence: { type: 'number' },
+      } },
+      todos: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        todoRef: { type: 'string', required: true }, channelRef: { type: 'string', required: true }, threadRef: { type: 'string', required: true },
+        title: { type: 'string', required: true }, state: { type: 'string', required: true }, requester: { type: 'string', required: true },
+        claimedBy: { type: 'string' }, claimedSequence: { type: 'number' }, answeredMessageRef: { type: 'string' },
+        resolvedBy: { type: 'string' }, resolvedSequence: { type: 'number' },
+      } } },
+      channelCounts: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+        channelRef: { type: 'string', required: true }, count: { type: 'number', required: true },
+      } } },
+      occurredAt: { type: 'string' },
+    } },
+    // Outcome first, and for a dispatch the outcome is the whole point: a
+    // reused ask must read as "nothing was created" before any fact, or the
+    // Agent would report a todo it never raised. The affected todo leads, the
+    // Member's own checklist follows, and Channel counts are labelled as
+    // Host-derived so nobody re-summarizes them client-side. No write token:
+    // todos are not revision-fenced.
+    render: (_args, value) => {
+      const counts = value.channelCounts.map(entry => `${entry.channelRef} · ${entry.count} unsettled`)
+      const footer = ['Channel counts — unsettled todos, derived by the Host', ...(counts.length === 0 ? ['No active Channel.'] : counts)]
+      if (value.kind === 'listed') {
+        const mine = value.todos.map(todo => todoLine(todo))
+        return [{ type: 'text', text: [
+          `Human todos — ${value.todos.length} ask(s) you raised`,
+          ...(mine.length === 0 ? ['No open ask: nothing you dispatched is waiting on the Human.'] : mine),
+          '',
+          ...footer,
+        ].join('\n') }]
+      }
+      if (value.todo === undefined) return [{ type: 'text', text: footer.join('\n') }]
+      const line = todoLine(value.todo)
+      if (value.created === false) {
+        const reason = value.action === 'dispatch'
+          ? `${value.todo.todoRef} already stands for this ask — no new todo was created and nothing was written.`
+          : `${value.todo.todoRef} is already ${value.todo.state} — nothing was written.`
+        return [{ type: 'text', text: [
+          `No change — ${reason}`,
+          line,
+          '',
+          ...footer,
+        ].join('\n') }]
+      }
+      return [{ type: 'text', text: [
+        `Committed — todo ${value.action === 'dispatch' ? 'created' : value.action === 'close' ? 'closed' : 'cancelled'}.`,
+        line,
+        ...(value.occurredAt === undefined ? [] : [`Committed at ${formatTeamTimestamp(value.occurredAt)}`]),
+        '',
+        ...footer,
+      ].join('\n') }]
+    },
+  },
+  async execute(args, exec) {
+    const agent = exec.agent
+    if (agent === undefined) throw new Error('team_todo requires an Agent session')
+    const host = service(agent)
+    const workspaceId = workspaceOf(args, agent)
+    const listed = (): { todos: ReturnType<typeof todoView>[]; channelCounts: { channelRef: string; count: number }[] } => {
+      const view = host.humanTodosForAgent(agent, { workspaceId, ...(args.threadRef === undefined ? {} : { threadRef: args.threadRef as AgentTeamThreadRef }) })
+      return { todos: view.todos.map(todoView), channelCounts: view.channelCounts.map(entry => ({ channelRef: entry.channelRef, count: entry.count })) }
+    }
+    if (args.action === 'list') {
+      if (args.title !== undefined || args.todoRef !== undefined) throw new Error('list takes only threadRef — drop title and todoRef, then retry')
+      return { kind: 'listed', action: args.action, ...listed() }
+    }
+    if (args.action === 'dispatch') {
+      if (args.threadRef === undefined) throw new Error('dispatch requires threadRef — name the Thread the ask belongs to')
+      if (args.title === undefined || args.title.trim() === '') throw new Error('dispatch requires a non-empty title')
+      if (args.todoRef !== undefined) throw new Error('dispatch does not accept todoRef')
+      const result = await host.dispatchHumanTodoForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId,
+        threadRef: args.threadRef as AgentTeamThreadRef, title: args.title })
+      return { kind: result.kind, action: args.action, created: result.changed, todo: todoView(result.todo),
+        ...(result.receipt === undefined ? {} : { occurredAt: result.receipt.occurredAt }), ...listed() }
+    }
+    if (args.todoRef === undefined) throw new Error(`${args.action} requires todoRef — copy the ref the checklist renders`)
+    if (args.title !== undefined || args.threadRef !== undefined) throw new Error(`${args.action} takes only todoRef — drop title and threadRef, then retry`)
+    const result = await host.changeHumanTodoForAgent(agent, { requestId: requestId(agent.id, exec.callId), workspaceId,
+      todoRef: args.todoRef as AgentTeamHumanTodoRef, action: args.action })
+    return { kind: result.kind, action: args.action, created: result.changed, todo: todoView(result.todo),
+      ...(result.receipt === undefined ? {} : { occurredAt: result.receipt.occurredAt }), ...listed() }
+  },
+})
+
 const teamView = defineTool({
   name: 'team_view',
   description: 'Discover your authorized Team addresses: current Channels, a newest-first page of top-level Threads (each with its bounded anchor subject; Task standing inline on taskful rows), current Members, and an「active task threads」section listing the work in flight right now — every in_progress / in_review Task Thread in your Channels, with its subject and the Members already on it. This is an address book, not a work queue: unread work lives in team_inbox, and a Thread is read with team_thread read. Consult the active-task-threads section when a Workspace change surprises you, or before you claim or commit, to tell in-flight work from a real conflict and avoid riding onto someone else\'s unpushed work — it is independent of your own unread. The cursor pages Thread rows only.',
@@ -797,6 +957,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(teamThread)
   ctx.tools.register(teamMessage)
   ctx.tools.register(teamClaim)
+  ctx.tools.register(teamTodo)
   ctx.tools.register(teamView)
   registerContextTools(ctx)
 }

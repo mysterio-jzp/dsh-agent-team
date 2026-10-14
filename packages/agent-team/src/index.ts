@@ -91,6 +91,11 @@ import type {
   AgentTeamLeaveWorkspaceRequest,
   AgentTeamLeaveWorkspaceResult,
   AgentTeamHumanActor,
+  AgentTeamHumanTodoActionRequest,
+  AgentTeamHumanTodoList,
+  AgentTeamHumanTodoListRequest,
+  AgentTeamHumanTodoRequest,
+  AgentTeamHumanTodoResult,
   AgentTeamMemberActor,
   AgentTeamMessageAttachment,
   AgentTeamMemberEffect,
@@ -1852,6 +1857,32 @@ export default class AgentTeam extends TypertRemoteService {
     return result.value
   }
 
+  /**
+   * Human-only todo actions: claiming an ask, answering it with the reply that
+   * answered it, closing it, or withdrawing the Human's own intent to work it.
+   * A repeat of an action that already holds answers with the live state and
+   * reports that nothing changed rather than failing.
+   */
+  @Remote('changeHumanTodo')
+  async changeHumanTodo(request: AgentTeamHumanTodoActionRequest): Promise<AgentTeamHumanTodoResult> {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    const result = await this.requireLedger().changeHumanTodo({ ...request, actor: agentTeamHumanActor() })
+    this.emitCommittedOutcome(result)
+    return result.value
+  }
+
+  /**
+   * The Human's checklist. Every todo of the Workspace comes back, together
+   * with the per-Channel count a Channel badge prints — derived here so no
+   * client ever adds Threads up.
+   */
+  @Remote('humanTodos')
+  humanTodos(request: AgentTeamHumanTodoListRequest): AgentTeamHumanTodoList {
+    this.requireWorkspace(request.workspaceId)
+    return this.requireLedger().listHumanTodos(request, AGENT_TEAM_HUMAN_MEMBER_ID)
+  }
+
   /** Human-only promotion of a taskless Thread into a real Task plus public Message. */
   @Remote('promoteThread')
   async promoteThread(request: AgentTeamPromoteThreadRequest): Promise<AgentTeamPromoteThreadResult> {
@@ -2195,6 +2226,34 @@ export default class AgentTeam extends TypertRemoteService {
     const result = await this.requireLedger().changeClaim({ ...request, actor })
     this.emitCommittedOutcome(result)
     return result.value
+  }
+
+  /**
+   * Agent-only dispatch of one Human todo — the way a Member puts an ask in
+   * front of the Human. A different requestId describing the same ask is folded
+   * into the todo already standing, and the answer says so through `changed`
+   * instead of writing a second record.
+   */
+  async dispatchHumanTodoForAgent(agent: Agent, request: AgentTeamHumanTodoRequest): Promise<AgentTeamHumanTodoResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const result = await this.requireLedger().dispatchHumanTodo({ ...request, actor })
+    this.emitCommittedOutcome(result)
+    return result.value
+  }
+
+  /** Agent-only retirement of an ask the Member itself dispatched. */
+  async changeHumanTodoForAgent(agent: Agent, request: AgentTeamHumanTodoActionRequest): Promise<AgentTeamHumanTodoResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const result = await this.requireLedger().changeHumanTodo({ ...request, actor })
+    this.emitCommittedOutcome(result)
+    return result.value
+  }
+
+  /** A Member's own asks — the ones it is waiting on the Human for. */
+  humanTodosForAgent(agent: Agent, request: AgentTeamHumanTodoListRequest): AgentTeamHumanTodoList {
+    const actor = this.memberActor(agent)
+    this.requireAgentWorkspace(actor, request.workspaceId)
+    return this.requireLedger().listHumanTodos(request, actor.memberId)
   }
 
   listClaimsForAgent(agent: Agent, request: { workspaceId: AgentTeamViewRequest['workspaceId']; taskRef: AgentTeamTask['taskRef'] }): AgentTeamClaimList {

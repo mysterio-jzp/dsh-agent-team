@@ -30,6 +30,9 @@ export type AgentTeamThreadRef = Branded<'AgentTeamThreadRef'>
 /** Stable identifier of one Claim. */
 export type AgentTeamClaimRef = Branded<'AgentTeamClaimRef'>
 
+/** Stable identifier of one Human todo a Member dispatched. */
+export type AgentTeamHumanTodoRef = Branded<'AgentTeamHumanTodoRef'>
+
 /** Stable identifier of one public Thread Activity. */
 export type AgentTeamActivityRef = Branded<'AgentTeamActivityRef'>
 
@@ -438,6 +441,35 @@ export interface AgentTeamClaim {
   readonly direction: string
   readonly normalizedDirection: string
   readonly state: 'active' | 'done' | 'released'
+}
+
+/**
+ * One ask a Member routed to the Human: an approval or a confirmation it needs
+ * before it can continue. Thread-scoped like every other ledger fact, so the
+ * dedupe key never crosses work domains, and distinct from a Claim: a Claim is
+ * a Member's own direction on a Task, a todo is a debt the Human owes a Member.
+ *
+ * The ledger stores state and immutable references only — never the message
+ * body that asked, and never the answer's text, which lives in the Thread.
+ */
+export interface AgentTeamHumanTodo {
+  readonly todoRef: AgentTeamHumanTodoRef
+  readonly channelRef: AgentTeamChannelRef
+  readonly threadRef: AgentTeamThreadRef
+  /** The Member that dispatched it; the requester may also close or withdraw it. */
+  readonly requester: AgentTeamMemberId
+  readonly title: string
+  /** Host-computed dedupe half: two dispatches in one Thread match on this, never on the raw title. */
+  readonly normalizedTitle: string
+  readonly state: 'pending' | 'claimed' | 'answered' | 'closed' | 'cancelled'
+  /** Who marked it and the sequence that did: marking claims no exclusivity, so this is the whole effect. */
+  readonly claimedBy?: AgentTeamMemberId | undefined
+  readonly claimedSequence?: number | undefined
+  /** The Human's in-Thread reply that answered it; absent until answered. */
+  readonly answeredMessageRef?: AgentTeamMessageRef | undefined
+  /** Who ended it — requester or Human — and the sequence that did. */
+  readonly resolvedBy?: AgentTeamMemberId | undefined
+  readonly resolvedSequence?: number | undefined
 }
 
 interface AgentTeamActivityBase {

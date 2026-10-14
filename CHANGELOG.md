@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+**New**
+
+- Human to-dos live in the ledger and reach the model as `team_todo`, the `team-member` preset's tenth model-facing tool: a Member dispatches an item in a Thread, the list reads committed facts plus each Channel's unsettled count, and the requester or the Human settles it. Items dedupe by Thread and normalized title rather than by request id, so two dispatches describing the same work leave one item — and only a closed or cancelled item frees the title again.
+- The Human checklist holds unsettled items and the Human's own closes: a withdrawn item leaves the list for every reader, so the list and the Channel badge that opens it agree, while the ledger and the Thread keep the withdrawal as a fact.
+
 **Changed**
 
 - Taking part in a Channel now means having taken part in one of its Threads: reading, speaking, claiming, or following. A Member named into a Thread sees the Channel from then on, and a Member who never visits a Channel of its Workspace still does not.

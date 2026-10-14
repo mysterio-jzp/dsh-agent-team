@@ -905,32 +905,73 @@ describe('Team conversation surfaces', () => {
       ] } }
     })
     // jsdom has no layout engine, so the opening jump is observed through the
-    // call the addressed row makes, not through real offsets.
-    const prototype = window.HTMLElement.prototype as { scrollIntoView?: (options?: { block?: string }) => void }
-    const originalScrollIntoView = prototype.scrollIntoView
-    const jumps: Array<{ ref: string | undefined; options: { block?: string } | undefined }> = []
-    prototype.scrollIntoView = function (this: HTMLElement, options?: { block?: string }) { jumps.push({ ref: this.dataset.messageRef, options }) }
-    const centred = () => jumps.filter(jump => jump.options?.block === 'center')
+    // move the timeline makes, not through real offsets. The page centres a row
+    // by writing the timeline's OWN scroll position — `scrollIntoView` is gone
+    // on purpose, because it also scrolls every scrollable ancestor — so the
+    // observation point is that write, and the assertion is on the VALUE it
+    // writes. A layout seam on the prototypes supplies the geometry jsdom
+    // lacks, which makes the centred value
+    // (`offsetTop - clientHeight / 2 + rowHeight / 2` = 500 - 200 + 50 = 350
+    // here) distinguishable from every other write the same timeline receives,
+    // such as the pin-to-bottom policy's `scrollHeight`.
+    const timelineOf = () => document.querySelector('section[class*="timeline"]') as HTMLElement | null
+    const centredValues: number[] = []
+    const originalScrollTop = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')
+    const originalScrollTo = Element.prototype.scrollTo
+    const originalOffsetTop = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetTop')
+    const originalClientHeight = Object.getOwnPropertyDescriptor(Element.prototype, 'clientHeight')
+    Object.defineProperty(Element.prototype, 'scrollTop', {
+      configurable: true,
+      get(this: Element): number { return 0 },
+      set(this: Element, value: number): void { if (this === timelineOf()) centredValues.push(value) },
+    })
+    // `scrollTo` has two overloads (options or x/y), so the stub keeps the real
+    // signature and reads the options form the animated branch uses.
+    Element.prototype.scrollTo = function (this: Element, options?: ScrollToOptions | number, y?: number): void {
+      const top = typeof options === 'number' ? y : options?.top
+      if (this === timelineOf() && typeof top === 'number') centredValues.push(top)
+    }
+    // The seam is installed on the prototypes, not on one node, because the jump
+    // runs in a layout effect the moment the row appears: geometry defined after
+    // that has already missed its only read.
+    Object.defineProperty(HTMLElement.prototype, 'offsetTop', {
+      configurable: true,
+      get(this: HTMLElement): number { return this.dataset.messageRef === 'message:addressed' ? 500 : 0 },
+    })
+    Object.defineProperty(Element.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: Element): number {
+        if (this === timelineOf()) return 400
+        return (this as HTMLElement).dataset?.messageRef === 'message:addressed' ? 100 : 0
+      },
+    })
     try {
       // The Inbox already said something here is for the reader, so the page
       // opens on the Message that names them instead of at the latest fact.
       readWith(true)
       fireEvent.click(entry)
-      await waitFor(() => expect(centred().map(jump => jump.ref)).toContain('message:addressed'))
+      // The page centres the addressed row: 500 - 400/2 + 100/2 = 350.
+      await waitFor(() => expect(centredValues).toContain(350))
 
       // A call the reader has already seen never pulls the view again: with
       // nothing unread naming them the Thread opens at its latest fact.
-      jumps.length = 0
+      centredValues.length = 0
       fireEvent.click(b.view.getByRole('button', { name: '返回频道' }))
       const readsBefore = b.readThread.mock.calls.length
       readWith(false)
       fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
       await waitFor(() => expect(b.readThread.mock.calls.length).toBeGreaterThan(readsBefore))
       await waitFor(() => expect(document.querySelector('[data-message-ref="message:addressed"]')).not.toBeNull())
-      expect(centred()).toEqual([])
+      // No centring write on an already-read mention.
+      expect(centredValues).not.toContain(350)
     } finally {
-      if (originalScrollIntoView === undefined) delete prototype.scrollIntoView
-      else prototype.scrollIntoView = originalScrollIntoView
+      if (originalScrollTop === undefined) delete (Element.prototype as { scrollTop?: unknown }).scrollTop
+      else Object.defineProperty(Element.prototype, 'scrollTop', originalScrollTop)
+      Element.prototype.scrollTo = originalScrollTo
+      if (originalOffsetTop === undefined) delete (HTMLElement.prototype as { offsetTop?: unknown }).offsetTop
+      else Object.defineProperty(HTMLElement.prototype, 'offsetTop', originalOffsetTop)
+      if (originalClientHeight === undefined) delete (Element.prototype as { clientHeight?: unknown }).clientHeight
+      else Object.defineProperty(Element.prototype, 'clientHeight', originalClientHeight)
       await b.runtime.dispose()
     }
   })

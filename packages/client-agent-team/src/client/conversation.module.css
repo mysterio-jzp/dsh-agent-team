@@ -4,7 +4,20 @@
   height: 100%;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  /* `overflow: clip` rather than the `hidden` this box carried before: the two
+     clip descendants identically, so nothing that was visible becomes hidden.
+     The difference is the scroll container — `hidden` still makes this a
+     scrollable box that `scrollIntoView` or a stray focus can push, while
+     `clip` takes that away. That is the structural half of the same fix as
+     dropping `scrollIntoView` in `TeamThreadPage`: the outer frame cannot move.
+     `position: relative` anchors the absolutely positioned layers inside the
+     surface (the mention menu, the row menus) to this box rather than the page.
+     The mention menu stays inside the surface because the surface is full
+     height (`height: 100%` above) and the menu opens upward from a composer
+     that sits in the bottom row — and it was already subject to this same
+     clip while the declaration read `hidden`. */
+  overflow: clip;
+  position: relative;
 }
 
 .surfaceHeader {

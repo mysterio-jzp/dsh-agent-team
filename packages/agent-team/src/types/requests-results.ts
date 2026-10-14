@@ -14,6 +14,8 @@ import type {
   AgentTeamConfirmationToken,
   AgentTeamContextCheckpointRef,
   AgentTeamDirectMarker,
+  AgentTeamHumanTodo,
+  AgentTeamHumanTodoRef,
   AgentTeamMemberCapabilities,
   AgentTeamMemberId,
   AgentTeamMessage,
@@ -724,6 +726,76 @@ export interface AgentTeamClaimList {
   readonly task: AgentTeamTask
   readonly thread: AgentTeamThread
   readonly claims: readonly AgentTeamClaim[]
+}
+
+/**
+ * One Member's dispatch of a Human todo: the Thread names the work domain, the
+ * title names the thing being asked, and the Host normalizes that title into
+ * the half of the dedupe key a second dispatch matches on.
+ */
+export interface AgentTeamHumanTodoRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly threadRef?: AgentTeamThreadRef
+  readonly taskRef?: AgentTeamTaskRef
+  readonly title: string
+}
+
+/** One later transition: the Human's claim / answer / close, or the requester's close / withdrawal. */
+export interface AgentTeamHumanTodoActionRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly todoRef: AgentTeamHumanTodoRef
+  readonly action: 'claim' | 'answer' | 'close' | 'cancel'
+  /** The in-Thread reply that answered it: required by `answer`, rejected by every other action. */
+  readonly messageRef?: AgentTeamMessageRef
+}
+
+export interface AgentTeamHumanTodoCommittedResult {
+  readonly kind: 'committed'
+  /**
+   * Absent exactly when this call wrote no record: a reused todo and a repeat
+   * of a settled transition answer with the live state alone, so there is no
+   * operation of this call's own to receipt.
+   */
+  readonly receipt?: AgentTeamOperationReceipt
+  readonly todo: AgentTeamHumanTodo
+  /**
+   * False when this call wrote no record, because its target state already
+   * held: a dispatch whose key named a live todo reused that one, or a
+   * transition that had already happened. The returned todo is the live one,
+   * and every field but this one describes the ledger as it stands.
+   */
+  readonly changed: boolean
+}
+
+/**
+ * A todo mutation always resolves to the live record: there is no revision
+ * fence to lose, so no unread or stale outcome exists for this family.
+ */
+export type AgentTeamHumanTodoResult = AgentTeamHumanTodoCommittedResult
+
+/** Host-derived unsettled count for one Channel: the badge number, never a client sum. */
+export interface AgentTeamHumanTodoChannelCount {
+  readonly channelRef: AgentTeamChannelRef
+  readonly count: number
+}
+
+export interface AgentTeamHumanTodoListRequest {
+  readonly workspaceId: WorkspaceId
+  /** Narrow the list to one Thread's todos; absent lists every todo the reader may see in the Workspace. */
+  readonly threadRef?: AgentTeamThreadRef
+  readonly taskRef?: AgentTeamTaskRef
+}
+
+export interface AgentTeamHumanTodoList {
+  readonly todos: readonly AgentTeamHumanTodo[]
+  /**
+   * Every active Channel of the Workspace with its unsettled count — a zero
+   * stands for "nothing owed" rather than absence, so a badge renders from one
+   * shape without the client adding Threads up.
+   */
+  readonly channelCounts: readonly AgentTeamHumanTodoChannelCount[]
 }
 
 /** Read-only, personal Workspace Inbox projection. */

@@ -41,3 +41,15 @@
   color: var(--dsw-alias-label-secondary);
   padding: 0 4px;
 }
+
+/* The Human's own to-do count: a debt owed to the reader rather than unread
+   chatter, so it speaks in the warn family the state tags also use. The fill is
+   a deeper amber than `state-warn-label` — that token is tuned for drawing small
+   text and borders on a page, and as a filled background behind 11px white ink
+   it lands at 2.79:1, under AA. This value holds 5.02:1. The shipped business
+   fill the default tone wears has the same problem at this size (4.28:1), which
+   is why this tone exists rather than reusing it. */
+.human {
+  background: rgb(180 83 9);
+  color: rgb(255 255 255);
+}

@@ -45,6 +45,7 @@ import type {
   AgentTeamChangeScope,
   AgentTeamClaim,
   AgentTeamHumanActor,
+  AgentTeamHumanTodoRef,
   AgentTeamInboxDelta,
   AgentTeamMemberActor,
   AgentTeamMemberId,
@@ -394,6 +395,25 @@ function claimOperation(
 const claimCreated = claimOperation('team/claim-created', 'operation:protocol-21', 'request:protocol-claim-created', 21, 'claim', 'active')
 const claimDone = claimOperation('team/claim-done', 'operation:protocol-22', 'request:protocol-claim-done', 22, 'done', 'done')
 const claimReleased = claimOperation('team/claim-released', 'operation:protocol-23', 'request:protocol-claim-released', 23, 'release', 'released')
+
+/** A dispatched todo is the minimal stored shape: no claim, no answer, no resolution yet. */
+const humanTodoDispatched: Op<'team/human-todo-changed'> = {
+  ...opBase('operation:protocol-29', 'request:protocol-human-todo-changed', 29, memberActor),
+  previousOperationId,
+  kind: 'team/human-todo-changed',
+  data: {
+    workspaceId: alpha,
+    todo: {
+      todoRef: 'todo:protocol-fixture' as AgentTeamHumanTodoRef,
+      channelRef,
+      threadRef: memberThread,
+      requester: memberId,
+      title: 'Approve the protocol fixture',
+      normalizedTitle: 'approve the protocol fixture',
+      state: 'pending',
+    },
+  },
+}
 
 const taskChanged: Op<'team/task-changed'> = {
   ...opBase('operation:protocol-24', 'request:protocol-task-changed', 24),
@@ -1038,6 +1058,33 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
     },
     legacy: { normalize: 'none', repair: 'none' },
     intent: { scopes: 'derived', inbox: 'delta' },
+  },
+  'team/human-todo-changed': {
+    stored: humanTodoDispatched,
+    legacyShapes: [],
+    retry: {
+      same: async () => {
+        const out = await ledger.dispatchHumanTodo({
+          requestId: humanTodoDispatched.requestId,
+          actor: memberActor,
+          workspaceId: humanTodoDispatched.data.workspaceId,
+          threadRef: humanTodoDispatched.data.todo.threadRef,
+          title: humanTodoDispatched.data.todo.title,
+        })
+        expect(out.value.todo.todoRef, 'the dispatch mapper answers with the stored todo identity').toBe(humanTodoDispatched.data.todo.todoRef)
+        expect(out.value.changed, 'a same-request retry of a dispatch must report that it wrote nothing').toBe(false)
+        return out
+      },
+      changed: () => ledger.dispatchHumanTodo({
+        requestId: humanTodoDispatched.requestId,
+        actor: memberActor,
+        workspaceId: humanTodoDispatched.data.workspaceId,
+        threadRef: humanTodoDispatched.data.todo.threadRef,
+        title: 'A different ask',
+      }),
+    },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'derived', inbox: 'none' },
   },
   'team/thread-read': {
     stored: threadRead,

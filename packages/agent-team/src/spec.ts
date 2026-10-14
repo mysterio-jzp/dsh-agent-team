@@ -10,6 +10,7 @@ import type {
   AgentTeamChannelRef,
   AgentTeamClaimRef,
   AgentTeamContextCheckpointRef,
+  AgentTeamHumanTodoRef,
   AgentTeamMemberId,
   AgentTeamMessageRef,
   AgentTeamOperation,
@@ -31,6 +32,7 @@ const messageRefSchema = z.string().regex(/^message:[^:]+$/).transform(value => 
 const taskRefSchema = z.string().regex(/^task:[^:]+$/).transform(value => value as AgentTeamTaskRef)
 const threadRefSchema = z.string().regex(/^thread:[^:]+$/).transform(value => value as AgentTeamThreadRef)
 const claimRefSchema = z.string().regex(/^claim:[^:]+$/).transform(value => value as AgentTeamClaimRef)
+const humanTodoRefSchema = z.string().regex(/^todo:[^:]+$/).transform(value => value as AgentTeamHumanTodoRef)
 const activityRefSchema = z.string().regex(/^activity:[^:]+$/).transform(value => value as AgentTeamActivityRef)
 const attachmentIdSchema = z.string().min(1).transform(value => value as AgentTeamAttachmentId)
 
@@ -213,6 +215,26 @@ const claimSchema = z.object({
   direction: z.string().min(1),
   normalizedDirection: z.string().min(1),
   state: z.union([z.literal('active'), z.literal('done'), z.literal('released')]),
+}).strict()
+
+/**
+ * One Human todo as stored. The identity, the dedupe key and the state are
+ * required; every companion a later transition adds stays optional, because a
+ * todo that has only been dispatched carries none of them.
+ */
+const humanTodoSchema = z.object({
+  todoRef: humanTodoRefSchema,
+  channelRef: channelRefSchema,
+  threadRef: threadRefSchema,
+  requester: memberIdSchema,
+  title: z.string().min(1),
+  normalizedTitle: z.string().min(1),
+  state: z.union([z.literal('pending'), z.literal('claimed'), z.literal('answered'), z.literal('closed'), z.literal('cancelled')]),
+  claimedBy: memberIdSchema.optional(),
+  claimedSequence: z.number().int().positive().optional(),
+  answeredMessageRef: messageRefSchema.optional(),
+  resolvedBy: memberIdSchema.optional(),
+  resolvedSequence: z.number().int().positive().optional(),
 }).strict()
 
 const activityBase = {
@@ -497,6 +519,15 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
   claimOperation('team/claim-created'),
   claimOperation('team/claim-done'),
   claimOperation('team/claim-released'),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/human-todo-changed'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      todo: humanTodoSchema,
+    }).strict(),
+  }).strict(),
   z.object({
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),

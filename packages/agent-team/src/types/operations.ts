@@ -9,6 +9,7 @@ import type {
   AgentTeamClaim,
   AgentTeamClaimActivity,
   AgentTeamClaimsReleasedActivity,
+  AgentTeamHumanTodo,
   AgentTeamInboxDelta,
   AgentTeamMemberId,
   AgentTeamMessage,
@@ -332,6 +333,20 @@ export type AgentTeamClaimChangedOperation =
   | AgentTeamClaimDoneOperation
   | AgentTeamClaimReleasedOperation
 
+/**
+ * Durable Human-todo change: one kind carries dispatch and every later
+ * transition, because each record states the todo's whole current state and
+ * replay reads that state rather than a verb. No `baseRevision` rides along:
+ * a todo is not Thread content, so it fences no Thread write.
+ */
+export interface AgentTeamHumanTodoChangedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/human-todo-changed'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly todo: AgentTeamHumanTodo
+  }
+}
+
 /** Durable Human Task-resolution change. */
 export interface AgentTeamTaskChangedOperation extends AgentTeamOperationBase {
   readonly kind: 'team/task-changed'
@@ -467,6 +482,7 @@ export type AgentTeamOperation =
   | AgentTeamClaimCreatedOperation
   | AgentTeamClaimDoneOperation
   | AgentTeamClaimReleasedOperation
+  | AgentTeamHumanTodoChangedOperation
   | AgentTeamTaskChangedOperation
   | AgentTeamThreadAttentionChangedOperation
   | AgentTeamThreadReadOperation

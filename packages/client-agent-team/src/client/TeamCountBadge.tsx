@@ -15,8 +15,8 @@ const COUNT_CAP = 99
  */
 export function TeamCountBadge({ count, tone = 'solid', label, className }: {
   readonly count: number
-  /** `hairline` is unread that merely arrived; the solid fill is unread that names this reader. */
-  readonly tone?: 'solid' | 'hairline' | undefined
+  /** `hairline` is unread that merely arrived; the solid fill is unread that names this reader; `human` is a to-do the reader owes a Member. */
+  readonly tone?: 'solid' | 'hairline' | 'human' | undefined
   /** The accessible name while the count is the only thing saying it; omit it when the surrounding control already carries the number. */
   readonly label?: string | undefined
   /** Placement belongs to the surface hanging the capsule: the narrow rail pins it to the icon's corner. */
@@ -24,7 +24,7 @@ export function TeamCountBadge({ count, tone = 'solid', label, className }: {
 }) {
   if (count <= 0) return null
   const text = count > COUNT_CAP ? `${COUNT_CAP}+` : String(count)
-  const classes = `${css.badge}${tone === 'hairline' ? ` ${css.hairline}` : ''}${className === undefined ? '' : ` ${className}`}`
+  const classes = `${css.badge}${tone === 'solid' ? '' : ` ${css[tone]}`}${className === undefined ? '' : ` ${className}`}`
   // Tests and the browser journey read the capsule by this attribute rather
   // than by a CSS-module hash, which changes whenever a rule is renamed.
   return label === undefined

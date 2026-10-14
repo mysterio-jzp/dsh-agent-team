@@ -41,6 +41,16 @@ import type {
   AgentTeamDmResult,
   AgentTeamDmSentOperation,
   AgentTeamHumanActor,
+  AgentTeamHumanTodo,
+  AgentTeamHumanTodoActionRequest,
+  AgentTeamHumanTodoChangedOperation,
+  AgentTeamHumanTodoChannelCount,
+  AgentTeamHumanTodoCommittedResult,
+  AgentTeamHumanTodoList,
+  AgentTeamHumanTodoListRequest,
+  AgentTeamHumanTodoRef,
+  AgentTeamHumanTodoRequest,
+  AgentTeamHumanTodoResult,
   AgentTeamInbox,
   AgentTeamInboxActor,
   AgentTeamInboxRequest,
@@ -247,6 +257,16 @@ export interface AgentTeamAuthorizedClaimRequest extends AgentTeamClaimRequest {
   readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
 }
 
+/** A todo is dispatched by the Member that needs the answer, never by the Human. */
+export interface AgentTeamAuthorizedHumanTodoRequest extends AgentTeamHumanTodoRequest {
+  readonly actor: AgentTeamMemberActor
+}
+
+/** Later transitions: the Human claims, answers and closes; the requester may also close or withdraw. */
+export interface AgentTeamAuthorizedHumanTodoActionRequest extends AgentTeamHumanTodoActionRequest {
+  readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
+}
+
 export interface AgentTeamAuthorizedTaskRequest extends AgentTeamTaskRequest {
   readonly actor: AgentTeamHumanActor
 }
@@ -291,7 +311,7 @@ export interface AgentTeamAuthorizedDmRequest extends AgentTeamDmRequest {
 export interface AgentTeamLedgerOptions {
   readonly operationId?: () => AgentTeamOperationId
   readonly occurredAt?: () => string
-  readonly ref?: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'activity') => string
+  readonly ref?: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'todo' | 'activity') => string
 }
 
 /** Internal append result indicating whether this call committed a new record. */
@@ -366,6 +386,7 @@ interface Projection {
   readonly participations: Map<AgentTeamMemberId, Set<WorkspaceId>>
   readonly memberships: Map<AgentTeamChannelRef, Set<AgentTeamMemberId>>
   readonly claims: Map<AgentTeamClaimRef, AgentTeamClaim>
+  readonly humanTodos: Map<AgentTeamHumanTodoRef, AgentTeamHumanTodo>
   readonly tasks: Map<AgentTeamTaskRef, AgentTeamTask>
   readonly threads: Map<AgentTeamThreadRef, AgentTeamThread>
   readonly attention: Map<string, AgentTeamThreadAttention>
@@ -375,6 +396,12 @@ interface Projection {
   readonly orderedFacts: AgentTeamThreadFact[]
   /** Claims per Task, in the order `claims` first took them: the bucket that keeps a per-Task read from walking every Claim. */
   readonly claimsByTask: Map<AgentTeamTaskRef, AgentTeamClaim[]>
+  /**
+   * Todos per Thread, in the order `humanTodos` first took them. A dispatch's
+   * dedupe key is (Thread, normalized title), so this bucket is the whole input
+   * the key scan needs — and a Thread read never walks the Workspace.
+   */
+  readonly humanTodosByThread: Map<AgentTeamThreadRef, AgentTeamHumanTodo[]>
   readonly factsByThread: Map<AgentTeamThreadRef, AgentTeamThreadFact[]>
   /** Owning Channel of each Thread, established by the anchor Message and immutable afterwards. */
   readonly channelRefByThread: Map<AgentTeamThreadRef, AgentTeamChannelRef>
@@ -415,7 +442,7 @@ interface AgentTeamAttentionObservation {
 function emptyProjection(): Projection {
   return { byRequest: new Map(), byOperation: new Map(), ordered: [], channels: new Map(), members: new Map(), participations: new Map(), memberships: new Map(),
     claims: new Map(), tasks: new Map(), threads: new Map(), attention: new Map(), directMarkers: new Map(), activityMarkers: new Map(),
-    orderedFacts: [], claimsByTask: new Map(), factsByThread: new Map(), channelRefByThread: new Map(), mentionsByMessage: new Map(), messageCountByThread: new Map(),
+    orderedFacts: [], claimsByTask: new Map(), humanTodos: new Map(), humanTodosByThread: new Map(), factsByThread: new Map(), channelRefByThread: new Map(), mentionsByMessage: new Map(), messageCountByThread: new Map(),
     messagesByRef: new Map(),
     attentionByThread: new Map(), previousSessions: new Map(), rolloverSeeds: new Map(),
     anchorByThread: new Map(), taskNumberByTask: new Map(), taskCountByChannel: new Map(), attentionThreadsByMember: new Map(),
@@ -427,6 +454,47 @@ function emptyProjection(): Projection {
 function assertUnhandledKind(operation: never): never {
   throw new Error(`agent-team ledger does not handle operation kind '${(operation as AgentTeamOperation).kind}'`)
 }
+
+/** A todo is owed until it ends: claimed and answered work still waits on the Human. */
+function isUnsettledHumanTodo(todo: AgentTeamHumanTodo): boolean {
+  return todo.state === 'pending' || todo.state === 'claimed' || todo.state === 'answered'
+}
+
+function isTerminalHumanTodo(todo: AgentTeamHumanTodo): boolean {
+  return todo.state === 'closed' || todo.state === 'cancelled'
+}
+
+/**
+ * The checklist every reader gets: everything but a withdrawal. An unsettled
+ * todo still owes the Human an action and a closed one records the Human's own
+ * decision, so both stay; a cancelled todo is the requester taking the ask back
+ * before anything happened on the Human's side, and the entry badge — which
+ * counts unsettled work only — would otherwise disagree with the list it opens.
+ * The ledger keeps the fact either way: cancelling rewrites `state` in place and
+ * the Thread timeline still carries it, so this filter shapes the projection
+ * alone.
+ */
+function isListedHumanTodo(todo: AgentTeamHumanTodo): boolean {
+  return todo.state !== 'cancelled'
+}
+
+/**
+ * State edges a recorded transition may take. Nothing leaves a terminal state,
+ * and nothing returns to pending: answering straight from pending is allowed
+ * because the Human's reply is itself the stronger fact.
+ */
+function isAllowedHumanTodoTransition(from: AgentTeamHumanTodo['state'], to: AgentTeamHumanTodo['state']): boolean {
+  if (from === 'closed' || from === 'cancelled') return false
+  if (to === 'claimed') return from === 'pending'
+  if (to === 'answered') return from === 'pending' || from === 'claimed'
+  return to === 'closed' || to === 'cancelled'
+}
+
+/** The state each later action reaches; `changed` is false whenever it already holds. */
+const HUMAN_TODO_TARGET_STATE: { readonly [action in AgentTeamHumanTodoActionRequest['action']]: AgentTeamHumanTodo['state'] } = {
+  claim: 'claimed', answer: 'answered', close: 'closed', cancel: 'cancelled',
+}
+
 
 /**
  * Opening-line preview for a Human Inbox row: the Thread anchor's first line,
@@ -517,7 +585,7 @@ export class AgentTeamLedger {
   private readonly confirmations = new Map<AgentTeamConfirmationToken, Confirmation>()
   private readonly createOperationId: () => AgentTeamOperationId
   private readonly createOccurredAt: () => string
-  private readonly createRef: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'activity') => string
+  private readonly createRef: (kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'todo' | 'activity') => string
   private operationTail: Promise<void> = Promise.resolve()
   /**
    * Runtime human display name. Durable identity stays `member:human`; only
@@ -1219,6 +1287,145 @@ export class AgentTeamLedger {
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
       return this.committed(this.claimResult(operation))
+    })
+  }
+
+  /**
+   * Dispatch one Human todo, or resolve the identical ask a different
+   * `requestId` already dispatched. The dedupe key is (Thread, normalized
+   * title) and it is computed here, not by the caller: the `byRequest` index
+   * only catches a replay of one requestId, while requirement 9 is about two
+   * Members describing the same outstanding ask.
+   *
+   * A settled todo releases its key: once the Human closed or the requester
+   * withdrew it, the same title raised again is a new ask rather than a
+   * duplicate of finished work. Reuse writes no record at all — the durable
+   * fact already exists — so the caller reads "nothing new" from `changed`.
+   */
+  dispatchHumanTodo(request: AgentTeamAuthorizedHumanTodoRequest): Promise<AgentTeamLedgerResult<AgentTeamHumanTodoResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameHumanTodoDispatch(existing, request)
+        return this.resolved(this.humanTodoResult(existing.data.todo, false, this.receipt(existing)))
+      }
+      const actor = this.assertActorForWorkspace(request.actor, request.workspaceId)
+      if (actor.kind !== 'member') throw new Error('Only a Member dispatches a Human todo')
+      const { thread, channelRef } = this.threadContextForActor(actor, request.workspaceId, request)
+      const title = request.title.trim()
+      const normalizedTitle = this.normalizeTodoTitle(title)
+      if (normalizedTitle === '') throw new Error('Human todo title must not be empty')
+      const live = (this.state.humanTodosByThread.get(thread.threadRef) ?? [])
+        .find(todo => todo.normalizedTitle === normalizedTitle && isUnsettledHumanTodo(todo))
+      if (live !== undefined) return this.resolved(this.humanTodoResult(live, false))
+      const sequence = this.nextSequence()
+      const todo: AgentTeamHumanTodo = Object.freeze({
+        todoRef: this.ref('todo'), channelRef, threadRef: thread.threadRef, requester: actor.memberId,
+        title, normalizedTitle, state: 'pending',
+      })
+      const operation: AgentTeamHumanTodoChangedOperation = Object.freeze({
+        ...this.operationBase(request, sequence), kind: 'team/human-todo-changed',
+        data: Object.freeze({ workspaceId: request.workspaceId, todo }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.humanTodoResult(operation.data.todo, true, this.receipt(operation)))
+    })
+  }
+
+  /**
+   * One later transition of a Human todo. Each action names its target state
+   * rather than editing the record, so a repeat — the same action on a todo
+   * that already reached it, or a claim arriving after the Human answered —
+   * writes nothing and leaves the ledger exactly as it stands. A transition
+   * the actor may not take is refused rather than ignored, and a terminal todo
+   * accepts no transition other than the one that repeats its end.
+   */
+  changeHumanTodo(request: AgentTeamAuthorizedHumanTodoActionRequest): Promise<AgentTeamLedgerResult<AgentTeamHumanTodoResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameHumanTodoAction(existing, request)
+        return this.resolved(this.humanTodoResult(existing.data.todo, false, this.receipt(existing)))
+      }
+      const actor = this.assertActorForWorkspace(request.actor, request.workspaceId)
+      const previous = this.state.humanTodos.get(this.requireRefKey(this.state.humanTodos, request.todoRef, 'todo', 'Human todo'))
+      if (previous === undefined) throw new Error(`unknown Human todo '${request.todoRef}'${this.unknownRefHint(request.todoRef, 'todo', 'Human todo')}`)
+      this.threadContextForActor(actor, request.workspaceId, { threadRef: previous.threadRef })
+      const human = actor.kind === 'human'
+      if (!human && request.action !== 'close' && request.action !== 'cancel') {
+        throw new Error(`Only the Human can ${request.action} Human todo '${previous.todoRef}'`)
+      }
+      if (!human && previous.requester !== actor.memberId) {
+        throw new Error(`Only its requester '${previous.requester}' or the Human can ${request.action} Human todo '${previous.todoRef}'`)
+      }
+      if (request.action === 'answer') {
+        this.assertAnswerMessage(request.messageRef, previous, actor.memberId, human)
+      } else if (request.messageRef !== undefined) {
+        throw new Error(`${request.action} does not accept messageRef`)
+      }
+      const target = HUMAN_TODO_TARGET_STATE[request.action]
+      if (isTerminalHumanTodo(previous) && previous.state !== target) {
+        throw new Error(`Human todo '${previous.todoRef}' is already ${previous.state}`)
+      }
+      // An answered todo already carries the stronger fact: a late claim leaves
+      // it standing instead of walking the state backwards, which is exactly
+      // the "repeat changes nothing" arm of the acceptance criteria.
+      if (previous.state === target || (request.action === 'claim' && previous.state === 'answered')) {
+        return this.resolved(this.humanTodoResult(previous, false))
+      }
+      const sequence = this.nextSequence()
+      const todo: AgentTeamHumanTodo = Object.freeze({
+        ...previous, state: target,
+        ...(target === 'claimed' ? { claimedBy: actor.memberId, claimedSequence: sequence } : {}),
+        ...(target === 'answered' ? { answeredMessageRef: request.messageRef } : {}),
+        ...(target === 'closed' || target === 'cancelled' ? { resolvedBy: actor.memberId, resolvedSequence: sequence } : {}),
+      })
+      const operation: AgentTeamHumanTodoChangedOperation = Object.freeze({
+        ...this.operationBase(request, sequence), kind: 'team/human-todo-changed',
+        data: Object.freeze({ workspaceId: request.workspaceId, todo }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.humanTodoResult(operation.data.todo, true, this.receipt(operation)))
+    })
+  }
+
+  /**
+   * Todos one reader may see, in dispatch order. The Human sees every todo of
+   * the Workspace — the checklist is theirs — while a Member sees only what it
+   * dispatched, because a todo is a debt owed to the Human rather than a shared
+   * work record. Both readers get the same state rule: a withdrawal is not on
+   * the checklist, so the list holds unsettled work and the Human's own closed
+   * decisions and nothing else.
+   *
+   * `channelCounts` is a property of the Channel rather than of the reader: it
+   * counts every unsettled todo of each active Channel of the Workspace, is
+   * derived here so a badge never adds Threads up on a client that has not
+   * loaded them, and reaches a Thread-scoped read unchanged. A viewer-scoped
+   * count would print a different number on the same Channel row depending on
+   * who is looking, and would undercount the Channel it names.
+   */
+  listHumanTodos(request: AgentTeamHumanTodoListRequest, viewerId: AgentTeamMemberId): AgentTeamHumanTodoList {
+    const scoped = request.threadRef === undefined && request.taskRef === undefined
+      ? undefined
+      : this.threadContextFrom(this.state, request.workspaceId, request).thread.threadRef
+    const human = viewerId === AGENT_TEAM_HUMAN_MEMBER_ID
+    const source = scoped === undefined ? [...this.state.humanTodos.values()] : [...(this.state.humanTodosByThread.get(scoped) ?? [])]
+    const todos = source.filter(todo => isListedHumanTodo(todo) && this.state.channels.get(todo.channelRef)?.workspaceId === request.workspaceId
+      && (human || todo.requester === viewerId))
+    const counts = new Map<AgentTeamChannelRef, number>()
+    for (const channel of this.state.channels.values()) {
+      if (channel.workspaceId === request.workspaceId && channel.state === 'active') counts.set(channel.channelRef, 0)
+    }
+    for (const todo of this.state.humanTodos.values()) {
+      // The lookup also scopes the count: a Channel of another Workspace, or an
+      // archived one, is absent from `counts` and so is never counted.
+      if (isUnsettledHumanTodo(todo) && counts.has(todo.channelRef)) counts.set(todo.channelRef, counts.get(todo.channelRef)! + 1)
+    }
+    return Object.freeze({
+      todos: Object.freeze(todos),
+      channelCounts: Object.freeze([...counts].map(([channelRef, count]) => Object.freeze({ channelRef, count }))),
     })
   }
 
@@ -2150,6 +2357,15 @@ export class AgentTeamLedger {
       case 'team/claim-released':
       case 'team/task-changed':
         return [{ kind: 'channel', channelRef: operation.data.task.channelRef }, { kind: 'thread', threadRef: operation.data.thread.threadRef }]
+      case 'team/human-todo-changed':
+        // The Workspace scope is what a Channel badge refetches on: the checklist
+        // is per Thread, but the count that hangs off a Channel row is a sum the
+        // Host derives across the Workspace's Threads.
+        return [
+          { kind: 'workspace', workspaceId: operation.data.workspaceId },
+          { kind: 'channel', channelRef: operation.data.todo.channelRef },
+          { kind: 'thread', threadRef: operation.data.todo.threadRef },
+        ]
       case 'team/thread-attention-changed':
         return [{ kind: 'thread', threadRef: operation.data.thread.threadRef }]
       case 'team/thread-read':
@@ -2198,6 +2414,8 @@ export class AgentTeamLedger {
       case 'team/task-changed':
       case 'team/thread-attention-changed':
         return [operation.data.thread.threadRef]
+      case 'team/human-todo-changed':
+        return [operation.data.todo.threadRef]
       case 'team/channel-member-removed':
       case 'team/channel-archived':
       case 'team/member-removed':
@@ -2580,6 +2798,51 @@ export class AgentTeamLedger {
         : this.inboxDelta()
       if (!isDeepStrictEqual(operation.data.inbox, expectedInbox)) throw new Error('invalid Claim inbox projection')
       this.validateInboxDelta(operation.data.inbox, projection, refs)
+      return
+    }
+    if (operation.kind === 'team/human-todo-changed') {
+      const actor = operation.actor.kind === 'member' ? assertMember() : (assertHuman(), undefined)
+      const { todo } = operation.data
+      const channel = projection.channels.get(todo.channelRef)
+      if (channel === undefined || channel.workspaceId !== operation.data.workspaceId
+        || projection.threads.get(todo.threadRef) === undefined
+        || this.channelRefForThreadFrom(projection, todo.threadRef) !== todo.channelRef
+        || todo.normalizedTitle !== this.normalizeTodoTitle(todo.title) || todo.normalizedTitle === ''
+        || (actor !== undefined && !this.participatesInChannelWorkspaceFrom(projection, todo.channelRef, actor.memberId))) {
+        throw new Error('invalid Human todo operation')
+      }
+      const prior = projection.humanTodos.get(todo.todoRef)
+      if (prior === undefined) {
+        // Dispatch: only the Member that asks may create the record, it starts
+        // pending, and no unsettled todo of that Thread may already hold the key
+        // — a second record for one outstanding ask is what the key forbids.
+        if (operation.actor.kind !== 'member' || todo.requester !== operation.actor.memberId || todo.state !== 'pending'
+          || todo.claimedBy !== undefined || todo.answeredMessageRef !== undefined || todo.resolvedBy !== undefined
+          || (projection.humanTodosByThread.get(todo.threadRef) ?? [])
+            .some(entry => entry.normalizedTitle === todo.normalizedTitle && isUnsettledHumanTodo(entry))) {
+          throw new Error('invalid Human todo dispatch')
+        }
+        this.addRef(refs, todo.todoRef)
+        return
+      }
+      // Every recorded transition moved the state forward: a repeat writes no
+      // record at all, so an unchanged state on record is a bug rather than a
+      // replay shape this validator has to tolerate.
+      if (!this.sameHumanTodoIdentity(prior, todo) || prior.state === todo.state
+        || !isAllowedHumanTodoTransition(prior.state, todo.state)) throw new Error('invalid Human todo transition')
+      if (todo.state === 'claimed' && (todo.claimedBy !== operation.actor.memberId || todo.claimedSequence !== operation.sequence)) {
+        throw new Error('invalid Human todo claim')
+      }
+      if (todo.state === 'answered') {
+        const message = todo.answeredMessageRef === undefined ? undefined : projection.messagesByRef.get(todo.answeredMessageRef)
+        if (message === undefined || message.threadRef !== todo.threadRef
+          || operation.actor.kind !== 'human' || message.sender !== operation.actor.memberId) throw new Error('invalid Human todo answer')
+      }
+      const resolved = todo.state === 'closed' || todo.state === 'cancelled'
+      if (resolved !== (todo.resolvedBy !== undefined)
+        || (resolved && (todo.resolvedBy !== operation.actor.memberId || todo.resolvedSequence !== operation.sequence))) {
+        throw new Error('invalid Human todo resolution')
+      }
       return
     }
     if (operation.kind === 'team/task-changed') {
@@ -3011,6 +3274,12 @@ export class AgentTeamLedger {
       this.applyInboxDelta(target, operation.data.inbox)
       return
     }
+    if (operation.kind === 'team/human-todo-changed') {
+      // A todo is not Thread content: it moves no Task, no Thread revision and
+      // no Attention, so replay writes the one record the operation carries.
+      this.recordHumanTodo(target, operation.data.todo)
+      return
+    }
     if (operation.kind === 'team/task-changed') {
       for (const claim of operation.data.claims) this.recordClaim(target, claim)
       this.appendActivityFact(target, operation.data.activity, operation.occurredAt)
@@ -3110,6 +3379,19 @@ export class AgentTeamLedger {
     if (bucket === undefined) { target.claimsByTask.set(claim.taskRef, [claim]); return }
     const known = bucket.findIndex(entry => entry.claimRef === claim.claimRef)
     if (known === -1) bucket.push(claim); else bucket[known] = claim
+  }
+
+  /**
+   * One todo into the projection and its per-Thread bucket. A state change
+   * keeps the position its dispatch gave it — the bucket answers in dispatch
+   * order, the way the checklist and the dedupe scan both read it.
+   */
+  private recordHumanTodo(target: Projection, todo: AgentTeamHumanTodo): void {
+    target.humanTodos.set(todo.todoRef, todo)
+    const bucket = target.humanTodosByThread.get(todo.threadRef)
+    if (bucket === undefined) { target.humanTodosByThread.set(todo.threadRef, [todo]); return }
+    const known = bucket.findIndex(entry => entry.todoRef === todo.todoRef)
+    if (known === -1) bucket.push(todo); else bucket[known] = todo
   }
 
   /**
@@ -4220,6 +4502,17 @@ export class AgentTeamLedger {
     return direction.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase()
   }
 
+  /**
+   * The dedupe half a second dispatch matches on. Case, surrounding space and
+   * internal runs of whitespace are presentation, so two Members wording the
+   * same ask differently by any of those still name one todo — while wording
+   * that differs by more is left alone, because the ledger merges nothing by
+   * meaning.
+   */
+  private normalizeTodoTitle(title: string): string {
+    return title.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase()
+  }
+
   private assertHandleAvailable(workspaceId: WorkspaceId, handle: string, exceptMemberId?: AgentTeamMemberId): void {
     this.assertHandleAvailableFrom(this.state, workspaceId, handle, exceptMemberId)
   }
@@ -4417,6 +4710,42 @@ export class AgentTeamLedger {
       || operation.data.baseRevision !== request.baseRevision || operation.data.activity.kind !== request.action) this.throwRequestCollision(request.requestId)
   }
 
+  /**
+   * A replayed dispatch requestId must describe the dispatch it first recorded:
+   * same Workspace, same requester, same raw title. A requestId reused for a
+   * transition of any todo is a collision, not a replay.
+   */
+  private assertSameHumanTodoDispatch(operation: AgentTeamOperation, request: AgentTeamAuthorizedHumanTodoRequest): asserts operation is AgentTeamHumanTodoChangedOperation {
+    if (operation.kind !== 'team/human-todo-changed' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.todo.state !== 'pending'
+      || operation.data.todo.title.trim() !== request.title.trim()) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameHumanTodoAction(operation: AgentTeamOperation, request: AgentTeamAuthorizedHumanTodoActionRequest): asserts operation is AgentTeamHumanTodoChangedOperation {
+    if (operation.kind !== 'team/human-todo-changed' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.todo.todoRef !== request.todoRef
+      || operation.data.todo.state !== HUMAN_TODO_TARGET_STATE[request.action]
+      || (request.action === 'answer' && operation.data.todo.answeredMessageRef !== request.messageRef)) this.throwRequestCollision(request.requestId)
+  }
+
+  /**
+   * The answer a todo points at is the Human's own reply inside the same
+   * Thread: the ledger stores the reference, so both halves of that claim have
+   * to hold before the state may advance to answered.
+   */
+  private assertAnswerMessage(
+    messageRef: AgentTeamMessageRef | undefined,
+    todo: AgentTeamHumanTodo,
+    memberId: AgentTeamMemberId,
+    human: boolean,
+  ): void {
+    if (messageRef === undefined) throw new Error('answer requires the in-Thread reply messageRef')
+    const message = this.state.messagesByRef.get(this.requireRefKey(this.state.messagesByRef, messageRef, 'message', 'Message'))
+    if (message === undefined) throw new Error(`unknown Message ref '${messageRef}'${this.unknownRefHint(messageRef, 'message', 'Message')}`)
+    if (message.threadRef !== todo.threadRef) throw new Error(`Message '${messageRef}' does not belong to Thread '${todo.threadRef}'`)
+    if (!human || message.sender !== memberId) throw new Error(`answer requires the Human's own reply in Thread '${todo.threadRef}'`)
+  }
+
   private assertSameRemoval(operation: AgentTeamOperation, request: AgentTeamAuthorizedRemoveMemberRequest): asserts operation is AgentTeamMemberRemovedOperation {
     if (operation.kind !== 'team/member-removed' || !this.sameActor(operation.actor, request.actor)
       || operation.data.member.memberId !== request.memberId) this.throwRequestCollision(request.requestId)
@@ -4570,6 +4899,27 @@ export class AgentTeamLedger {
       task: operation.data.task, thread: operation.data.thread, claims: operation.data.claims })
   }
 
+  /**
+   * The identity a transition may not touch: which todo it is, where it lives,
+   * who asked and the dedupe key that named it. State and its companions are
+   * what an operation is allowed to move.
+   */
+  private sameHumanTodoIdentity(prior: AgentTeamHumanTodo, next: AgentTeamHumanTodo): boolean {
+    return prior.todoRef === next.todoRef && prior.channelRef === next.channelRef && prior.threadRef === next.threadRef
+      && prior.requester === next.requester && prior.title === next.title && prior.normalizedTitle === next.normalizedTitle
+  }
+
+  /**
+   * The todo outcome every path answers with. `changed` states whether this
+   * call wrote the record, while the receipt is whatever record the answer
+   * points at — the one this call wrote, or, on a same-request retry, the one
+   * already stored. A reused todo and a repeat of a settled transition point
+   * at no record of their own, so they carry neither.
+   */
+  private humanTodoResult(todo: AgentTeamHumanTodo, changed: boolean, receipt?: AgentTeamOperationReceipt): AgentTeamHumanTodoResult {
+    return Object.freeze({ kind: 'committed', todo, changed, ...(receipt === undefined ? {} : { receipt }) })
+  }
+
   private attentionResult(operation: AgentTeamThreadAttentionChangedOperation): AgentTeamThreadAttentionResult {
     return Object.freeze({ receipt: this.receipt(operation), ...(operation.data.task === undefined ? {} : { task: operation.data.task }), thread: operation.data.thread,
       ...(operation.data.inbox.attention.set[0] === undefined ? {} : { attention: operation.data.inbox.attention.set[0] }) })
@@ -4624,8 +4974,9 @@ export class AgentTeamLedger {
   private ref(kind: 'task'): AgentTeamTaskRef
   private ref(kind: 'thread'): AgentTeamThreadRef
   private ref(kind: 'claim'): AgentTeamClaimRef
+  private ref(kind: 'todo'): AgentTeamHumanTodoRef
   private ref(kind: 'activity'): AgentTeamActivityRef
-  private ref(kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'activity') {
+  private ref(kind: 'channel' | 'message' | 'task' | 'thread' | 'claim' | 'todo' | 'activity') {
     return this.createRef(kind)
   }
 
