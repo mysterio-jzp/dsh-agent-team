@@ -1,0 +1,1087 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 · member-boundary.html</title>
+<script>/* 移动档由生成器直接产出：帧按移动设备渲染，⛔ 不靠运行时改 DOM */</script>
+<style>
+/* ==========================================================================
+ * dsh-agent-team 界面正稿 · 原型专用设计令牌
+ *
+ * 这些值**逐条抄自** DSH 主题的定义处
+ * （deepseek-harness/packages/client/ui-theme/src/styles/design-platform.css，
+ *  2026-10-14 现读）。原型把它们写成字面量只是为了单文件离线打开 ——
+ * 落地进 packages/client-agent-team/src/client/*.module.css 时，
+ * **必须**换回右侧注释里的那个 --dsw-* token，⛔ 不许落地这些字面量。
+ *
+ * 名字与 token 一一对应，看见 `--proto-bubble` 就知道该写
+ * `var(--dsw-specific-bubble)`。
+ * ========================================================================== */
+
+:root {
+  /* -- 面（surface） ---------------------------------------------------- */
+  --proto-bg-base: rgb(255, 255, 255);            /* --dsw-alias-bg-base */
+  --proto-sidebar: rgb(249, 250, 251);            /* --dsw-specific-sidebar-fill */
+  --proto-nav-hover: rgb(241, 243, 245);          /* --dsw-specific-sidebar-nav-item-hover */
+  --proto-nav-active: rgb(235, 238, 242);         /* --dsw-specific-sidebar-nav-item-active */
+  --proto-nav-active-accent: rgb(228, 237, 253);  /* --dsw-specific-sidebar-nav-item-active-accent */
+  --proto-preview-surface: rgb(235, 238, 242);    /* --dsw-alias-bg-document-preview */
+  --proto-layer-1: rgb(255, 255, 255);            /* --dsw-alias-bg-layer-1 */
+
+  /* -- 交互底（interactive） -------------------------------------------- */
+  --proto-hover: rgba(38, 49, 72, .06);           /* --dsw-alias-interactive-bg-hover */
+  --proto-hover-solid: rgb(241, 243, 245);        /* --dsw-alias-interactive-bg-hover-solid */
+
+  /* -- 文字（label） ---------------------------------------------------- */
+  --proto-label-primary: rgb(15, 17, 21);         /* --dsw-alias-label-primary */
+  --proto-label-secondary: rgb(97, 102, 107);     /* --dsw-alias-label-secondary */
+  --proto-label-tertiary: rgb(129, 133, 140);     /* --dsw-alias-label-tertiary */
+  --proto-label-caption: rgb(173, 178, 184);      /* --dsw-alias-label-caption */
+  --proto-label-foreground: rgb(255, 255, 255);   /* --dsw-alias-label-primary-foreground */
+
+  /* -- 中性边框（border，落地写 1px —— 见前端设计文档「中性描边宽度」） -- */
+  --proto-border-l1: rgba(0, 0, 0, .04);          /* --dsw-alias-border-l1 */
+  --proto-border-l2: rgba(0, 0, 0, .10);          /* --dsw-alias-border-l2 */
+  --proto-border-l3: rgba(0, 0, 0, .12);          /* --dsw-alias-border-l3 */
+  --proto-border-l4: rgba(0, 0, 0, .16);          /* --dsw-alias-border-l4 */
+
+  /* -- 状态 ------------------------------------------------------------- */
+  --proto-business: rgb(65, 118, 230);            /* --dsw-alias-state-business-primary */
+  --proto-business-tertiary: rgb(228, 237, 253);  /* --dsw-alias-state-business-tertiary */
+  --proto-success: rgb(34, 197, 94);              /* --dsw-alias-state-success-primary */
+  --proto-warn-primary: rgb(245, 158, 11);        /* --dsw-alias-state-warn-primary */
+  --proto-warn-tertiary: rgb(254, 245, 231);      /* --dsw-alias-state-warn-tertiary */
+  --proto-warn-label: rgb(221, 134, 41);          /* --dsw-alias-state-warn-label（⛔ 只作描边，不作小字：白底仅 2.79:1） */
+  --proto-warn-text: rgb(120, 53, 15);            /* 派生：小字用的 amber 深档 —— 白底 9.07:1／warn-tertiary 上 8.39:1 */
+  --proto-tag-claimed-text: rgb(30, 64, 175);     /* 派生：business-tertiary 底上的小字（7.17:1；直接用 business 只有 3.60:1） */
+  --proto-error: rgb(236, 19, 19);                /* --dsw-alias-state-error-primary */
+  --proto-idle: rgb(212, 212, 212);               /* --dsw-alias-state-idle-primary */
+  --proto-link: rgb(65, 118, 230);                /* --dsw-alias-link */
+
+  /* -- 圆角 / 阴影 ------------------------------------------------------ */
+  --proto-radius-xs: 4px;                         /* --dsw-radius-xs */
+  --proto-radius-sm: 8px;                         /* --dsw-radius-sm */
+  --proto-radius-md: 12px;                        /* --dsw-radius-md */
+  --proto-radius-lg: 16px;                        /* --dsw-radius-lg */
+  --proto-radius-xl: 20px;                        /* --dsw-radius-xl */
+  --proto-elevation-stroke: rgba(0, 0, 0, .10);   /* --dsw-elevation-stroke-color */
+  --proto-elevation-soft: 0 1px 2px rgba(16, 20, 28, .05);
+  --proto-elevation-prominent: 0 8px 24px rgba(16, 20, 28, .12);
+
+  /* -- 焦点环（全站一种蓝；落地写 token + 兜底值） ---------------------- */
+  --proto-focus-ring: 2px solid var(--proto-business);  /* --dsw-focus-ring-width/color */
+
+  /* -- Team 派生值（⛔ 不是 token：见于 conversation.module.css 的既有裁决） -- */
+  --proto-bubble: rgb(237, 243, 254);             /* --dsw-specific-bubble（浅色档） */
+  --proto-mention-chip: rgb(241, 243, 245);       /* --dsw-alias-markdown-tag */
+  --proto-mention-mine: rgb(243, 232, 220);       /* 提及人类：warn 派生，见说明 */
+  --proto-mention-mine-text: rgb(120, 53, 15);    /* 提及人类文字：warn-text 派生，9.07:1 */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --proto-bg-base: rgb(21, 21, 23);
+    --proto-sidebar: rgb(33, 33, 35);
+    --proto-nav-hover: rgb(44, 44, 46);
+    --proto-nav-active: rgb(44, 44, 46);
+    --proto-nav-active-accent: rgb(52, 65, 91);
+    --proto-preview-surface: rgb(21, 21, 23);
+    --proto-layer-1: rgb(35, 35, 36);
+    --proto-hover: rgba(255, 255, 255, .08);
+    --proto-hover-solid: rgb(44, 44, 46);
+    --proto-label-primary: rgb(235, 238, 242);
+    --proto-label-secondary: rgb(173, 178, 184);
+    --proto-label-tertiary: rgb(151, 157, 166);
+    --proto-label-caption: rgb(129, 133, 140);
+    --proto-border-l1: rgba(255, 255, 255, .06);
+    --proto-border-l2: rgba(255, 255, 255, .10);
+    --proto-border-l3: rgba(255, 255, 255, .14);
+    --proto-border-l4: rgba(255, 255, 255, .18);
+    --proto-business: rgb(122, 170, 255);
+    --proto-business-tertiary: rgb(40, 49, 66);
+    --proto-link: rgb(122, 170, 255);
+    --proto-warn-tertiary: rgb(39, 36, 31);
+    --proto-warn-label: rgb(247, 173, 49);
+    --proto-warn-text: rgb(247, 173, 49);         /* 深色档下 amber 亮档本身达标（8.08:1） */
+    --proto-tag-claimed-text: rgb(122, 170, 255); /* 深色档的 business 亮档在深底上合规 */
+    --proto-elevation-stroke: rgba(255, 255, 255, .10);
+    --proto-elevation-soft: none;
+    --proto-bubble: rgb(44, 44, 46);              /* --dsw-specific-bubble（深色档） */
+    --proto-mention-chip: rgb(53, 54, 56);
+    --proto-mention-mine: rgb(74, 58, 34);
+    --proto-mention-mine-text: rgb(247, 173, 49);
+  }
+}
+
+:root[data-theme="dark"] {
+  --proto-bg-base: rgb(21, 21, 23);
+  --proto-sidebar: rgb(33, 33, 35);
+  --proto-nav-hover: rgb(44, 44, 46);
+  --proto-nav-active: rgb(44, 44, 46);
+  --proto-nav-active-accent: rgb(52, 65, 91);
+  --proto-preview-surface: rgb(21, 21, 23);
+  --proto-layer-1: rgb(35, 35, 36);
+  --proto-hover: rgba(255, 255, 255, .08);
+  --proto-hover-solid: rgb(44, 44, 46);
+  --proto-label-primary: rgb(235, 238, 242);
+  --proto-label-secondary: rgb(173, 178, 184);
+  --proto-label-tertiary: rgb(151, 157, 166);
+  --proto-label-caption: rgb(129, 133, 140);
+  --proto-border-l1: rgba(255, 255, 255, .06);
+  --proto-border-l2: rgba(255, 255, 255, .10);
+  --proto-border-l3: rgba(255, 255, 255, .14);
+  --proto-border-l4: rgba(255, 255, 255, .18);
+  --proto-business: rgb(122, 170, 255);
+  --proto-business-tertiary: rgb(40, 49, 66);
+  --proto-link: rgb(122, 170, 255);
+  --proto-warn-tertiary: rgb(39, 36, 31);
+  --proto-warn-label: rgb(247, 173, 49);
+  --proto-warn-text: rgb(247, 173, 49);
+  --proto-tag-claimed-text: rgb(122, 170, 255);
+  --proto-elevation-stroke: rgba(255, 255, 255, .10);
+  --proto-elevation-soft: none;
+  --proto-bubble: rgb(44, 44, 46);
+  --proto-mention-chip: rgb(53, 54, 56);
+  --proto-mention-mine: rgb(74, 58, 34);
+  --proto-mention-mine-text: rgb(247, 173, 49);
+}
+
+/* 圆角面一律配 corner-shape: round（平台按 superellipse(1.5) 弯圆角，
+   不配对会把正圆压成方圆）。 */
+.avatar, .pill, .badge, .dot, .iconBtn, .round {
+  corner-shape: round;
+}
+
+/* ==========================================================================
+ * 界面正稿 · 共享外壳与组件样式（原型专用）
+ * 真实实现落到 packages/client-agent-team/src/client/*.module.css。
+ * 每个类名下方注释写明它该落在哪个组件。
+ * ========================================================================== */
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--proto-preview-surface);
+  color: var(--proto-label-primary);
+  font: 14px/1.5 -apple-system, "SF Pro Text", "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+  margin: 0;
+  padding: 20px 16px 56px;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--proto-link); }
+
+/* --------------------------------------------------------------------------
+ * 原型控制条（⛔ 不进产品：只用于看状态、切主题、对齐画布尺寸）
+ * ------------------------------------------------------------------------ */
+.toolbar {
+  align-items: center;
+  background: var(--proto-bg-base);
+  border-radius: var(--proto-radius-md);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 0 auto 18px;
+  max-width: 1440px;
+  padding: 12px 16px;
+}
+.toolbar h1 { font-size: 15px; font-weight: 600; margin: 0; }
+.toolbar .lead { color: var(--proto-label-secondary); font-size: 12px; }
+.toolbar .spacer { flex: 1; }
+.toolbar .note {
+  color: var(--proto-label-tertiary); font-size: 12px; max-width: 620px;
+}
+.seg {
+  border-radius: var(--proto-radius-sm);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  display: flex; overflow: hidden;
+}
+.seg button {
+  background: transparent; border: 0; color: var(--proto-label-secondary);
+  cursor: pointer; font: inherit; font-size: 12px; padding: 6px 10px;
+}
+.seg button + button { box-shadow: -1px 0 0 var(--proto-elevation-stroke); }
+.seg button[aria-pressed="true"] {
+  background: var(--proto-business); color: var(--proto-label-foreground); font-weight: 600;
+}
+.toolbar label { align-items: center; color: var(--proto-label-secondary); display: flex; font-size: 12px; gap: 6px; }
+.toolbar input[type="checkbox"] { accent-color: var(--proto-business); }
+
+/* --------------------------------------------------------------------------
+ * 画布：桌面 / 移动两个座位（原型只按这两个宽度验收）
+ * ------------------------------------------------------------------------ */
+.stage { display: grid; gap: 22px; justify-content: center; margin: 0 auto; max-width: 1440px; }
+.frameWrap { display: grid; gap: 8px; }
+.frameLabel { color: var(--proto-label-secondary); font-size: 12px; text-align: center; }
+.frameLabel b { color: var(--proto-label-primary); font-weight: 600; }
+
+/* 帧高用 --frame-h 覆盖（原型里同一页画好几帧，每帧装的东西不一样）；
+   移动档一律 780px，且忽略 --frame-h —— 那就是"手机屏"的固定高度。 */
+.frame {
+  --frame-h: 860px;
+  background: var(--proto-bg-base);
+  border-radius: var(--proto-radius-lg);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  display: flex;
+  height: var(--frame-h);
+  overflow: hidden;
+  max-width: 100%;
+  width: 1408px;
+}
+.frame[data-device="mobile"] { --frame-h: 780px; width: 390px; }
+
+/* --------------------------------------------------------------------------
+ * 左侧栏（落地：SidebarRoot 座位里的 Team 栏）
+ * ------------------------------------------------------------------------ */
+.sidebar {
+  background: var(--proto-sidebar);
+  box-shadow: 1px 0 0 var(--proto-border-l1);
+  display: flex; flex: none; flex-direction: column;
+  gap: 2px; overflow-y: auto; padding: 12px 8px; width: 248px;
+}
+.sidebarHead {
+  align-items: center; display: flex; gap: 8px; padding: 4px 8px 10px;
+}
+.sidebarHead .workspace {
+  font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.groupTitle {
+  color: var(--proto-label-tertiary); font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; padding: 14px 8px 6px;
+}
+/* 列表行：shipped 的 12px 档（--dsw-radius-md），hover 用交互底 */
+.navRow {
+  align-items: center; border-radius: var(--proto-radius-md);
+  color: var(--proto-label-primary); cursor: pointer; display: flex; gap: 8px;
+  min-height: 32px; padding: 6px 8px; text-decoration: none;
+}
+.navRow:hover, .navRow:focus-visible { background: var(--proto-nav-hover); }
+.navRow[aria-current="page"] { background: var(--proto-nav-active); font-weight: 600; }
+.navRow[aria-current="page"] .navIcon { background: var(--proto-nav-active-accent); }
+.navRow .navIcon {
+  align-items: center; background: var(--proto-nav-hover-solid); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: flex; flex: none; font-size: 11px; font-weight: 600;
+  height: 20px; justify-content: center; width: 20px;
+}
+.navRow .navText { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.navRow .navMeta { color: var(--proto-label-tertiary); flex: none; font-size: 11px; }
+
+/* 计数徽标：只有一份声明（落地 countBadge.module.css .badge 同一条语言） */
+.badge {
+  align-items: center; background: var(--proto-label-primary); border-radius: 999px;
+  color: var(--proto-label-foreground); display: inline-flex; flex: none;
+  font-size: 11px; font-weight: 600; height: 18px; justify-content: center;
+  min-width: 18px; padding: 0 5px;
+}
+.badge[data-tone="human"] { background: rgb(180, 83, 9); }  /* 白字 5.02:1：shipped 的 business 底只有 4.28:1 */
+.badge[data-tone="quiet"] { background: var(--proto-hover-solid); color: var(--proto-label-secondary); }
+
+/* 成员行（落地：侧栏 Agents 行 + 名册行共用） */
+.memberRow {
+  align-items: center; border-radius: var(--proto-radius-md); display: flex; gap: 8px;
+  padding: 6px 8px;
+}
+.memberRow:hover { background: var(--proto-nav-hover); }
+.memberRow .who { flex: 1; min-width: 0; }
+.memberRow .name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.memberRow .state { color: var(--proto-label-tertiary); font-size: 11px; }
+.memberRow[data-state="working"] .state { color: var(--proto-business); }
+.memberRow[data-state="suspended"] .name { color: var(--proto-label-tertiary); }
+
+/* --------------------------------------------------------------------------
+ * 头像座位（落地：TeamMemberAvatar.tsx + avatar-stack.module.css）
+ * 尺寸三档，同一条色相规则：hsl(memberHue 42% 46%)，首字母回退。
+ * ------------------------------------------------------------------------ */
+/* 明度沿既有 46%（hsl(memberHue 42% 46%)）：原型画的就是"今天会落地的样子"。
+   ⛔ 46% 配白字不合 AA —— 360 个色相里 186 度（52%）低于 4.5:1，最差 hue 60 仅 2.54:1；
+   若要修，达标值见《无障碍与几何基线》§三（明度 33% 全色相 ≥4.70:1），独立一笔再动。 */
+.avatar {
+  align-items: center; background: hsl(var(--hue, 212) 42% 46%);
+  border-radius: 50%; color: #fff; display: inline-flex; flex: none;
+  font-weight: 600; justify-content: center;
+}
+.avatar[data-size="sm"] { font-size: 9px; height: 18px; width: 18px; }
+.avatar[data-size="md"] { font-size: 11px; height: 24px; width: 24px; }
+.avatar[data-size="lg"] { font-size: 14px; height: 32px; width: 32px; }
+.avatar[data-size="xl"] { font-size: 20px; height: 48px; width: 48px; }
+.avatar[data-photo] { background: hsl(var(--hue, 212) 42% 46%); object-fit: cover; }
+.avatarRing { box-shadow: 0 0 0 2px var(--proto-bg-base); }
+.avatarWrap { display: inline-flex; flex: none; position: relative; }
+/* 在场点：右下角，2px 描边画底 */
+.avatarWrap .presence {
+  background: var(--proto-success); border: 2px solid var(--proto-bg-base);
+  border-radius: 50%; bottom: -1px; height: 9px; position: absolute; right: -1px; width: 9px;
+}
+.avatarWrap[data-presence="idle"] .presence { background: var(--proto-idle); }
+
+/* --------------------------------------------------------------------------
+ * 主区（讨论 / task 页）
+ * ------------------------------------------------------------------------ */
+.main { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+
+.pageHead {
+  align-items: flex-start; box-shadow: 0 1px 0 var(--proto-border-l1);
+  display: flex; flex: none; gap: 12px; padding: 12px 16px;
+}
+.pageHead .back { color: var(--proto-label-secondary); font-size: 12px; }
+.pageHead h2 { font-size: 16px; font-weight: 600; margin: 2px 0 0; }
+.pageHead .sub { color: var(--proto-label-secondary); font-size: 12px; margin: 4px 0 0; }
+.pageHead .actions { display: flex; flex: none; gap: 8px; margin-left: auto; }
+
+/* 视图切换（讨论 ⇄ 待办 ⇄ 产物）：分段控件，28px 高 */
+.tabs {
+  align-items: center; background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  display: inline-flex; gap: 2px; padding: 2px;
+}
+.tabs button {
+  background: transparent; border: 0; border-radius: 6px; color: var(--proto-label-secondary);
+  cursor: pointer; font: inherit; font-size: 12px; padding: 4px 10px;
+}
+.tabs button[aria-selected="true"] {
+  background: var(--proto-bg-base); box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  color: var(--proto-label-primary); font-weight: 600;
+}
+
+/* 只工作域说明条（需求 7）：这一域能在哪些目录干活 */
+.workspaceScope {
+  align-items: center; background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: flex; flex-wrap: wrap;
+  font-size: 12px; gap: 6px 8px; margin: 10px 16px 0; padding: 7px 10px;
+}
+.workspaceScope .roots { display: flex; flex-wrap: wrap; gap: 6px; }
+.rootChip {
+  background: var(--proto-bg-base); border-radius: 6px; box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  color: var(--proto-label-primary); font-size: 12px; padding: 1px 7px;
+}
+.rootChip[data-primary] { box-shadow: 0 0 0 1px var(--proto-business); color: var(--proto-business); font-weight: 600; }
+.workspaceScope .tag {
+  background: var(--proto-bg-base); border-radius: 999px; box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  color: var(--proto-label-tertiary); font-size: 11px; margin-left: auto; padding: 1px 8px;
+}
+
+/* 时间线 */
+.timeline { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px 18px; scroll-behavior: smooth; }
+.timeline[data-compact] { padding-inline: 12px; }
+
+.daySeparator, .unreadBoundary {
+  align-items: center; color: var(--proto-label-caption); display: flex;
+  font-size: 11px; gap: 10px; margin: 16px 0 10px;
+}
+.daySeparator::before, .daySeparator::after,
+.unreadBoundary::before, .unreadBoundary::after {
+  background: var(--proto-border-l2); content: ""; flex: 1; height: 1px;
+}
+.unreadBoundary { color: var(--proto-business); }
+.unreadBoundary::before, .unreadBoundary::after {
+  background: color-mix(in srgb, var(--proto-business) 35%, transparent);
+}
+
+/* Activity 行：非气泡形态（气泡化不改它） */
+.activityRow {
+  align-items: baseline; color: var(--proto-label-secondary); display: flex;
+  flex-wrap: wrap; font-size: 12px; gap: 6px; margin: 6px 0; padding-left: 32px;
+}
+.activityRow .who { color: var(--proto-label-primary); font-weight: 600; }
+.activityRow .at { color: var(--proto-label-caption); font-size: 11px; }
+
+/* 消息行：一条消息一个气泡；气泡**不分侧**，归属只由身份行说 */
+.messageRow { display: flex; gap: 8px; margin-top: 12px; }
+.messageRow[data-grouped] { margin-top: 2px; }
+.messageRow[data-grouped] .identity { visibility: hidden; }
+.messageRow .identity {
+  align-items: center; display: flex; flex: none; gap: 6px; padding-top: 2px; width: 24px;
+}
+.messageCol { min-width: 0; flex: 1; }
+.identityLine {
+  align-items: baseline; display: flex; flex-wrap: wrap; gap: 6px;
+  margin: 0 0 4px 2px; min-height: 20px;
+}
+.messageRow[data-grouped] .identityLine { display: none; }
+.identityLine .author { font-size: 13px; font-weight: 600; }
+.identityLine .role {
+  background: var(--proto-hover-solid); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); font-size: 11px; padding: 0 6px;
+}
+.identityLine .at { color: var(--proto-label-caption); font-size: 11px; }
+/* 身份行上的操作条：`@media (hover: hover)` 内才隐藏，触屏常显 */
+.identityLine .rowActions { display: flex; gap: 2px; margin-left: auto; }
+@media (hover: hover) {
+  .identityLine .rowActions { opacity: 0; transition: opacity 80ms ease; }
+  .messageRow:hover .rowActions, .messageRow:focus-within .rowActions { opacity: 1; }
+}
+
+/* 气泡本体：shipped 配方 —— --dsw-specific-bubble + --dsw-radius-xl，
+   左右同一个底、同一个圆角，8px 12px 内距。 */
+.bubble {
+  background: var(--proto-bubble); border-radius: var(--proto-radius-xl);
+  color: var(--proto-label-primary); max-width: 100%; overflow-wrap: anywhere;
+  padding: 8px 12px;
+}
+.bubble p { margin: 0 0 8px; }
+.bubble p:last-child { margin-bottom: 0; }
+.bubble ul { margin: 4px 0 8px; padding-left: 20px; }
+.bubble code {
+  background: var(--proto-hover); border-radius: var(--proto-radius-xs);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; padding: 1px 4px;
+}
+.bubble .ref {
+  background: var(--proto-hover-solid); border-radius: 6px; color: var(--proto-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 0 4px;
+}
+.bubble blockquote {
+  border-left: 2px solid var(--proto-border-l4); color: var(--proto-label-secondary);
+  margin: 0 0 8px; padding: 2px 0 2px 10px;
+}
+
+/* 「有人@我」标记：⛔ 不改变气泡归属，只作为气泡第一行 */
+.messageRow[data-mentions-me] .bubble {
+  box-shadow: 0 0 0 1px var(--proto-warn-label);
+}
+.mentionsMeBadge {
+  align-items: center; background: var(--proto-warn-tertiary); border-radius: 999px;
+  color: var(--proto-warn-text); display: flex; font-size: 11px; font-weight: 600;
+  margin: 0 0 6px auto; padding: 1px 8px; width: fit-content;
+}
+
+/* 引用块（需求 2）：气泡内顶部，一行截断，点击跳原文 */
+.quoteBlock {
+  align-items: stretch; background: var(--proto-bg-base); border-radius: var(--proto-radius-sm);
+  cursor: pointer; display: flex; gap: 8px; margin: 0 0 6px; padding: 4px 8px 4px 6px;
+  text-align: left; width: 100%;
+}
+.quoteBlock:hover { background: var(--proto-hover-solid); }
+.quoteBlock .rule { background: var(--proto-border-l4); border-radius: 2px; flex: none; width: 2px; }
+.quoteBlock .qText {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.quoteBlock .qWho { color: var(--proto-label-primary); font-size: 12px; font-weight: 600; }
+.quoteBlock .qWhat { color: var(--proto-label-secondary); font-size: 12px; }
+
+/* 行内提及芯片 */
+.mention {
+  background: var(--proto-mention-chip); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-primary); font-size: 13px; font-weight: 500; padding: 0 4px;
+}
+.mention[data-mention-human] { background: var(--proto-mention-mine); color: var(--proto-mention-mine-text); }
+
+/* 消息操作（回复 / 复制 / 引用）：28px 圆形纯图标控件 */
+.iconBtn {
+  align-items: center; background: transparent; border: 0; border-radius: 999px;
+  color: var(--proto-label-secondary); cursor: pointer; display: inline-flex;
+  height: 28px; justify-content: center; width: 28px;
+}
+.iconBtn:hover { background: var(--proto-hover); color: var(--proto-label-primary); }
+
+/* 小胶囊按钮（行内动作） */
+.pillBtn {
+  align-items: center; background: transparent; border: 0; border-radius: 999px;
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke); color: var(--proto-label-primary);
+  cursor: pointer; display: inline-flex; font: inherit; font-size: 12px; gap: 4px; padding: 3px 10px;
+}
+.pillBtn:hover { background: var(--proto-hover); }
+.pillBtn[data-variant="primary"] {
+  background: var(--proto-business); box-shadow: none; color: var(--proto-label-foreground); font-weight: 600;
+}
+.pillBtn[data-variant="primary"]:hover { background: color-mix(in srgb, var(--proto-business) 88%, #000); }
+.pillBtn[data-variant="quiet"] { box-shadow: none; color: var(--proto-label-secondary); }
+.pillBtn[aria-pressed="true"] { background: var(--proto-business-tertiary); box-shadow: 0 0 0 1px var(--proto-business); color: var(--proto-business); font-weight: 600; }
+
+/* --------------------------------------------------------------------------
+ * 产物条目（需求 8）：气泡内的一张卡，点击 ⇒ 右侧面板打开
+ * ------------------------------------------------------------------------ */
+.artifactCard {
+  background: var(--proto-bg-base); border: 0; border-radius: var(--proto-radius-md);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  cursor: pointer; display: grid; gap: 2px 10px;
+  grid-template-columns: 28px 1fr auto; margin: 6px 0 0; padding: 8px 10px; text-align: left; width: 100%;
+}
+.artifactCard:hover { background: var(--proto-hover); }
+.artifactCard[aria-current="true"] { box-shadow: 0 0 0 1.5px var(--proto-business); }
+.artifactCard .aIcon {
+  align-items: center; background: var(--proto-hover-solid); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: flex; font-size: 11px; font-weight: 600;
+  grid-row: span 2; height: 28px; justify-content: center; width: 28px;
+}
+.artifactCard .aTitle { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artifactCard .aMeta {
+  color: var(--proto-label-tertiary); font-size: 11px; grid-column: 2;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.artifactCard .aOpen { color: var(--proto-label-tertiary); font-size: 12px; grid-row: span 2; }
+.artifactCard .aRange {
+  background: var(--proto-hover-solid); border-radius: var(--proto-radius-xs);
+  color: var(--proto-label-secondary); font-size: 11px; padding: 0 4px;
+}
+
+/* --------------------------------------------------------------------------
+ * 右侧预览面板（需求 8：复用 shipped 的 documentpreview tab）
+ * ------------------------------------------------------------------------ */
+.previewPane {
+  background: var(--proto-preview-surface); box-shadow: -1px 0 0 var(--proto-border-l1);
+  display: flex; flex: none; flex-direction: column; min-width: 0; width: 420px;
+}
+.previewPane[hidden] { display: none; }
+.previewHead {
+  align-items: center; display: flex; flex: none; gap: 8px;
+  padding: 10px 12px; box-shadow: 0 1px 0 var(--proto-border-l1);
+}
+.previewHead .docName { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.previewHead .docPath { color: var(--proto-label-tertiary); font-size: 11px; }
+.previewTabs { align-items: center; box-shadow: 0 1px 0 var(--proto-border-l1); display: flex; flex: none; gap: 2px; padding: 6px 8px; }
+.previewTabs button {
+  background: transparent; border: 0; border-radius: 6px; color: var(--proto-label-secondary);
+  cursor: pointer; font: inherit; font-size: 12px; padding: 3px 9px;
+}
+.previewTabs button[aria-selected="true"] { background: var(--proto-bg-base); color: var(--proto-label-primary); font-weight: 600; }
+.docBody {
+  background: var(--proto-bg-base); flex: 1; margin: 8px; overflow: auto;
+  border-radius: var(--proto-radius-md); padding: 14px 16px;
+}
+.docBody h1 { font-size: 18px; margin: 0 0 10px; }
+.docBody h2 { font-size: 14px; margin: 16px 0 6px; }
+.docBody p, .docBody li { font-size: 13px; line-height: 1.65; }
+.docBody p { margin: 0 0 8px; }
+.docBody code { background: var(--proto-hover); border-radius: var(--proto-radius-xs); font-size: 12px; padding: 1px 4px; }
+.docBody .hit { background: color-mix(in srgb, var(--proto-warn-primary) 24%, transparent); border-radius: 3px; }
+
+/* --------------------------------------------------------------------------
+ * 人类待办项（需求 9）：与 claim 项**样式与语义都分开**
+ * ------------------------------------------------------------------------ */
+.todoList { align-content: start; display: grid; gap: 10px; min-height: 0; overflow-y: auto; padding: 14px 16px; }
+.todoCard {
+  background: var(--proto-bg-base); border-radius: var(--proto-radius-md);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke), var(--proto-elevation-soft);
+  display: grid; gap: 8px; padding: 12px 14px;
+}
+.todoCard[data-state="claimed"] { box-shadow: 0 0 0 1px var(--proto-business), var(--proto-elevation-soft); }
+.todoCard[data-state="closed"] { opacity: .62; }
+.todoHead { align-items: flex-start; display: flex; gap: 10px; }
+.todoHead .tTitle { font-size: 14px; font-weight: 600; }
+.todoHead .tOrigin { color: var(--proto-label-tertiary); font-size: 11px; margin-top: 2px; }
+.todoHead .tTitleRow { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.todoBody { color: var(--proto-label-secondary); font-size: 13px; }
+.todoFoot { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.todoFoot .grow { flex: 1; }
+.todoFoot .actor { align-items: center; color: var(--proto-label-secondary); display: flex; font-size: 12px; gap: 6px; }
+
+/* 状态签：待办用它，claim 用下面的 .claimMark —— 两者形状不同 */
+.stateTag {
+  align-items: center; border-radius: var(--proto-radius-sm); display: inline-flex;
+  font-size: 11px; font-weight: 600; gap: 4px; padding: 2px 8px;
+}
+.stateTag[data-state="pending"] { background: var(--proto-warn-tertiary); color: var(--proto-warn-text); }
+.stateTag[data-state="claimed"] { background: var(--proto-business-tertiary); color: var(--proto-tag-claimed-text); }
+.stateTag[data-state="answered"] { background: color-mix(in srgb, var(--proto-success) 14%, transparent); color: var(--proto-success); }
+.stateTag[data-state="closed"] { background: var(--proto-hover-solid); color: var(--proto-label-secondary); }
+.stateTag .dot { border-radius: 50%; height: 6px; width: 6px; background: currentColor; }
+
+/* 成员 Claim 行：左侧竖条 + 方形标记，与待办卡明确不同 */
+.claimRow {
+  background: var(--proto-bg-base); border-radius: var(--proto-radius-sm);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke);
+  display: grid; gap: 4px; padding: 10px 12px 10px 14px; position: relative;
+}
+.claimRow::before {
+  background: var(--proto-border-l4); border-radius: 2px; content: "";
+  bottom: 10px; left: 5px; position: absolute; top: 10px; width: 3px;
+}
+.claimRow .cHead { align-items: center; display: flex; gap: 6px; }
+.claimRow .cWho { font-size: 12px; font-weight: 600; }
+.claimRow .cMark {
+  border-radius: 3px; background: var(--proto-hover-solid); color: var(--proto-label-secondary);
+  font-size: 10px; font-weight: 600; padding: 1px 5px;
+}
+.claimRow .cText { color: var(--proto-label-secondary); font-size: 12px; }
+
+/* --------------------------------------------------------------------------
+ * 成员编辑页（需求 6）
+ * ------------------------------------------------------------------------ */
+.editor { display: grid; gap: 16px; padding: 16px; overflow-y: auto; }
+.field { display: grid; gap: 6px; }
+.field > .label { align-items: center; display: flex; font-size: 13px; font-weight: 600; gap: 6px; }
+.field > .hint { color: var(--proto-label-tertiary); font-size: 12px; }
+.input {
+  background: var(--proto-bg-base); border: 0; border-radius: var(--proto-radius-sm);
+  box-shadow: 0 0 0 1px var(--proto-elevation-stroke); color: var(--proto-label-primary);
+  font: inherit; font-size: 13px; padding: 8px 10px; width: 100%;
+}
+.input:focus-visible, .pillBtn:focus-visible, .iconBtn:focus-visible,
+.navRow:focus-visible, .artifactCard:focus-visible, .quoteBlock:focus-visible,
+.tabs button:focus-visible, .seg button:focus-visible, .todoCard button:focus-visible {
+  outline: var(--proto-focus-ring); outline-offset: 2px;
+}
+textarea.input { min-height: 64px; resize: vertical; }
+.avatarEditor { align-items: flex-start; display: flex; gap: 14px; }
+.avatarDrop {
+  align-items: center; background: var(--proto-hover); border-radius: 50%;
+  color: var(--proto-label-secondary); display: flex; flex-direction: column;
+  font-size: 11px; height: 64px; justify-content: center; text-align: center; width: 64px;
+}
+.fileRow {
+  align-items: center; background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  display: flex; gap: 8px; font-size: 12px; padding: 6px 10px;
+}
+.fileRow .meta { color: var(--proto-label-tertiary); margin-left: auto; }
+.hairline { background: var(--proto-border-l2); height: 1px; }
+
+/* --------------------------------------------------------------------------
+ * 只读说明卡 / 诊断
+ * ------------------------------------------------------------------------ */
+.noteCard {
+  background: var(--proto-hover); border-radius: var(--proto-radius-sm);
+  color: var(--proto-label-secondary); display: grid; font-size: 12.5px; gap: 6px; padding: 10px 12px;
+}
+.noteCard b { color: var(--proto-label-primary); }
+.warnCard {
+  background: var(--proto-warn-tertiary); border-radius: var(--proto-radius-sm);
+  color: var(--proto-warn-label); display: grid; font-size: 12.5px; gap: 6px; padding: 10px 12px;
+}
+.warnCard b { color: var(--proto-label-primary); }
+.emptyState {
+  align-items: center; color: var(--proto-label-tertiary); display: grid; font-size: 13px;
+  gap: 8px; justify-items: center; padding: 40px 20px; text-align: center;
+}
+.visuallyHidden {
+  clip: rect(0 0 0 0); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px;
+}
+.annotation {
+  color: var(--proto-label-tertiary); font-size: 11.5px; margin: 6px 16px 0; padding-left: 8px;
+  box-shadow: inset 2px 0 0 var(--proto-border-l3);
+}
+.sectionLabel {
+  color: var(--proto-label-tertiary); font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; margin: 16px 16px 0;
+}
+
+@media (max-width: 900px) {
+  .sidebar { display: none; }
+  .previewPane { display: none; }
+}
+
+/* --------------------------------------------------------------------------
+ * 原型提示条（⛔ 不进产品）：落地对应 shipped 的 toast 表面
+ * （--dsw-alias-toast-bg + --dsw-alias-toast-label）
+ * ------------------------------------------------------------------------ */
+.protoToast {
+  background: var(--proto-label-primary); border-radius: var(--proto-radius-md);
+  bottom: 24px; box-shadow: var(--proto-elevation-prominent); color: var(--proto-bg-base);
+  font-size: 13px; left: 50%; padding: 9px 14px; position: fixed;
+  transform: translateX(-50%); z-index: 40;
+}
+.protoToast[hidden] { display: none; }
+
+
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="frameWrap">
+    <div class="frameLabel"><b>成员编辑页 · 桌面 1408</b> —— 左名册，右编辑</div>
+    <div class="frame" data-frame="true" data-device="mobile">
+      <nav class="sidebar" aria-label="团队导航">
+  <div class="sidebarHead">
+    <span class="avatar avatarRing" data-size="md" style="--hue:212">数</span>
+    <span class="workspace">数字员工</span>
+  </div>
+
+  <div class="groupTitle">频道</div>
+  <a class="navRow" href="#"><span class="navIcon">#</span><span class="navText">数字员工</span></a>
+  <a class="navRow" href="#" aria-current="page"><span class="navIcon">#</span><span class="navText">dsh-agent-team</span><span class="badge" data-tone="quiet" aria-label="3 条未读">3</span></a>
+  <a class="navRow" href="#"><span class="navIcon">#</span><span class="navText">Jarvis 后端</span></a>
+
+  <div class="groupTitle">我的收件箱</div>
+  <a class="navRow" href="#"><span class="navIcon">@</span><span class="navText">未读讨论</span><span class="badge" data-tone="quiet">5</span></a>
+
+  <div class="groupTitle">成员</div>
+  <div class="memberRow" data-state="working">
+    <span class="avatarWrap"><span class="avatar avatarRing" data-size="md" style="--hue:302">架</span><span class="presence"></span></span>
+    <span class="who"><span class="name">软件架构师</span><br><span class="state">正在跑 · dsh-agent-team</span></span>
+  </div>
+  <div class="memberRow">
+    <span class="avatarWrap"><span class="avatar avatarRing" data-size="md" style="--hue:174">插</span><span class="presence"></span></span>
+    <span class="who"><span class="name">插件开发</span><br><span class="state">空闲 · 3 个桶</span></span>
+  </div>
+  <div class="memberRow">
+    <span class="avatarWrap"><span class="avatar avatarRing" data-size="md" style="--hue:44">代</span><span class="presence"></span></span>
+    <span class="who"><span class="name">代码审核</span><br><span class="state">空闲 · 2 个桶</span></span>
+  </div>
+  <div class="memberRow" data-state="suspended">
+    <span class="avatarWrap" data-presence="idle"><span class="avatar avatarRing" data-size="md" style="--hue:212">U</span><span class="presence"></span></span>
+    <span class="who"><span class="name">UI设计师</span><br><span class="state">已挂起</span></span>
+  </div>
+</nav>
+      <div class="main">
+        
+<header class="pageHead">
+  <div style="min-width:0">
+    <div class="back">团队设置 · 成员</div>
+    <h2>编辑成员 · @软件架构师</h2>
+    <p class="sub">成员身份与展示信息；⛔ 改这里不改它的记忆与技能</p>
+  </div>
+  <div class="actions"><button class="pillBtn" type="button">取消</button><button class="pillBtn" data-variant="primary" type="button">保存</button></div>
+</header>
+
+
+        <div style="display:flex;flex:1;min-height:0">
+          <div style="width:260px;flex:none;box-shadow:1px 0 0 var(--proto-border-l1);overflow-y:auto;padding:10px 8px">
+            
+<div class="navRow" aria-current="page" style="align-items:flex-start;padding:8px">
+  <span class="avatar avatarRing" data-size="lg" style="--hue:302">架</span>
+  <span class="who" style="flex:1;min-width:0">
+    <span class="name" style="font-weight:600">@软件架构师</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">需求分解、接口与验收判据</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">活跃 · 3 个会话桶</span>
+  </span>
+</div>
+            
+<div class="navRow" style="align-items:flex-start;padding:8px">
+  <span class="avatar avatarRing" data-size="lg" style="--hue:174">插</span>
+  <span class="who" style="flex:1;min-width:0">
+    <span class="name" style="font-weight:600">@插件开发</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">实现与门禁</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">活跃 · 3 个会话桶</span>
+  </span>
+</div>
+            
+<div class="navRow" style="align-items:flex-start;padding:8px">
+  <span class="avatar avatarRing" data-size="lg" style="--hue:44;background:var(--proto-hover-solid);color:var(--proto-label-tertiary)">代</span>
+  <span class="who" style="flex:1;min-width:0">
+    <span class="name" style="font-weight:600">@代码审核</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">交付轴与折推</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">活跃 · 2 个会话桶</span>
+  </span>
+</div>
+            
+<div class="navRow" style="align-items:flex-start;padding:8px">
+  <span class="avatar avatarRing" data-size="lg" style="--hue:212;background:var(--proto-hover-solid);color:var(--proto-label-tertiary)">U</span>
+  <span class="who" style="flex:1;min-width:0">
+    <span class="name" style="font-weight:600">@UI设计师</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">界面正稿与样式评审</span><br>
+    <span class="state" style="color:var(--proto-label-tertiary);font-size:11px">已挂起</span>
+  </span>
+</div>
+          </div>
+          <div class="editor" style="flex:1;min-width:0">
+            <div class="field">
+              <span class="label">头像</span>
+              <div class="avatarEditor">
+                <span class="avatar avatarRing" data-size="xl" style="--hue:302">架</span>
+                <div style="display:grid;gap:8px;flex:1;min-width:0">
+                  <div style="display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="pillBtn" data-variant="primary" type="button">上传图片…</button>
+                    <button class="pillBtn" type="button">移除头像</button>
+                  </div>
+                  <span class="hint" style="color:var(--proto-label-tertiary);font-size:12px">只收 <code>image/*</code>，与人类头像同一上限。每张留一个新的不可变引用，写新不覆盖旧 —— 所以"移除"是清空引用，不是删别人的图。</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="hairline"></div>
+
+            <div class="field">
+              <span class="label">名称</span>
+              <input class="input" value="@软件架构师" aria-label="成员名称">
+            </div>
+
+            <div class="field">
+              <span class="label">说明<span style="color:var(--proto-label-tertiary);font-weight:400">（短说明：进名册与列表）</span></span>
+              <input class="input" value="需求分解、接口与验收判据" aria-label="成员说明">
+              <span class="hint">这条进账本，所以必须可回放。长人设⛔ 不放这里 —— 放下面那个文件。</span>
+            </div>
+
+            <div class="field">
+              <span class="label">模型</span>
+              <div style="display:flex;gap:8px">
+                <select class="input" style="flex:1" aria-label="模型"><option>deepseek-v4</option><option>deepseek-v4-pro</option></select>
+                <select class="input" style="width:200px" aria-label="推理强度"><option>reasoningEffort: high</option><option>medium</option></select>
+              </div>
+            </div>
+
+            <div class="hairline"></div>
+
+            <div class="field">
+              <span class="label">成员说明文件 <code>agent.md</code></span>
+              <div class="fileRow">
+                <span class="avatar" data-size="sm" style="--hue:212;background:var(--proto-hover-solid);color:var(--proto-label-secondary)">MD</span>
+                <span>agent.md</span>
+                <span class="meta">1.2 KiB · 最后修改 2026-10-14 08:40</span>
+              </div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <button class="pillBtn" type="button">打开文件</button>
+                <button class="pillBtn" type="button" data-variant="quiet">在访达中显示</button>
+              </div>
+              <span class="hint">这是这位成员的<b>长说明／人设</b>，放在它的私有命名空间（与 <code>memory.md</code> 同级，只有它与 Host 能读）。⛔ 内容不进账本；⛔ 与上面的短说明不自动同步。入口按已拍默认＝<b>「打开文件」按钮 ＋ 页内只读简介</b>，⛔ 不在页内嵌一个编辑器（那会变成两套真源）。</span>
+            </div>
+
+            <div class="noteCard">
+              <b>生效时机</b>
+              <span>改动在<b>下次激活</b>时生效（当轮不换装）。保存后页面上给这一句提示 —— 否则你会以为没生效。</span>
+            </div>
+
+            <div class="field">
+              <span class="label">头像的三处呈现（同一张图，三种尺寸）</span>
+              <div style="display:grid;gap:10px;background:var(--proto-hover);border-radius:var(--proto-radius-md);padding:12px">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="width:120px;color:var(--proto-label-tertiary);font-size:12px">成员行 · 24</span>
+                  <span class="avatarWrap"><span class="avatar avatarRing" data-size="md" style="--hue:302">架</span><span class="presence"></span></span>
+                  <span style="font-size:13px">@软件架构师</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="width:120px;color:var(--proto-label-tertiary);font-size:12px">消息气泡 · 24</span>
+                  <span class="avatar avatarRing" data-size="md" style="--hue:302">架</span>
+                  <span class="bubble" style="padding:6px 10px">这条消息的作者座位</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="width:120px;color:var(--proto-label-tertiary);font-size:12px">提及芯片 · 18</span>
+                  <span class="mention" style="display:inline-flex;align-items:center;gap:4px"><span class="avatar avatarRing" data-size="sm" style="--hue:302">架</span>@软件架构师</span>
+                </div>
+                <div class="annotation" style="margin:2px 0 0">三处都用同一条色相规则（<code>hsl(memberHue 42% 46%)</code>）与"首字母回退"：图还没解码或读不到字节时，座位不塌、也不留白洞。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="frameWrap">
+    <div class="frameLabel"><b>头像的边界态</b> —— 未设置 / 上传中 / 解码失败 / 成员视角</div>
+    <div class="frame" data-frame="true" data-device="mobile" style="--frame-h:1120px">
+      <div class="main">
+        
+<header class="pageHead">
+  <div style="min-width:0">
+    <div class="back">D · 边界态</div>
+    <h2>头像的四种读数</h2>
+    <p class="sub">每一种都要有明确落点，不留白洞</p>
+  </div>
+  <div class="actions"></div>
+</header>
+
+
+        <div class="editor" style="grid-template-columns:1fr 1fr;align-items:start">
+          <div class="field">
+            <span class="label">① 未设置</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="avatar avatarRing" data-size="xl" style="--hue:44;background:var(--proto-hover-solid);color:var(--proto-label-tertiary)">代</span>
+              <span class="hint" style="color:var(--proto-label-tertiary);font-size:12px">回退＝首字母 ＋ 该成员的确定色相。上传区就是这一颗圆本身（点它即选文件）。</span>
+            </div>
+          </div>
+          <div class="field">
+            <span class="label">② 上传中</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="avatar avatarRing" data-size="xl" style="--hue:302;opacity:.5">架</span>
+              <span class="hint" style="color:var(--proto-label-tertiary);font-size:12px">旧图继续显示（不闪白），进度压在圆环上；⛔ 不用整页 loading。</span>
+            </div>
+          </div>
+          <div class="field">
+            <span class="label">③ 解码失败（HEIC／坏字节）</span>
+            <div style="display:flex;align-items:center;gap:10px">
+              <span class="avatar avatarRing" data-size="xl" style="--hue:302">架</span>
+              <span class="hint" style="color:var(--proto-label-tertiary);font-size:12px">Host 只校验声明类型，坏字节照样存得下 —— 所以座位必须能"画不出来就回退首字母"，并给一句"这张图没能显示"。</span>
+            </div>
+          </div>
+          <div class="field">
+            <span class="label">④ 成员视角（只读）</span>
+            <div class="noteCard">
+              <b>成员看不到"编辑"入口</b>
+              <span>只有人类侧能改头像与 <code>agent.md</code>（已拍默认）。成员能读自己的 <code>agent.md</code>，但界面上没有上传/移除按钮。</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="protoToast" id="toast" role="status" aria-live="polite" hidden></div>
+<script>
+
+  const params = new URLSearchParams(location.search)
+  const forcedTheme = params.get('theme')
+  if (forcedTheme === 'dark' || forcedTheme === 'light') {
+    document.documentElement.dataset.theme = forcedTheme
+  }
+  const forcedDevice = params.get('device')
+  if (forcedDevice === 'mobile') document.documentElement.dataset.forcedDevice = 'mobile'
+
+  const $ = (sel, root = document) => root.querySelector(sel)
+  const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel))
+
+  // 控制条：主题 / 宽度
+  const themeSeg = $('#themeSeg')
+  const deviceSeg = $('#deviceSeg')
+  if (themeSeg) {
+    const applyTheme = (value) => {
+      if (value === 'auto') delete document.documentElement.dataset.theme
+      else document.documentElement.dataset.theme = value
+      $$('button', themeSeg).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.value === value)))
+    }
+    themeSeg.addEventListener('click', (e) => {
+      const btn = e.target.closest('button'); if (!btn) return
+      applyTheme(btn.dataset.value)
+    })
+    applyTheme(forcedTheme ?? 'auto')
+  }
+  if (deviceSeg) {
+    const applyDevice = (value) => {
+      $$('[data-frame]').forEach((frame) => {
+        frame.dataset.device = value === 'mobile' ? 'mobile' : 'desktop'
+      })
+      $$('button', deviceSeg).forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.value === value)))
+    }
+    deviceSeg.addEventListener('click', (e) => {
+      const btn = e.target.closest('button'); if (!btn) return
+      applyDevice(btn.dataset.value)
+    })
+    applyDevice(forcedDevice === 'mobile' ? 'mobile' : 'desktop')
+  }
+
+  // 视图切换（讨论 / 产物 / 任务）：按帧作用域 —— 同一页要画多帧，
+  // ⛔ 不能用 id（id 全页唯一），所以查询都收在本帧内。
+  $$('[data-view-tabs]').forEach((viewTabs) => {
+    const frame = viewTabs.closest('.frame')
+    const panels = $$('[data-view-panel]', frame)
+    const show = (view) => {
+      panels.forEach((p) => { p.hidden = p.dataset.viewPanel !== view })
+      $$('button', viewTabs).forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)))
+      if (view !== 'artifacts') closePaneIn(frame)
+    }
+    viewTabs.addEventListener('click', (e) => {
+      const btn = e.target.closest('button'); if (!btn) return
+      show(btn.dataset.view)
+    })
+    viewTabs.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
+      const tabs = $$('button', viewTabs)
+      const i = tabs.indexOf(document.activeElement); if (i < 0) return
+      const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]
+      next.focus(); show(next.dataset.view)
+    })
+  })
+
+  // 右侧预览面板：点产物条目才展开（已拍：默认不常驻），Esc 关闭，焦点回触发者。
+  // 面板本身是布局级的（落地走 layout.openRightbar／closeRightbar），
+  // 这里画的只是它里面的那个 tab。
+  const paneRoots = $$('[data-pane-root]')
+  const frameOf = (el) => el.closest('.frame') ?? document
+  const paneIn = (frame) => (frame.querySelector ? frame.querySelector('[data-pane-root]') : null)
+  let paneTrigger = null
+  const setPaneOpen = (open, trigger) => {
+    if (!paneTrigger) { if (!trigger) return }
+    const root = paneTrigger ? paneIn(frameOf(paneTrigger)) : null
+    if (!root) return
+    root.hidden = !open
+    const main = frameOf(root).querySelector('.main')
+    if (main) main.dataset.pane = open ? 'open' : 'closed'
+    $$('[data-artifact]', frameOf(root)).forEach((card) => card.setAttribute('aria-current', String(open && card === paneTrigger)))
+  }
+  const closePaneIn = (frame) => {
+    const root = paneIn(frame); if (!root || root.hidden) return
+    const previous = paneTrigger
+    root.hidden = true
+    const main = frame.querySelector('.main'); if (main) main.dataset.pane = 'closed'
+    $$('[data-artifact]', frame).forEach((card) => card.setAttribute('aria-current', 'false'))
+    paneTrigger = null
+    if (previous) previous.focus()
+  }
+  window.closePaneIn = closePaneIn
+  window.openPaneFor = (card) => {
+    const frame = frameOf(card)
+    const root = paneIn(frame); if (!root) return
+    paneTrigger = card
+    const body = root.querySelector('[data-pane-body]')
+    const source = card.dataset.docId ? document.getElementById(card.dataset.docId) : null
+    if (body && source) body.innerHTML = source.innerHTML
+    const title = root.querySelector('[data-pane-title]'); if (title) title.textContent = card.dataset.title
+    const path = root.querySelector('[data-pane-path]'); if (path) path.textContent = card.dataset.path
+    root.hidden = false
+    const main = frame.querySelector('.main'); if (main) main.dataset.pane = 'open'
+    $$('[data-artifact]', frame).forEach((c) => c.setAttribute('aria-current', String(c === card)))
+  }
+
+  document.addEventListener('click', (e) => {
+    const card = e.target.closest('[data-artifact]')
+    if (card) { e.preventDefault(); window.openPaneFor(card); return }
+    const closer = e.target.closest('[data-pane-close]')
+    if (closer) { closePaneIn(frameOf(closer)); return }
+    const opener = e.target.closest('[data-pane-open-now]')
+    if (opener) {
+      const first = opener.closest('.frame').querySelector('[data-artifact]')
+      if (first) window.openPaneFor(first)
+    }
+  })
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return
+    const open = paneRoots.filter((r) => !r.hidden && (paneTrigger ? frameOf(paneTrigger) === frameOf(r) : true))
+    if (open.length) closePaneIn(frameOf(open[0]))
+  })
+  // 每帧面板的初始态由 data-pane-open 给：展开态单独占一帧（⛔ 不用查询串切态）
+  paneRoots.forEach((root) => { root.hidden = root.dataset.paneOpen !== 'true' })
+
+  // 待办 / 认领这类"目标状态"动作：重复点击不产生第二条事实（幂等），
+  // 原型上只把结果画出来 —— 点完变成已认领，按钮改成"已认领"，并且
+  // 明确提示"这次没有新建/没有变更"。
+  const toast = $('#toast')
+  let toastTimer = 0
+  const say = (text) => {
+    if (!toast) return
+    toast.textContent = text
+    toast.hidden = false
+    clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => { toast.hidden = true }, 2600)
+  }
+  window.say = say
+  document.addEventListener('click', (e) => {
+    const claim = e.target.closest('[data-claim-todo]')
+    if (claim) {
+      const card = claim.closest('.todoCard')
+      const already = card.dataset.state === 'claimed' || card.dataset.state === 'answered'
+      if (!already) {
+        card.dataset.state = 'claimed'
+        const tag = $('.stateTag', card)
+        tag.dataset.state = 'claimed'
+        tag.innerHTML = '<span class="dot"></span>已认领'
+        $('.claimedBy', card).hidden = false
+      }
+      claim.setAttribute('aria-pressed', 'true')
+      say(already ? '这条待办已经是「已认领」，本次没有产生新记录' : '已认领 · 认领人与时刻已记入账本')
+      return
+    }
+    const close = e.target.closest('[data-close-todo]')
+    if (close) {
+      const card = close.closest('.todoCard')
+      const settled = card.dataset.state === 'closed'
+      if (!settled) {
+        card.dataset.state = 'closed'
+        const tag = $('.stateTag', card)
+        tag.dataset.state = 'closed'
+        tag.innerHTML = '<span class="dot"></span>已结案'
+      }
+      say(settled ? '这条待办已经结案，本次没有变更' : '已结案 · 结案人与时刻已记入账本；条目仍留在清单里')
+      return
+    }
+    const restate = e.target.closest('[data-restate]')
+    if (restate) {
+      say('这条待办已存在（同一件事），本次没有新建')
+      return
+    }
+    const tab = e.target.closest('[data-pane-tab]')
+    if (tab) {
+      $$('[data-pane-tab]').forEach((b) => b.setAttribute('aria-selected', String(b === tab)))
+      $$('[data-pane-view]').forEach((v) => { v.hidden = v.dataset.paneView !== tab.dataset.paneTab })
+    }
+  })
+
+  // 截图/深链用：?demo=claimed 直接把第一条待办画成已认领态
+  if (params.get('demo') === 'claimed') {
+    const first = $('[data-claim-todo]')
+    if (first) first.click()
+  }
+
+</script>
+</body>
+</html>
