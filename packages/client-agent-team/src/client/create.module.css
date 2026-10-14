@@ -197,3 +197,26 @@
     max-height: 180px;
   }
 }
+
+/* The Member editor's portrait row: the 64px seat beside the buttons that
+   replace it. The buttons wrap under the seat on a narrow dialog rather than
+   squeezing it, because the seat is the thing being judged. */
+.avatarRow {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* The Member's agent.md path, shown so a reader whose Host will not open it
+   still has the way there. It wraps rather than scrolls: a path is one long
+   unbroken token, and hiding its end hides the file name. */
+.pathText {
+  background: var(--dsw-alias-bg-l1);
+  border-radius: 4px;
+  display: block;
+  font-family: var(--dsw-font-family-mono, monospace);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  padding: 4px 6px;
+}

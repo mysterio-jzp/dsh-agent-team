@@ -15,22 +15,20 @@ import type { RemoteResult } from '@deepseek-ai/dsh-api-remotes/client'
  * path to copy.
  */
 
-/** The slice of the Session Remote the gesture calls. */
+/** The slice of the Session Remote the gesture calls: the namespace itself. */
 export interface MemberPersonaPathRemote {
-  readonly session: {
-    openWorkspacePath(request: { readonly path: string }, signal?: AbortSignal): Promise<RemoteResult<unknown>>
-  }
+  openWorkspacePath(request: { readonly path: string }, signal?: AbortSignal): Promise<RemoteResult<unknown>>
 }
 
 /**
  * Ask the Host to open one absolute path.
- * @param remote - the Session Remote namespace running the gesture.
+ * @param remote - the Session Remote namespace running the gesture (not a wrapper).
  * @param path - absolute Host path, exactly as the Client projection reported it.
  * @returns `null` once the Host acknowledged, or a message to announce.
  */
 export async function openMemberPersonaPath(remote: MemberPersonaPathRemote, path: string): Promise<string | null> {
   try {
-    const result = await remote.session.openWorkspacePath({ path })
+    const result = await remote.openWorkspacePath({ path })
     return result.ok ? null : result.error.message
   } catch (error) {
     // A Host that could not be reached failed the gesture exactly like one that

@@ -1,13 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AgentTeamClientMemberStatus, AgentTeamModelSelection, AgentTeamUpdateMemberRequest } from '@contexera/dsh-agent-team/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TeamModelCatalog, TeamModelEffortOption, TeamModelProviderGroup, TeamSidebarProps } from './slots.ts'
-import { Button, IconChevronDownOutlineRegular, Input, Menu, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronDownOutlineRegular, Input, Menu, Modal, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import { mintRequestId } from './requests.ts'
+import { useMemberAvatarUrl } from './member-avatars.ts'
+import { useAvatarImage } from './avatar-image.ts'
+import { MemberAvatarSeat } from './MemberAvatarSeat.tsx'
+import { bytesToBase64 } from './attachment-preview.ts'
 import { useEditDialogSave } from './team-dialog-save.ts'
 import createCss from './create.module.css'
 import css from './sidebar.module.css'
+
+/**
+ * Largest avatar the editor will hand the Host. The Human's own settings page
+ * uses the same ceiling, so one picture is accepted in both places.
+ */
+const AVATAR_MAX_BYTES = 10 * 1024 * 1024
 
 /** Model option key inside one editor; opaque and resolved against the loaded groups. */
 function modelKey(provider: string, model: string): string {
@@ -229,10 +239,14 @@ export function ModelPickerField({ model, onModelChange, loadModels, disabled, t
  * through one durable update. Channel membership is managed from the Channel
  * side, not here.
  */
-export function AgentEditorDialog({ status, updateMember, loadModels, onCommitted, onClose, t }: {
+export function AgentEditorDialog({ status, updateMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, onCommitted, onClose, t }: {
   readonly status: AgentTeamClientMemberStatus
   readonly updateMember: TeamSidebarProps['updateMember']
   readonly loadModels: TeamSidebarProps['loadModels']
+  readonly putMemberAvatar: TeamSidebarProps['putMemberAvatar']
+  readonly removeMemberAvatar: TeamSidebarProps['removeMemberAvatar']
+  readonly memberAvatars: TeamSidebarProps['memberAvatars']
+  readonly openMemberPersonaPath: TeamSidebarProps['openMemberPersonaPath']
   readonly onCommitted: () => Promise<void> | void
   readonly onClose: () => void
   readonly t: TeamSidebarProps['t']
@@ -241,6 +255,32 @@ export function AgentEditorDialog({ status, updateMember, loadModels, onCommitte
   const [handle, setHandle] = useState(status.member.handle)
   const [description, setDescription] = useState(status.member.description)
   const [model, setModel] = useState<AgentTeamModelSelection | undefined>(status.member.model)
+  const [avatarRef, setAvatarRef] = useState(status.member.avatarRef)
+  const [avatarBusy, setAvatarBusy] = useState(false)
+  const [avatarNotice, setAvatarNotice] = useState<string>()
+  const avatarPicker = useRef<HTMLInputElement | null>(null)
+  const avatarUrl = useMemberAvatarUrl(memberAvatars, avatarRef)
+  // The portrait answers to decoded bytes, not to a stored reference: a file
+  // this browser cannot read has to fall back to the initial exactly as a
+  // removed one does, or the dialog would show a blank circle and call it saved.
+  const avatar = useAvatarImage(avatarUrl)
+  const [personaNotice, setPersonaNotice] = useState<string>()
+  const [personaCopied, setPersonaCopied] = useState(false)
+  const agentMdPath = status.member.agentMdPath
+  /**
+   * Ask the Host to open this Member's `agent.md`.
+   *
+   * The path goes over exactly as the projection reported it, and a refusal
+   * lands as a readable failure beside the path rather than as a silent
+   * no-op — the reader still gets what they came for, which is the way to the
+   * file. Nothing here is an error the dialog should swallow.
+   */
+  const openPersona = async (): Promise<void> => {
+    if (agentMdPath === undefined) return
+    setPersonaNotice(undefined)
+    const failure = await openMemberPersonaPath(agentMdPath)
+    if (failure !== null) setPersonaNotice(t('memberPersonaOpenFailed', { message: failure }))
+  }
   const { saving, error, pendingRequest, save } = useEditDialogSave({
     save: updateMember,
     onCommitted,
@@ -273,6 +313,68 @@ export function AgentEditorDialog({ status, updateMember, loadModels, onCommitte
     await save(request)
   }
 
+  /**
+   * Store one picture and record its reference on this Member.
+   *
+   * Bytes first, then the reference, the same order the Human's own settings
+   * page uses: a failure between the two leaves an avatar nobody points at,
+   * which is invisible, rather than a reference to bytes nobody can load, which
+   * is a broken picture. The save that follows is the editor's own, so an
+   * unsaved name change is not smuggled along by an avatar upload.
+   */
+  const pickAvatar = async (file: File | undefined): Promise<void> => {
+    if (file === undefined) return
+    setAvatarNotice(undefined)
+    if (!file.type.startsWith('image/')) {
+      setAvatarNotice(t('memberAvatarNotImage'))
+      return
+    }
+    if (file.size > AVATAR_MAX_BYTES) {
+      setAvatarNotice(t('memberAvatarTooLarge'))
+      return
+    }
+    setAvatarBusy(true)
+    try {
+      const put = await putMemberAvatar({
+        name: file.name,
+        ...(file.type === '' ? {} : { mediaType: file.type }),
+        bytesBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+      })
+      if (!put.ok) {
+        setAvatarNotice(t('memberAvatarFailed', { message: put.error.message }))
+        return
+      }
+      const saved = await updateMember({ requestId: mintRequestId(), memberId, handle: status.member.handle, description: status.member.description, avatarRef: put.value.avatarRef })
+      if (!saved.ok) {
+        setAvatarNotice(t('memberAvatarFailed', { message: saved.error.message }))
+        return
+      }
+      setAvatarRef(put.value.avatarRef)
+      await onCommitted()
+    } finally {
+      setAvatarBusy(false)
+    }
+  }
+
+  const removeAvatar = async (): Promise<void> => {
+    setAvatarNotice(undefined)
+    const current = avatarRef
+    if (current === undefined) return
+    setAvatarBusy(true)
+    try {
+      await removeMemberAvatar({ avatarRef: current })
+      const cleared = await updateMember({ requestId: mintRequestId(), memberId, handle: status.member.handle, description: status.member.description, avatarRef: null })
+      if (!cleared.ok) {
+        setAvatarNotice(t('memberAvatarFailed', { message: cleared.error.message }))
+        return
+      }
+      setAvatarRef(undefined)
+      await onCommitted()
+    } finally {
+      setAvatarBusy(false)
+    }
+  }
+
   return (
     <Modal
       open
@@ -284,6 +386,50 @@ export function AgentEditorDialog({ status, updateMember, loadModels, onCommitte
       footer={<><Button variant="outline" disabled={saving} onClick={onClose}>{t('cancel')}</Button><Button type="submit" form="team-agent-edit-form" variant="primary" disabled={saving || !dirty || handle.trim().length === 0}>{saving ? t('editSaving') : t('editSave')}</Button></>}
     >
       <form id="team-agent-edit-form" className={createCss.form} onSubmit={event => { void submit(event) }}>
+        <div className={createCss.field}>
+          <span>{t('agentAvatar')}</span>
+          <div className={createCss.avatarRow}>
+            <MemberAvatarSeat memberId={memberId} handle={handle} avatarUrl={avatar.src} size={64} label={t('agentAvatar')} />
+            <input
+              ref={avatarPicker}
+              type="file"
+              accept="image/*"
+              tabIndex={-1}
+              aria-hidden="true"
+              hidden
+              onChange={event => { void pickAvatar(event.target.files?.[0]); event.target.value = '' }}
+            />
+            <Button variant="outline" disabled={avatarBusy || saving} onClick={() => { avatarPicker.current?.click() }}>
+              {avatarBusy ? t('memberAvatarUploading') : avatarRef === undefined ? t('memberAvatarUpload') : t('memberAvatarReplace')}
+            </Button>
+            {avatarRef !== undefined && <Button disabled={avatarBusy || saving} onClick={() => { void removeAvatar() }}>{t('memberAvatarRemove')}</Button>}
+          </div>
+          {/* D6: the face a Human just replaced does not turn up on that
+              Member's already-running session — the session read the record
+              when it started, and the change is picked up on the next
+              activation. Saying so here is what stops "I uploaded it and it
+              did not change" from reading as a failure. */}
+          <small className={createCss.editHint}>{t('memberAvatarNextActivation')}</small>
+          {avatarNotice !== undefined && <small className={createCss.error} role="alert">{avatarNotice}</small>}
+        </div>
+        {agentMdPath !== undefined && <div className={createCss.field}>
+          <span>{t('memberPersona')}</span>
+          <div className={createCss.avatarRow}>
+            <Button variant="outline" onClick={() => { void openPersona() }}>{t('memberPersonaOpen')}</Button>
+            <Button
+              disabled={personaCopied}
+              onClick={() => { void writeClipboard(agentMdPath).then(accepted => { if (accepted) setPersonaCopied(true) }) }}
+            >
+              {personaCopied ? t('memberPersonaCopied') : t('memberPersonaCopyPath')}
+            </Button>
+          </div>
+          {/* The path is shown, not just offered: a Host that cannot open it
+              still leaves the reader able to find the file themselves, and the
+              hint says that is what this is for. */}
+          <small className={createCss.editHint}>{t('memberPersonaPathHint')}</small>
+          <code className={createCss.pathText}>{agentMdPath}</code>
+          {personaNotice !== undefined && <small className={createCss.error} role="alert">{personaNotice}</small>}
+        </div>}
         <label className={createCss.field}>
           <span>{t('agentName')}</span>
           <Input className={createCss.input!} value={handle} onChange={event => { setHandle(event.target.value); pendingRequest.current = undefined }} disabled={saving} autoFocus />

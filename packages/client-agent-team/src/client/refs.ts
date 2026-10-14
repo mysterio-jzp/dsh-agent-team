@@ -50,6 +50,16 @@ export interface ResolvedMemberRef {
   readonly sessionId?: SessionId
   /** Only active agent Members open a session — mirrors the agent card rule. */
   readonly openable: boolean
+  /**
+   * The avatar reference this Member's own record carries, absent for the Human
+   * and for a Member that never had a picture.
+   *
+   * The chip reads it so the mention chip can draw the same face the roster and
+   * the timeline draw. It is filled only on the Member branch below: the Human's
+   * chip must reach the profile's bytes through the identity projection instead,
+   * and a ref that answered for the Human would put a Member's face on them.
+   */
+  readonly avatarRef?: string | undefined
 }
 
 /** Compare refs by branded prefix plus hyphen-stripped UUID, so abbreviated spellings line up with their full form. */
@@ -317,5 +327,6 @@ export const rosterMember = (
     handle: hit.member.handle.replace(/^@/, ''),
     ...(openable ? { sessionId: hit.member.sessionId } : {}),
     openable,
+    ...(hit.member.avatarRef === undefined ? {} : { avatarRef: hit.member.avatarRef }),
   }
 }

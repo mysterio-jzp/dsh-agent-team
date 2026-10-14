@@ -118,6 +118,33 @@ describe('Human identity in the Team surfaces', () => {
     expect(b.getMemberAvatar).toHaveBeenCalledWith({ avatarRef: 'member-avatar:1' })
   })
 
+  it('draws a Member through the shared seat and leaves the Human seat alone', async () => {
+    const { b } = await openSeededChannel({
+      humanProfile: { name: 'Ada', avatarRef: 'avatar:1' },
+      memberAvatarRefs: { 'member:builder': 'member-avatar:1' },
+      seededMessages: [
+        { body: 'human note', occurredAt: '2026-08-21T10:00:00.000Z', sender: 'human' },
+        { body: 'agent note', occurredAt: '2026-08-21T10:05:00.000Z', sender: 'agent' },
+      ],
+    })
+    // D1 asks one Member to read the same in the timeline, the roster and the
+    // mention chip. That holds only while there is one rule and one place it
+    // lives, so the Member's row must be the shared seat — which reports its
+    // diameter — and the Human's must stay the older seat it has always been.
+    const seats = await waitFor(() => {
+      const rows = [...b.view.container.querySelectorAll('article')].filter(row => row.querySelector('[data-avatar]') !== null)
+      if (rows.length < 2) throw new Error('identity seats not mounted')
+      return rows.map(row => ({
+        human: row.hasAttribute('data-human'),
+        size: row.querySelector('[data-avatar]')?.getAttribute('data-avatar-size'),
+      }))
+    })
+    expect(seats).toEqual([
+      { human: true, size: null },
+      { human: false, size: '24' },
+    ])
+  })
+
   it('chips an agent message that wrote the historic human handle as the renamed Human', async () => {
     const { page } = await openSeededChannel({
       humanProfile: { name: 'Ada' },

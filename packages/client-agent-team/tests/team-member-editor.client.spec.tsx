@@ -2,9 +2,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import { ModelPickerField } from '../src/client/TeamMemberEditor.tsx'
+import { AgentEditorDialog, ModelPickerField } from '../src/client/TeamMemberEditor.tsx'
 import { zh } from '../src/client/locales.ts'
 import type { TeamModelCatalog } from '../src/client/slots.ts'
+import type { AgentTeamClientMemberStatus } from '@contexera/dsh-agent-team/types'
 
 afterEach(cleanup)
 
@@ -94,5 +95,106 @@ describe('ModelPickerField catalog load', () => {
     const alert = await screen.findByRole('alert')
     expect(alert.textContent).toContain('catalog unavailable')
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy()
+  })
+})
+
+/**
+ * The boundary page's own dialog: the portrait a Human replaces, and the
+ * persona file they go and read. Both are drawn from the same Member record the
+ * roster reads, so both are asserted against it rather than against the dialog's
+ * own idea of who this Member is.
+ */
+describe('AgentEditorDialog boundary page', () => {
+  const member = {
+    memberId: 'member:builder', handle: '@builder', description: 'builds', presetId: 'p',
+    state: 'enabled', sessionId: 'session:1', avatarRef: 'member-avatar:1',
+    agentMdPath: '/host/members/member-builder/agent.md',
+  } as unknown as AgentTeamClientMemberStatus['member']
+
+  function open(options: {
+    readonly put?: () => Promise<RemoteResult<unknown>>
+    readonly remove?: () => Promise<RemoteResult<unknown>>
+    readonly update?: () => Promise<RemoteResult<unknown>>
+    readonly openPersona?: (path: string) => Promise<string | null>
+    readonly member?: AgentTeamClientMemberStatus['member']
+  } = {}) {
+    const updateMember = vi.fn(options.update ?? (async () => ({ ok: true, value: { member } }) as RemoteResult<unknown>))
+    const openMemberPersonaPath = vi.fn(options.openPersona ?? (async () => null))
+    render(
+      <AgentEditorDialog
+        status={{ member: options.member ?? member, availability: 'active' } as AgentTeamClientMemberStatus}
+        updateMember={updateMember as never}
+        loadModels={async () => catalogOk()}
+        putMemberAvatar={vi.fn(options.put ?? (async () => ({ ok: true, value: { avatarRef: 'member-avatar:2' } }) as RemoteResult<unknown>)) as never}
+        removeMemberAvatar={vi.fn(options.remove ?? (async () => ({ ok: true, value: { removed: true } }) as RemoteResult<unknown>)) as never}
+        memberAvatars={undefined as never}
+        openMemberPersonaPath={openMemberPersonaPath as never}
+        onCommitted={() => {}}
+        onClose={() => {}}
+        t={t}
+      />,
+    )
+    return { updateMember, openMemberPersonaPath }
+  }
+
+  it('opens the persona path verbatim and says nothing when the Host accepts', async () => {
+    const { openMemberPersonaPath } = open()
+    fireEvent.click(screen.getByRole('button', { name: '打开文件' }))
+    await waitFor(() => { expect(openMemberPersonaPath).toHaveBeenCalledWith('/host/members/member-builder/agent.md') })
+    // Accepting is the quiet path: no alert, and the path stays on screen.
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText('/host/members/member-builder/agent.md')).toBeTruthy()
+  })
+
+  it('turns a Host that will not open the file into a readable failure beside the path', async () => {
+    const { openMemberPersonaPath } = open({ openPersona: async () => 'no application is registered for .md' })
+    fireEvent.click(screen.getByRole('button', { name: '打开文件' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('no application is registered for .md')
+    // The reader still gets what they came for: the way to the file itself.
+    expect(openMemberPersonaPath).toHaveBeenCalledWith('/host/members/member-builder/agent.md')
+    expect(screen.getByText('/host/members/member-builder/agent.md')).toBeTruthy()
+  })
+
+  it('stores the picture first, then records its reference on the Member', async () => {
+    const order: string[] = []
+    const { updateMember } = open({
+      put: async () => { order.push('put'); return { ok: true, value: { avatarRef: 'member-avatar:2' } } as RemoteResult<unknown> },
+      update: async () => { order.push('update'); return { ok: true, value: { member } } as RemoteResult<unknown> },
+    })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(input, { target: { files: [new File(['x'], 'face.png', { type: 'image/png' })] } })
+    await waitFor(() => { expect(order).toEqual(['put', 'update']) })
+    // The reference rides the editor's own update, so the record keeps pointing
+    // at bytes that are actually stored.
+    await waitFor(() => { expect(updateMember).toHaveBeenCalledWith(expect.objectContaining({ memberId: 'member:builder', avatarRef: 'member-avatar:2' })) })
+  })
+
+  it('refuses a non-image before it reaches the Host, and says why', async () => {
+    const put = vi.fn(async () => ({ ok: true, value: { avatarRef: 'member-avatar:2' } }) as RemoteResult<unknown>)
+    const { updateMember } = open({ put })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(input, { target: { files: [new File(['x'], 'notes.txt', { type: 'text/plain' })] } })
+    expect((await screen.findByRole('alert')).textContent).toContain('只收图片文件')
+    expect(put).not.toHaveBeenCalled()
+    expect(updateMember).not.toHaveBeenCalled()
+  })
+
+  it('leaves the record alone when the bytes fail to store', async () => {
+    const { updateMember } = open({ put: async () => ({ ok: false, error: { message: 'disk full' } }) as RemoteResult<unknown> })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    fireEvent.change(input, { target: { files: [new File(['x'], 'face.png', { type: 'image/png' })] } })
+    expect((await screen.findByRole('alert')).textContent).toContain('disk full')
+    // No reference is written, so the Member keeps the face it had.
+    expect(updateMember).not.toHaveBeenCalled()
+  })
+
+  it('draws no persona row for a Member the projection gave no path', async () => {
+    // A Member recorded before the persona file existed still has no path in
+    // its projection, and the dialog must not offer a button that cannot work.
+    const withoutPath = { ...(member as unknown as Record<string, unknown>) }
+    delete withoutPath.agentMdPath
+    open({ member: withoutPath as unknown as AgentTeamClientMemberStatus['member'] })
+    expect(screen.queryByRole('button', { name: '打开文件' })).toBeNull()
   })
 })

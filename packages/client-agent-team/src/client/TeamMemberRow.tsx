@@ -1,6 +1,7 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AgentTeamClientMemberStatus } from '@contexera/dsh-agent-team/types'
 import type { TeamSidebarProps } from './slots.ts'
+import type { TeamMemberAvatars } from './member-avatars.ts'
 import { TeamMemberAvatar } from './TeamMemberAvatar.tsx'
 import css from './member-row.module.css'
 
@@ -22,16 +23,19 @@ export interface TeamMemberAction {
  * spelling is the surface's call — rosters address Members the way the
  * composer does (`@handle`), the sidebar names them as the directory does.
  */
-export function TeamMemberIdentity({ status, name, className, t }: {
+export function TeamMemberIdentity({ status, name, className, t, memberAvatars }: {
   readonly status: AgentTeamClientMemberStatus
   /** Handle spelling for this surface; defaults to the mention form. */
   readonly name?: string | undefined
   /** Surface-local copy hook (sidebar line heights, dialog density). */
   readonly className?: string | undefined
   readonly t: TeamSidebarProps['t']
+  /** The shared Member face map, so a roster line draws this Member's own
+   * picture rather than the hue-and-initial fallback every caller used to get. */
+  readonly memberAvatars?: TeamMemberAvatars | undefined
 }) {
   return <>
-    <TeamMemberAvatar status={status} t={t} />
+    <TeamMemberAvatar status={status} t={t} memberAvatars={memberAvatars} />
     <span className={className === undefined ? css.copy : `${css.copy} ${className}`}>
       <strong>{name ?? `@${status.member.handle.replace(/^@/, '')}`}</strong>
       <small>{status.member.description}</small>
@@ -45,7 +49,7 @@ export function TeamMemberIdentity({ status, name, className, t }: {
  * the handle first and on the action second. A read-only roster omits it and
  * the trailing track collapses, handing its width back to the description.
  */
-export function TeamMemberRow({ status, action, error, className, t }: {
+export function TeamMemberRow({ status, action, error, className, t, memberAvatars }: {
   readonly status: AgentTeamClientMemberStatus
   readonly action?: TeamMemberAction | undefined
   /** Transport failure for this row's last mutation, announced in place. */
@@ -53,9 +57,11 @@ export function TeamMemberRow({ status, action, error, className, t }: {
   /** Surface-local hook (dialog, sidebar, footer) for its own row rules. */
   readonly className?: string | undefined
   readonly t: TeamSidebarProps['t']
+  /** The shared Member face map; see TeamMemberIdentity. */
+  readonly memberAvatars?: TeamMemberAvatars | undefined
 }) {
   return <div className={className === undefined ? css.row : `${css.row} ${className}`} data-team-member-row>
-    <TeamMemberIdentity status={status} t={t} />
+    <TeamMemberIdentity status={status} t={t} memberAvatars={memberAvatars} />
     {action !== undefined && <Button size="sm" variant="outline" className={css.action} disabled={action.disabled === true} onClick={action.onSelect}>{action.label}</Button>}
     {error !== undefined && <p className={css.error} role="alert">{error}</p>}
   </div>

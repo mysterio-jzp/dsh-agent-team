@@ -4,6 +4,7 @@ import type { TeamSidebarProps } from './slots.ts'
 import { presenceDotState, presenceLabel } from './TeamPresenceDot.tsx'
 import { TeamStateDot } from './TeamStateDot.tsx'
 import { MemberAvatarSeat } from './MemberAvatarSeat.tsx'
+import { useMemberAvatarUrl, type TeamMemberAvatars } from './member-avatars.ts'
 import css from './sidebar.module.css'
 
 /**
@@ -14,20 +15,28 @@ import css from './sidebar.module.css'
  * The face itself comes from the shared seat, which is what keeps this one, the
  * roster's and the mention chip's the same picture of the same Member.
  */
-export function TeamMemberAvatar({ status, t, avatarUrl }: {
+export function TeamMemberAvatar({ status, t, avatarUrl, memberAvatars }: {
   readonly status: AgentTeamClientMemberStatus
   readonly t: TeamSidebarProps['t']
   /** Uploaded avatar for this Member, when the calling surface resolved one. */
   readonly avatarUrl?: string | undefined
+  /** The shared Member face map; when present the seat resolves this Member's
+   * own reference, so every roster line draws the picture without each caller
+   * having to fetch it. */
+  readonly memberAvatars?: TeamMemberAvatars | undefined
 }) {
   const label = presenceLabel(status, t)
   const state = presenceDotState(status.presence)
+  // A caller that already resolved bytes wins; otherwise the shared map answers
+  // for the reference on this Member's own record.
+  const resolved = useMemberAvatarUrl(memberAvatars, status.member.avatarRef)
+  const face = avatarUrl ?? resolved
   return (
     <Tooltip label={label} delayMs={300}>
       <MemberAvatarSeat
         memberId={status.member.memberId}
         handle={status.member.handle}
-        avatarUrl={avatarUrl}
+        avatarUrl={face}
         size={24}
         label={label}
         className={css.agentAvatar}

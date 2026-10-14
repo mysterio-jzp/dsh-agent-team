@@ -153,6 +153,17 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
     leaveWorkspace: (request: AgentTeamLeaveWorkspaceRequest) => Promise<RemoteResult<AgentTeamLeaveWorkspaceResult>>
     /** Session-independent Host model catalog (`llm.models`); needs no live Member. */
     loadModels: () => Promise<RemoteResult<TeamModelCatalog>>
+    /** Member faces by reference, so the roster and the editor portrait draw the
+     * same bytes the boundary page does instead of each loading their own. */
+    memberAvatars: TeamMemberAvatars
+    /**
+     * Ask the Host to open one absolute path in whatever application it uses.
+     *
+     * Resolves `null` once the Host acknowledged, or the message to show. A
+     * refusal on the Host's side and an unreachable Host both arrive here as a
+     * message, because to the reader they are the same thing: no file opened.
+     */
+    openMemberPersonaPath: (path: string) => Promise<string | null>
     /** Embed the Member's Session conversation in the Team conversation seat. */
     openMemberSession: (sessionId: AgentTeamClientMemberStatus['member']['sessionId'], reportFailure?: (message: string) => void) => void
     selectedChannelRef?: AgentTeamChannelRef
@@ -201,6 +212,9 @@ export type TeamConversationProps = PropsRuntime<'main'> & PropsLocale<'team'> &
 
 export type TeamSettingsProps = PropsRuntime<'sidebar.settings'> & PropsLocale<'team'> & {
   loadMemberGroups: () => Promise<readonly TeamMemberGroup[]>
+  /** The shared Member face map, so the roster draws each Member's own picture
+   * instead of the hue-and-initial fallback it drew before faces existed. */
+  memberAvatars?: TeamMemberAvatars | undefined
 }
 
 export interface TeamMemberGroup {

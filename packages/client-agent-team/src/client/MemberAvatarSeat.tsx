@@ -26,8 +26,8 @@ export function MemberAvatarSeat({ memberId, handle, avatarUrl, size, label, cla
   readonly handle: string
   /** Uploaded avatar URL, or `undefined` for a Member that has never had one. */
   readonly avatarUrl: string | undefined
-  /** Rendered diameter in pixels: 24 for the roster and a bubble, 18 for a mention chip. */
-  readonly size: 18 | 24
+  /** Rendered diameter in pixels: 24 for the roster and a bubble, 18 for a mention chip, 64 for the editor portrait. */
+  readonly size: 18 | 24 | 64
   /** Accessible name; omitted when the seat sits beside text that already names the Member. */
   readonly label?: string | undefined
   /** Seat-specific layout hooks, so each caller keeps owning its placement. */

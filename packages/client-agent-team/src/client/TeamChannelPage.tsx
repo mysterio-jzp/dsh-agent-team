@@ -202,6 +202,11 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
   const onlineCount = channelMembers.filter(status => status.presence === 'available' || status.presence === 'working').length
   const messageSender = (item: AgentTeamViewItem): AgentTeamMemberId => item.message.sender
   const handleByMember = new Map(members.map(status => [status.member.memberId, status.member.handle.replace(/^@/, '')]))
+  // The inline mention chip names a Member by canonical handle and nothing
+  // else, so the page hands it the one lookup that turns a handle back into the
+  // Member identity the face needs — the same record the roster and the
+  // timeline read, never a second roster kept for chips.
+  const memberByHandle = new Map(members.map(status => [status.member.handle.replace(/^@/, ''), status.member]))
 
   const refresh = async (clearError = false) => {
     if (!mountedRef.current) return false
@@ -425,6 +430,7 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
                 // row draws the face the Member record actually carries.
                 memberAvatarRef={avatarRefOf(item.message.sender)}
                 memberAvatars={memberAvatars}
+                memberByHandle={memberByHandle}
                 body={item.message.body}
                 attachments={item.message.attachments}
                 loadAttachment={getAttachment}

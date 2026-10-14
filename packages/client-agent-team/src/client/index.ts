@@ -55,6 +55,7 @@ import { TeamMemberAvatars } from './member-avatars.ts'
 import { TeamReplyCapabilities, type TeamReplyCapabilitiesFace } from './reply-capabilities.ts'
 import { TeamEnvironmentCheck } from './environment-check.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
+import { openMemberPersonaPath } from './member-persona-path.ts'
 import { TEAM_ENTRY_ID, TeamNavigation } from './navigation.ts'
 import { TeamChangeStream, TeamReadStream, type TeamChangeListener, type TeamChangeScope } from './team-changes.ts'
 import { TeamQueries, type TeamQueryIdentity } from './team-queries.ts'
@@ -310,6 +311,10 @@ function teamSharedRemotes(
     leaveWorkspace: (request: AgentTeamLeaveWorkspaceRequest) => ctx.remote.agentTeam.leaveWorkspace(request),
     // The Host-scoped catalog needs no live Member, so suspended ones stay editable too.
     loadModels: () => ctx.remote.session.modelCatalog(),
+    // The absolute path travels verbatim: the Host validates it by resolving it
+    // against its own filesystem, so a path rewritten or re-joined here could
+    // stop matching and come back as a bad request instead of an open file.
+    openMemberPersonaPath: (path: string) => openMemberPersonaPath(ctx.remote.session, path),
     openMemberSession: (sessionId: AgentTeamClientMemberStatus['member']['sessionId'], reportFailure?: (message: string) => void) => {
       openMemberSessionImpl(ctx, navigation, sessionId, reportFailure)
     },
@@ -541,7 +546,7 @@ function applyUi(ctx: ClientContext): void {
 
   registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.workspaces', TeamWorkspaceBrowser as never)
   registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'main', TeamConversation as never, undefined, 'conversation')
-  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups }))
+  registerModeShadow(ctx, navigation, queries, reads, drafts, humanIdentity, memberAvatars, replyCapabilities, 'sidebar.settings', TeamMembersAction as never, () => ({ loadMemberGroups, memberAvatars }))
 
   // One criterion says whether Team mode stands: `TeamNavigation.mode`, the
   // store the Team seat's own registration reads. The mode owns the

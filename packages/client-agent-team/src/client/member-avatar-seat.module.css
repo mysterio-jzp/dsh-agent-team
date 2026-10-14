@@ -1,6 +1,7 @@
-/* One Member face, three sizes. The seat owns the shape and the two states; the
+/* One Member face, four sizes. The seat owns the shape and the two states; the
    caller owns where it sits. Sizes are pinned by the frozen prototype (D1): 24
-   in the roster and a message bubble, 18 in a mention chip. */
+   in the roster and a message bubble, 18 in a mention chip, 64 in the editor's
+   own portrait — the largest, and the only one that is not inline text. */
 .seat {
   align-items: center;
   background: hsl(var(--team-avatar-hue, 212) 42% 46%);
@@ -27,6 +28,16 @@
   font-size: 9px;
   height: 18px;
   width: 18px;
+}
+
+/* The editor's portrait: the same seat and the same two states, at the size the
+   boundary page's own dialog draws. It is deliberately the largest so a Human
+   judging a picture judges the bytes, not the thumbnail. */
+.seat[data-avatar-size='64'] {
+  flex-basis: 64px;
+  font-size: 26px;
+  height: 64px;
+  width: 64px;
 }
 
 /* The uploaded bytes fill the same circle the initial sat in, so the two states

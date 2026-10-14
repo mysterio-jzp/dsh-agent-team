@@ -31,6 +31,10 @@ interface TeamAgentsPanelProps {
   readonly joinWorkspace: TeamSidebarProps['joinWorkspace']
   readonly leaveWorkspace: TeamSidebarProps['leaveWorkspace']
   readonly loadModels: TeamSidebarProps['loadModels']
+  readonly putMemberAvatar: TeamSidebarProps['putMemberAvatar']
+  readonly removeMemberAvatar: TeamSidebarProps['removeMemberAvatar']
+  readonly memberAvatars: TeamSidebarProps['memberAvatars']
+  readonly openMemberPersonaPath: TeamSidebarProps['openMemberPersonaPath']
   /** The Member Session currently embedded in the conversation seat, if any. */
   readonly memberSessionId?: AgentTeamClientMemberStatus['member']['sessionId']
   readonly openMemberSession: TeamSidebarProps['openMemberSession']
@@ -38,7 +42,7 @@ interface TeamAgentsPanelProps {
   readonly t: TeamSidebarProps['t']
 }
 
-export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, recoverMember, archiveMember, joinWorkspace, leaveWorkspace, loadModels, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
+export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, recoverMember, archiveMember, joinWorkspace, leaveWorkspace, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
@@ -273,7 +277,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         <div className={css.agentList}>
           {orderedMembers.map(status => (
             <SortableRow key={status.member.memberId} drag={drag} orderKey={status.member.memberId}>
-              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} openMemberSession={openMemberSession} onUpdated={refresh} t={t} />
+              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} putMemberAvatar={putMemberAvatar} removeMemberAvatar={removeMemberAvatar} memberAvatars={memberAvatars} openMemberPersonaPath={openMemberPersonaPath} openMemberSession={openMemberSession} onUpdated={refresh} t={t} />
             </SortableRow>
           ))}
         </div>
@@ -293,7 +297,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
  * conversation page, the avatar carries identity plus the presence badge, and
  * the row menu opens the editor.
  */
-function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, recoverMember, archiveMember, loadModels, openMemberSession, onUpdated, t }: {
+function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, recoverMember, archiveMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, openMemberSession, onUpdated, t }: {
   readonly workspaceId: WorkspaceId
   readonly leaveWorkspace: TeamSidebarProps['leaveWorkspace']
   readonly status: AgentTeamClientMemberStatus
@@ -303,6 +307,10 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
   readonly recoverMember: TeamSidebarProps['recoverMember']
   readonly archiveMember: TeamSidebarProps['archiveMember']
   readonly loadModels: TeamSidebarProps['loadModels']
+  readonly putMemberAvatar: TeamSidebarProps['putMemberAvatar']
+  readonly removeMemberAvatar: TeamSidebarProps['removeMemberAvatar']
+  readonly memberAvatars: TeamSidebarProps['memberAvatars']
+  readonly openMemberPersonaPath: TeamSidebarProps['openMemberPersonaPath']
   readonly openMemberSession: TeamSidebarProps['openMemberSession']
   readonly onUpdated: () => Promise<void> | void
   readonly t: TeamSidebarProps['t']
@@ -409,6 +417,10 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
           status={status}
           updateMember={updateMember}
           loadModels={loadModels}
+          openMemberPersonaPath={openMemberPersonaPath}
+          putMemberAvatar={putMemberAvatar}
+          removeMemberAvatar={removeMemberAvatar}
+          memberAvatars={memberAvatars}
           onCommitted={onUpdated}
           onClose={() => { setEditing(false) }}
           t={t}

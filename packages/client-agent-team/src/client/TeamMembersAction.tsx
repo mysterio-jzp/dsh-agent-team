@@ -5,9 +5,9 @@ import { TeamMemberRow } from './TeamMemberRow.tsx'
 import membersCss from './members.module.css'
 import css from './team.module.css'
 
-type TeamMembersActionProps = Pick<TeamSettingsProps, 'wide' | 'loadMemberGroups' | 't'>
+type TeamMembersActionProps = Pick<TeamSettingsProps, 'wide' | 'loadMemberGroups' | 't' | 'memberAvatars'>
 
-export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActionProps) {
+export function TeamMembersAction({ wide, loadMemberGroups, t, memberAvatars }: TeamMembersActionProps) {
   const [panelOpen, setPanelOpen] = useState(false)
   const [groups, setGroups] = useState<Awaited<ReturnType<typeof loadMemberGroups>>>([])
   const [loading, setLoading] = useState(false)
@@ -49,7 +49,7 @@ export function TeamMembersAction({ wide, loadMemberGroups, t }: TeamMembersActi
           {!loading && groups.map(group => (
             <section className={membersCss.group} key={group.workspaceId} aria-labelledby={`team-members-${group.workspaceId}`}>
               <h3 id={`team-members-${group.workspaceId}`}>{group.workspaceTitle}</h3>
-              {group.members.map(status => <TeamMemberRow key={status.member.memberId} status={status} className={membersCss.member} t={t} />)}
+              {group.members.map(status => <TeamMemberRow key={status.member.memberId} status={status} className={membersCss.member} t={t} memberAvatars={memberAvatars} />)}
             </section>
           ))}
           {error !== undefined && <p className={membersCss.error} role="alert">{error}</p>}

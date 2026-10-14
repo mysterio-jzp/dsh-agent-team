@@ -2,7 +2,7 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { MarkdownText, Modal, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MarkdownLabels } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import type { AgentTeamChannelRef, AgentTeamMemberId, AgentTeamMessageAttachment, AgentTeamMessageRef, AgentTeamTaskRef, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamChannelRef, AgentTeamClientMember, AgentTeamMemberId, AgentTeamMessageAttachment, AgentTeamMessageRef, AgentTeamTaskRef, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
 import type { TeamConversationProps } from './slots.ts'
 import type { ResolvedMemberRef } from './refs.ts'
 import { cachedAttachmentDataUrl, formatByteSize, loadAttachmentDataUrl } from './attachment-preview.ts'
@@ -11,6 +11,7 @@ import { cachedResolvedThreadRef, resolveUnknownThreadRefs, useResolvedThreadRef
 import { formatMessageTime, isSingleBrandedRef, memberHue, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, type MentionHandle } from './team-formatters.ts'
 import { useAvatarImage } from './avatar-image.ts'
 import { useMemberAvatarUrl, type TeamMemberAvatars } from './member-avatars.ts'
+import { MemberAvatarSeat } from './MemberAvatarSeat.tsx'
 import css from './conversation.module.css'
 
 export interface TeamMessageProps {
@@ -68,6 +69,9 @@ export interface TeamMessageProps {
   readonly memberAvatarRef?: string | undefined
   /** The shared Member face map; absent on surfaces without the Remote. */
   readonly memberAvatars?: TeamMemberAvatars | undefined
+  /** Roster lookup by canonical handle, for the inline mention chip: the chip
+   * names a Member by handle and needs the record behind it to draw a face. */
+  readonly memberByHandle?: ReadonlyMap<string, AgentTeamClientMember> | undefined
   /** Cache readback for thumbnails; absent on surfaces without the remotes. */
   readonly loadAttachment?: TeamConversationProps['getAttachment'] | undefined
   readonly t?: TeamConversationProps['t'] | undefined
@@ -94,7 +98,44 @@ export interface TeamMessageProps {
  * skipping a render here never detaches it. Callers must therefore keep the
  * props they derive per render (mention names, ref callbacks) identity-stable.
  */
-export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, memberAvatarRef, memberAvatars, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, loadAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
+/**
+ * One inline mention chip, with the mentioned Member's own face when it has one.
+ *
+ * The body names a Member by canonical handle, so the chip looks the handle up
+ * in the same roster the rest of the surface reads and draws through the shared
+ * seat at the chip's own diameter. This is the hook boundary the seat needs:
+ * the chip builder is a plain function over split text and cannot call one.
+ *
+ * The Human may be mentioned this way — bodies do it, and the historic handle
+ * resolves to the reader — and the Human's chip draws no face: their picture is
+ * the profile's, reached through the identity projection, and a Member seat
+ * answering for them would put a Member's face under the Human's name.
+ */
+function MentionChip({ text, name, readerName, memberByHandle, memberAvatars }: {
+  readonly text: string
+  readonly name: string | undefined
+  readonly readerName: string | undefined
+  readonly memberByHandle: ReadonlyMap<string, AgentTeamClientMember> | undefined
+  readonly memberAvatars: TeamMemberAvatars | undefined
+}) {
+  const member = name === undefined ? undefined : memberByHandle?.get(name.replace(/^@/, ''))
+  const url = useMemberAvatarUrl(memberAvatars, member?.avatarRef)
+  const markup = {
+    className: css.mention,
+    ...(readerName !== undefined && name === readerName ? { 'data-mention-human': '' } : {}),
+  }
+  // A Member with a record and a picture draws both; everything else — the
+  // Human, a Member with no avatar, an unknown handle — keeps the plain chip.
+  if (member === undefined || member.avatarRef === undefined) return <span {...markup}>{text}</span>
+  return <span {...markup}><MemberAvatarSeat memberId={member.memberId} handle={member.handle} avatarUrl={url} size={18} className={css.memberChipFace} />{text}</span>
+}
+
+/** The handle's first letter, upper-cased: the initial the Human's seat draws. */
+function initialOfName(name: string): string {
+  return name.replace('@', '').slice(0, 1).toUpperCase()
+}
+
+export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, memberAvatarRef, memberAvatars, memberByHandle, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, loadAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
   const avatarStyle = human ? undefined : { '--team-avatar-hue': memberHue(memberId) } as CSSProperties
   // A seat may draw a picture, but only its own author's: the Human's row reads
   // the profile's bytes and a Member's row reads that Member's. The two sources
@@ -230,7 +271,7 @@ export const TeamMessage = memo(function TeamMessage({ senderName, memberId, hum
   const bodyNode = plan.render === 'inline' && plan.inline !== undefined
     ? <div className={css.messageText}>
         {plan.inline.segments.map((segment, index) => segment.mention
-          ? <span key={index} className={css.mention} data-mention-human={readerName !== undefined && segment.name === readerName ? '' : undefined}>{segment.text}</span>
+          ? <MentionChip key={index} text={segment.text} name={segment.name} readerName={readerName} memberByHandle={memberByHandle} memberAvatars={memberAvatars} />
           : <Fragment key={index}>{renderRefs(segment.text, onOpenRef, onOpenMemberSession, taskLabel, threadChipLabel, channelChipLabel, memberChipLabel, channelNameOf, memberOf)}</Fragment>)}
       </div>
     : plan.render === 'literal'
@@ -238,9 +279,18 @@ export const TeamMessage = memo(function TeamMessage({ senderName, memberId, hum
       : <div ref={markdownRef} className={css.messageMarkdown}><MarkdownText key={`${displayBody}:${onOpenRef === undefined ? 'literal' : 'refs'}`} text={displayBody} labels={markdownLabels} /></div>
   return (
     <article className={css.messageRow} data-human={human || undefined} data-side={human ? 'end' : 'start'} data-grouped={grouped || undefined} data-mentions-me={mentionsHuman || undefined} data-message-ref={messageRef} data-replying-to={replyTarget || undefined} data-reply-flash={replyFlash || undefined}>
-      {identityImage.src === undefined
-        ? <div className={css.messageIdentity} data-avatar="initial" style={avatarStyle} aria-hidden="true">{senderName.replace('@', '').slice(0, 1).toUpperCase()}</div>
-        : <img className={css.messageIdentityImage} data-avatar="image" src={identityImage.src} alt="" aria-hidden="true" onError={identityImage.failed} />}
+      {human
+        // The Human's seat keeps its own 28px geometry and profile fill: it
+        // predates the Member boundary page and its look is already approved,
+        // so the Member rule below does not reach it.
+        ? identityImage.src === undefined
+          ? <div className={css.messageIdentity} data-avatar="initial" style={avatarStyle} aria-hidden="true">{initialOfName(senderName)}</div>
+          : <img className={css.messageIdentityImage} data-avatar="image" src={identityImage.src} alt="" aria-hidden="true" onError={identityImage.failed} />
+        // A Member draws through the shared seat, which is what makes D1 true
+        // rather than merely intended: this row, the roster and the mention
+        // chip cannot disagree about a Member's colour or fallback because
+        // there is one rule and one place it lives.
+        : <MemberAvatarSeat memberId={memberId} handle={senderName} avatarUrl={identityImage.src} size={24} className={css.messageMemberSeat} />}
       <div className={css.messageBody}>
         {((!grouped || showGroupedTime === true) || onReply !== undefined) && (
           <div className={css.messageHead}>

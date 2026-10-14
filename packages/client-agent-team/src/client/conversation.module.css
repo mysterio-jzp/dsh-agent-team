@@ -816,3 +816,25 @@
   line-height: 17px;
   white-space: nowrap;
 }
+
+/* A Member's message-row seat: the shared seat at the roster's diameter, held
+   level with the bubble's first line the way the Human's 28px seat is. Only the
+   placement is local — colour, fallback and the decode failure rule come from
+   the shared seat, so this row cannot drift from the roster or the chip. */
+.messageMemberSeat {
+  flex: 0 0 24px;
+  margin-top: 22px;
+}
+
+/* A mention chip names a Member inline; the seat gives it the same face the
+   roster and the timeline draw, at the chip's own diameter. Only members whose
+   record carries a reference get one — a Member with no picture, and the Human,
+   keep the plain text chip they had. */
+.memberChip {
+  align-items: center;
+  display: inline-flex;
+  gap: 4px;
+}
+.memberChipFace {
+  flex: 0 0 18px;
+}
