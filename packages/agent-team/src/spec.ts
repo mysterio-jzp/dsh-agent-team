@@ -84,6 +84,13 @@ const memberSchema = z.object({
   model: modelSelectionSchema.optional(),
   // Ledgers written before member capabilities existed omit the field.
   capabilities: memberCapabilitiesSchema.optional(),
+  // Ledgers written before per-Member avatars existed omit the field. The
+  // write path accepts `avatarRef` without consulting this schema, so a
+  // missing line here does not fail the write — it fails the NEXT cold start,
+  // where `.strict()` rejects the recorded record and the whole domain fails
+  // to open. Optional is therefore the load-time half of the same contract the
+  // record's own optional field states.
+  avatarRef: z.string().min(1).optional(),
   privateMemoryPath: z.string().min(1),
   state: z.union([z.literal('enabled'), z.literal('suspended'), z.literal('inactive'), z.literal('archived')]),
 }).strict()

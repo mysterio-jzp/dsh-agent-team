@@ -255,6 +255,72 @@ describe('AgentTeam durable Thread Attention ledger', () => {
     await expect(harness(storedPool([], 9))).rejects.toThrow(/stamped v9, descriptor wants v1/)
   })
 
+  it('cold-reopens a ledger whose Member carries an avatar reference', async () => {
+    // The write path never consults the durable schema, and only `open()` runs
+    // it — so a field the write side accepts and `memberSchema` does not
+    // (`.strict()`) records happily and then throws on the next cold start,
+    // taking the whole domain with it. Nothing but this shape of test can see
+    // that: a ledger built on an already-open domain reads memory and never
+    // runs the schema, so it would pass with the field missing entirely.
+    //
+    // Cold start here means the full route: raw records out of one pool, into a
+    // NEW pool, opened by a NEW domain. Same shape as the version-rejection
+    // assertion above, which is the precedent in this file.
+    const pool = new MemoryMediaPool()
+    const first = await harness(pool)
+    const added = await first.ctx.agentTeam.addMember({
+      requestId: requestId('avatar-cold-add'),
+      workspaceId: alpha,
+      handle: 'avatar-cold',
+      description: '',
+      presetId: 'team-member',
+      channelRefs: [],
+    })
+    await first.ctx.agentTeam.updateMember({
+      requestId: requestId('avatar-cold-set'),
+      memberId: added.status.member.memberId,
+      handle: 'avatar-cold',
+      description: '',
+      avatarRef: '3f2504e0-4f89-11d3-9a0c-0305e82c3301',
+    })
+    const records = [...pool.media.get('agent_team')!.tables.get('operations')!.entries()] as Array<[AgentTeamOperationId, AgentTeamOperation]>
+    // The avatar really is on the recorded Member: without this the reopen
+    // below could pass for the wrong reason.
+    expect(records.some(([, operation]) => operation.kind === 'team/member-updated'
+      && operation.data.member.avatarRef === '3f2504e0-4f89-11d3-9a0c-0305e82c3301')).toBe(true)
+    await first.fiber.dispose()
+
+    const reopened = await harness(storedPool(records))
+    expect(reopened.ctx.agentTeam.members().map(status => status.member.avatarRef)).toEqual(['3f2504e0-4f89-11d3-9a0c-0305e82c3301'])
+    await reopened.fiber.dispose()
+  })
+
+  it('cold-reopens a ledger whose Member predates avatars', async () => {
+    // The other arm, and the reason the field is optional. A ledger recorded
+    // before avatars existed has no `avatarRef` on its Members, and a schema
+    // that admitted the field but required it would reject every one of them on
+    // load — the identical outage pointing the other direction. Recording a
+    // Member and never touching its avatar is what such a ledger looks like.
+    const pool = new MemoryMediaPool()
+    const first = await harness(pool)
+    await first.ctx.agentTeam.addMember({
+      requestId: requestId('legacy-cold-add'),
+      workspaceId: alpha,
+      handle: 'legacy-cold',
+      description: '',
+      presetId: 'team-member',
+      channelRefs: [],
+    })
+    const records = [...pool.media.get('agent_team')!.tables.get('operations')!.entries()] as Array<[AgentTeamOperationId, AgentTeamOperation]>
+    expect(records.some(([, operation]) => operation.kind === 'team/member-added'
+      && operation.data.member.avatarRef === undefined)).toBe(true)
+    await first.fiber.dispose()
+
+    const reopened = await harness(storedPool(records))
+    expect(reopened.ctx.agentTeam.members().map(status => status.member.avatarRef)).toEqual([undefined])
+    await reopened.fiber.dispose()
+  })
+
   it('creates a top-level Task, starts creator Attention, and returns no own unread work', async () => {
     const test = await harness()
     const channel = await test.ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering work' })
