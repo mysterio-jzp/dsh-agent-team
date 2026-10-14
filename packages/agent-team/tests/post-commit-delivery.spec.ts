@@ -9,8 +9,9 @@ import { changeBaseline, nextChange } from './helpers/change-stream.ts'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { AgentTeamChannelRef, AgentTeamMemberActor, AgentTeamRequestId } from '../src/types.ts'
 
@@ -63,17 +64,20 @@ async function addLiveMember(ctx: Context, channelRef: AgentTeamChannelRef): Pro
 
 /**
  * One fake live Agent whose wake can be made to fail on demand. Only the
- * surface `notifyMember` touches is implemented; successful deliveries are
- * recorded so a test can prove the wake is re-derived later.
+ * surface the delivery path touches is implemented; successful deliveries are
+ * recorded so a test can prove the wake is re-derived later. It carries the
+ * Member's own Session id because that is how the Host resolves which work
+ * domain a live generation is.
  */
-function wakeSeam(): { readonly agent: Agent; readonly state: { fail: boolean; readonly calls: UserMessage[] } } {
+function wakeSeam(sessionId: SessionId): { readonly agent: Agent; readonly state: { fail: boolean; readonly calls: UserMessage[] } } {
   const state = { fail: true, calls: [] as UserMessage[] }
   const wake = (message: UserMessage): void => {
     if (state.fail) throw new Error('wake failed (test seam)')
     state.calls.push(message)
   }
   const agent = {
-    id: SessionId('session:post-commit-delivery'),
+    id: sessionId,
+    session: { id: sessionId },
     status: 'idle',
     inbox: { nextTurn: [], nextStep: [], remove: () => {} },
     steer: wake,
@@ -89,8 +93,12 @@ describe('post-commit delivery', () => {
     const info = vi.spyOn(ctx.logger, 'info')
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('wake-channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering' })
     const member = await addLiveMember(ctx, channel.channel.channelRef)
-    const { agent, state } = wakeSeam()
-    ctx.agentTeam['handles'].set(member.memberId, { agent, dispose: async () => {} })
+    const fakeSession = SessionId(`session:${member.memberId}`)
+    const { agent, state } = wakeSeam(fakeSession)
+    // The Member's own work domain: which domain a Channel fact is delivered
+    // into is not this change's decision, so the wake reaches the live Session
+    // the Member already runs.
+    ctx.agentTeam['handles'].set(member.memberId, new Map([[DEFAULT_MEMBER_SCOPE_KEY, { agent, dispose: async () => {} } as unknown as AgentHandle]]))
     const lines = (spy: typeof info): string[] => spy.mock.calls.map(args => String(args[0]))
 
     const waiter = nextChange(ctx.agentTeam)
@@ -113,7 +121,7 @@ describe('post-commit delivery', () => {
     const failed = lines(warn).find(line => line.includes('Team Inbox notice delivery failed'))
     expect(failed).toBeDefined()
     expect(failed).toContain(`memberId '${member.memberId}'`)
-    expect(failed).toContain("session 'session:post-commit-delivery'")
+    expect(failed).toContain(`session '${fakeSession}'`)
     expect(failed).toContain(`requestId '${sent.receipt.requestId}'`)
     expect(failed).toContain(`operationId '${sent.receipt.operationId}'`)
     expect(failed).toContain("operation 'team/message-sent'")
@@ -154,9 +162,9 @@ describe('post-commit delivery', () => {
     const debug = vi.spyOn(ctx.logger, 'debug')
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('duplicate-channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering' })
     const member = await addLiveMember(ctx, channel.channel.channelRef)
-    const { agent, state } = wakeSeam()
+    const { agent, state } = wakeSeam(SessionId(`session:${member.memberId}`))
     state.fail = false
-    ctx.agentTeam['handles'].set(member.memberId, { agent, dispose: async () => {} })
+    ctx.agentTeam['handles'].set(member.memberId, new Map([[DEFAULT_MEMBER_SCOPE_KEY, { agent, dispose: async () => {} } as unknown as AgentHandle]]))
     const lines = (spy: typeof info): string[] => spy.mock.calls.map(args => String(args[0]))
 
     const sent = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('duplicate-send'), workspaceId: alpha,

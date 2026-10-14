@@ -28,7 +28,9 @@ import type {
   AgentTeamCapabilityWarning,
   AgentTeamMemberCapabilities,
   AgentTeamMemberId,
+  AgentTeamMemberScopeKey,
 } from './types.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY } from './member-scope.ts'
 import * as memberSkills from './member-skills.ts'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
 
@@ -94,28 +96,42 @@ export function memberMemoryDirectoryPath(member: Pick<AgentTeamAgentMember, 'me
 export interface MemberRuntimeDeps {
   /** Host context for agent events, tool schemas, and the workspace registry. */
   readonly ctx: Context
-  /** Resolve one Member's live agent context, or throw when it has none. */
-  readonly liveMemberContext: (memberId: AgentTeamMemberId) => Context
+  /** Resolve one Member surface's live agent context, or throw when it has none. */
+  readonly liveMemberContext: (memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey) => Context
   /** Agent ids with a turn in flight; shared by reference with the service. */
   readonly runningAgents: ReadonlySet<SessionId>
+}
+
+/**
+ * The identity of one live Member surface: the Member and the work domain whose
+ * own Session it runs.
+ *
+ * The registrations below are per surface, not per Member, because one Member
+ * now holds one live surface per work domain: a single-slot map keyed by the
+ * Member alone would let a second domain's activation silently drop the first
+ * domain's restriction disposer and skill provider, leaving that domain's
+ * surface frozen at its first-applied policy.
+ */
+function surfaceKey(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): string {
+  return `${memberId}\u0000${scopeKey}`
 }
 
 /** Per-Member runtime state; the four maps dispose together with each Member. */
 export class MemberRuntime {
   /**
-   * Live per-Member tool restriction disposers, mirroring modelSelections:
-   * activation registers, disposal paths release, edits swap at a turn
-   * boundary. Deliberate interface reservation: the restriction seam is the
-   * primitive future Runtime Revision manifests orchestrate — do not remove
+   * Live per-Member-surface tool restriction disposers, mirroring
+   * modelSelections: activation registers, disposal paths release, edits swap at
+   * a turn boundary. Deliberate interface reservation: the restriction seam is
+   * the primitive future Runtime Revision manifests orchestrate — do not remove
    * during cleanup.
    */
-  private readonly memberRestrictions = new Map<AgentTeamMemberId, () => void>()
+  private readonly memberRestrictions = new Map<string, () => void>()
   /**
    * The allow-list currently enforced behind `memberRestrictions`: the
    * rollback source when a swap's new restriction fails to install, so a
    * failed apply never leaves the Member less restricted than before.
    */
-  private readonly enforcedToolAllow = new Map<AgentTeamMemberId, readonly string[]>()
+  private readonly enforcedToolAllow = new Map<string, readonly string[]>()
   /**
    * Capability intent the live surface is known to reflect (`null` = applied
    * with no capabilities): runtime-derived like `capabilityWarnings`, never
@@ -130,9 +146,9 @@ export class MemberRuntime {
    */
   private readonly capabilityWarnings = new Map<AgentTeamMemberId, readonly AgentTeamCapabilityWarning[]>()
   /** Live skill selection refs let capability edits re-filter the catalog without disposing the Session. */
-  private readonly skillSelections = new Map<AgentTeamMemberId, MemberSkillSelectionRef>()
-  /** Per-Member private skill provider disposers; released with the Member's agent scope. */
-  private readonly skillProviderDisposals = new Map<AgentTeamMemberId, () => void>()
+  private readonly skillSelections = new Map<string, MemberSkillSelectionRef>()
+  /** Per-Member-surface private skill provider disposers; released with that surface's agent scope. */
+  private readonly skillProviderDisposals = new Map<string, () => void>()
 
   constructor(private readonly deps: MemberRuntimeDeps) {}
 
@@ -151,7 +167,7 @@ export class MemberRuntime {
    * primitive future Runtime Revision manifests orchestrate — do not remove
    * during cleanup.
    */
-  applyMemberToolPolicy(agentCtx: Context, member: AgentTeamAgentMember): void {
+  applyMemberToolPolicy(agentCtx: Context, member: AgentTeamAgentMember, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): void {
     const configured = member.capabilities?.tools?.allow
     if (configured === undefined) {
       this.capabilityWarnings.delete(member.memberId)
@@ -171,8 +187,8 @@ export class MemberRuntime {
     // the inherited surface; both errors surface as this Member's activation
     // failure without touching any other Member.
     const dispose = agentCtx.tools.restrict({ allow })
-    this.memberRestrictions.set(member.memberId, dispose)
-    this.enforcedToolAllow.set(member.memberId, Object.freeze([...allow]))
+    this.memberRestrictions.set(surfaceKey(member.memberId, scopeKey), dispose)
+    this.enforcedToolAllow.set(surfaceKey(member.memberId, scopeKey), Object.freeze([...allow]))
   }
 
   /** Whether the live surface is known to reflect exactly this capability intent; an absent record never matches. */
@@ -192,18 +208,18 @@ export class MemberRuntime {
    * the previous allow-list before rethrowing — the swap must never leave the
    * Member wider than the surface it started from.
    */
-  reapplyMemberToolPolicy(member: AgentTeamAgentMember): void {
-    const agentCtx = this.deps.liveMemberContext(member.memberId)
-    const previousAllow = this.enforcedToolAllow.get(member.memberId)
-    this.releaseMemberToolPolicy(member.memberId)
+  reapplyMemberToolPolicy(member: AgentTeamAgentMember, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): void {
+    const agentCtx = this.deps.liveMemberContext(member.memberId, scopeKey)
+    const previousAllow = this.enforcedToolAllow.get(surfaceKey(member.memberId, scopeKey))
+    this.releaseMemberToolPolicy(member.memberId, scopeKey)
     try {
-      this.applyMemberToolPolicy(agentCtx, member)
+      this.applyMemberToolPolicy(agentCtx, member, scopeKey)
     } catch (error) {
       if (previousAllow !== undefined) {
         try {
           const dispose = agentCtx.tools.restrict({ allow: [...previousAllow] })
-          this.memberRestrictions.set(member.memberId, dispose)
-          this.enforcedToolAllow.set(member.memberId, previousAllow)
+          this.memberRestrictions.set(surfaceKey(member.memberId, scopeKey), dispose)
+          this.enforcedToolAllow.set(surfaceKey(member.memberId, scopeKey), previousAllow)
           // Capability warnings are deliberately NOT restored: they describe
           // the STORED configuration's divergence from the tool surface (the
           // input `applyMemberToolPolicy` derives from), and the accepted
@@ -221,14 +237,21 @@ export class MemberRuntime {
     }
   }
 
-  /** Release one Member's restriction disposer and warning state; safe to call twice. */
-  releaseMemberToolPolicy(memberId: AgentTeamMemberId): void {
-    const dispose = this.memberRestrictions.get(memberId)
+  /**
+   * Release one Member surface's restriction disposer and warning state; safe
+   * to call twice. The two Member-level records — the applied-capability intent
+   * and the warnings — are dropped too: they describe a surface whose policy is
+   * no longer installed, and the next successful apply or activation re-derives
+   * them rather than reporting a state nobody can prove.
+   */
+  releaseMemberToolPolicy(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): void {
+    const key = surfaceKey(memberId, scopeKey)
+    const dispose = this.memberRestrictions.get(key)
     if (dispose !== undefined) {
-      this.memberRestrictions.delete(memberId)
+      this.memberRestrictions.delete(key)
       dispose()
     }
-    this.enforcedToolAllow.delete(memberId)
+    this.enforcedToolAllow.delete(key)
     this.capabilityWarnings.delete(memberId)
     this.appliedCapabilities.delete(memberId)
   }
@@ -300,18 +323,19 @@ export class MemberRuntime {
    * The sanitized directory is authoritative: activateMember migrated any
    * legacy colon directory onto it before the provider mounted.
    */
-  mountMemberSkillProvider(member: AgentTeamAgentMember, agentCtx: Context, selection: MemberSkillSelectionRef): void {
-    this.skillProviderDisposals.set(member.memberId, memberSkills.mountMemberSkillProvider(agentCtx, {
+  mountMemberSkillProvider(member: AgentTeamAgentMember, agentCtx: Context, selection: MemberSkillSelectionRef, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): void {
+    const key = surfaceKey(member.memberId, scopeKey)
+    this.skillProviderDisposals.set(key, memberSkills.mountMemberSkillProvider(agentCtx, {
       skillsDirectory: join(memberMemoryDirectoryPath(member), 'skills'),
       bundledSkillsDirectory: BUNDLED_SKILLS_DIRECTORY,
       selection,
     }))
-    this.skillSelections.set(member.memberId, selection)
+    this.skillSelections.set(key, selection)
   }
 
-  /** Live-apply a capability edit to a registered selection; a no-op when none exists. */
-  swapSkillSelection(memberId: AgentTeamMemberId, allow: readonly string[] | undefined): void {
-    this.skillSelections.get(memberId)?.swap(allow)
+  /** Live-apply a capability edit to one surface's registered selection; a no-op when none exists. */
+  swapSkillSelection(memberId: AgentTeamMemberId, allow: readonly string[] | undefined, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): void {
+    this.skillSelections.get(surfaceKey(memberId, scopeKey))?.swap(allow)
   }
 
   /**
@@ -366,8 +390,13 @@ export class MemberRuntime {
     }
   }
 
-  /** Irreversibly remove one Member: archive its Session and delete its private namespace. */
-  async cleanupRemovedMember(member: AgentTeamAgentMember): Promise<void> {
+  /**
+   * Irreversibly remove one Member: archive every Session it held — the
+   * Member's own plus one per work domain, which would otherwise stay visible
+   * in the Workspace's grouping surfaces as an orphan — and delete its private
+   * namespace.
+   */
+  async cleanupRemovedMember(member: AgentTeamAgentMember, sessions: readonly SessionId[] = [member.sessionId]): Promise<void> {
     // The ledger path may still name the legacy colon directory (never
     // activated after the fix): remove both spellings; rm is force-tolerant
     // of the one that does not exist. Every target must sit inside THIS
@@ -381,22 +410,23 @@ export class MemberRuntime {
     const refused = targets.filter(target => !isInsideMembersRoot(target))
     if (refused.length > 0) this.deps.ctx.logger.warn(`agent-team: refused to delete recorded Member private memory outside this DSH home: ${refused.map(target => `'${target}'`).join(', ')}`)
     const results = await Promise.allSettled([
-      this.deps.ctx.workspaceRegistry.archiveSession(member.sessionId),
+      ...[...new Set(sessions)].map(sessionId => this.deps.ctx.workspaceRegistry.archiveSession(sessionId)),
       ...owned.map(target => rm(target, { recursive: true, force: true })),
     ])
     const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
     if (failures.length > 0) throw new AggregateError(failures, `failed to clean up removed Member '${member.memberId}'`)
   }
 
-  /** Drop one Member's transient selection/disposer state after its handle is gone; safe to call twice. */
-  forgetMember(memberId: AgentTeamMemberId): void {
-    this.skillSelections.delete(memberId)
-    const providerDispose = this.skillProviderDisposals.get(memberId)
+  /** Drop one Member surface's transient selection/disposer state after its handle is gone; safe to call twice. */
+  forgetMember(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): void {
+    const key = surfaceKey(memberId, scopeKey)
+    this.skillSelections.delete(key)
+    const providerDispose = this.skillProviderDisposals.get(key)
     if (providerDispose !== undefined) {
-      this.skillProviderDisposals.delete(memberId)
+      this.skillProviderDisposals.delete(key)
       providerDispose()
     }
-    this.releaseMemberToolPolicy(memberId)
+    this.releaseMemberToolPolicy(memberId, scopeKey)
   }
 
   /** Dispose every registered per-Member seam; service shutdown only. */

@@ -49,6 +49,7 @@ import type {
   AgentTeamInboxDelta,
   AgentTeamMemberActor,
   AgentTeamMemberId,
+  AgentTeamMemberScopeKey,
   AgentTeamMessageRef,
   AgentTeamOperation,
   AgentTeamOperationId,
@@ -197,6 +198,21 @@ const memberSessionRenewed: Op<'team/member-session-renewed'> = {
   previousOperationId,
   kind: 'team/member-session-renewed',
   data: { member: { ...fixtureMember, sessionId: SessionId('session:protocol-next') }, previousSessionId: SessionId('session:protocol') },
+}
+
+const memberScopeSessionBound: Op<'team/member-scope-session-bound'> = {
+  ...opBase('operation:protocol-30', 'request:protocol-member-scope-session-bound', 30),
+  previousOperationId,
+  kind: 'team/member-scope-session-bound',
+  data: {
+    memberId,
+    binding: {
+      scopeKey: 'thread:thread:protocol-fixture' as AgentTeamMemberScopeKey,
+      scopeKind: 'thread',
+      scopeRef: 'thread:protocol-fixture',
+      sessionId: SessionId('session:protocol-scope'),
+    },
+  },
 }
 
 const memberSessionRolledOver: Op<'team/member-session-rolled-over'> = {
@@ -724,6 +740,32 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
         workspaceId: alpha,
         memberId,
         sessionId: SessionId('session:protocol-other'),
+      }),
+    },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'derived', inbox: 'none' },
+  },
+  'team/member-scope-session-bound': {
+    stored: memberScopeSessionBound,
+    legacyShapes: [],
+    retry: {
+      same: async () => {
+        const out = await ledger.bindMemberScopeSession({
+          requestId: memberScopeSessionBound.requestId,
+          actor: human,
+          workspaceId: alpha,
+          memberId,
+          binding: memberScopeSessionBound.data.binding,
+        })
+        expect(out.value.binding.sessionId, 'the bind mapper answers with the stored domain Session').toBe(memberScopeSessionBound.data.binding.sessionId)
+        return out
+      },
+      changed: () => ledger.bindMemberScopeSession({
+        requestId: memberScopeSessionBound.requestId,
+        actor: human,
+        workspaceId: alpha,
+        memberId,
+        binding: { ...memberScopeSessionBound.data.binding, sessionId: SessionId('session:protocol-scope-other') },
       }),
     },
     legacy: { normalize: 'none', repair: 'none' },

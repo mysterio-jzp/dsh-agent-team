@@ -273,25 +273,30 @@ function pressureAgent(options?: {
   return { agent, steered }
 }
 
-/** A host over one fake Member, with the labels the Host would supply. */
+/**
+ * A host over one fake Member Session, with the labels the Host would supply.
+ * The subject the engine keys everything by is the live Session id, so the
+ * helper also returns the one its fake Agent answers to.
+ */
 function pressureHost(agent: Agent | undefined, options?: {
   readonly compaction?: boolean
   readonly judge?: PressureJudgement | undefined
   readonly limits?: { readonly usageTokens: number; readonly hardLimit: number; readonly handoffAt: number } | undefined
-}): { readonly host: TeamPressurePolicyHost; readonly failures: string[]; readonly logs: string[] } {
+}): { readonly host: TeamPressurePolicyHost; readonly failures: string[]; readonly logs: string[]; readonly subject: SessionId } {
   const failures: string[] = []
   const logs: string[] = []
   const host = new TeamPressurePolicyHost({
-    agentForMember: id => (id === MEMBER_ID ? agent : undefined),
+    agentForSession: sessionId => (sessionId === agent?.session.id ? agent : undefined),
+    memberForSession: () => MEMBER_ID,
     limitsForAgent: () => options?.limits,
     compactionForAgent: () => (options?.compaction === true ? { reduce: () => Promise.resolve(null) } : undefined),
     activeClaimLabels: () => ['claim:a (unify forms)'],
     runningJobLabels: () => ['build'],
     judgeForAgent: () => options?.judge,
-    failed: (_memberId, diagnostic) => { failures.push(diagnostic) },
-    log: (message, memberId) => { logs.push(`${message} (member ${memberId})`) },
+    failed: (_sessionId, diagnostic) => { failures.push(diagnostic) },
+    log: (message, sessionId) => { logs.push(`${message} (session ${sessionId})`) },
   })
-  return { host, failures, logs }
+  return { host, failures, logs, subject: agent?.session.id ?? SESSION_ID }
 }
 
 describe('the Team pressure host', () => {
@@ -300,10 +305,10 @@ describe('the Team pressure host', () => {
     const { agent } = pressureAgent({
       messages: [humanInput('unify the four dialogs'), teamNotice('Team: claim accepted'), humanInput('now the tests'), ...admitted],
     })
-    const { host } = pressureHost(agent)
+    const { host, subject } = pressureHost(agent)
 
-    host.beginStep(MEMBER_ID, admitted)
-    const view = host.relatednessFor(MEMBER_ID)
+    host.beginStep(subject, admitted)
+    const view = host.relatednessFor(subject)
 
     // The judged input is the human's, never the rederived Team notice beside
     // it; the earlier input is the generation's, and the messages this very
@@ -313,46 +318,46 @@ describe('the Team pressure host', () => {
 
   it('offers no relatedness view outside a step, and never another Member\'s', () => {
     const { agent } = pressureAgent({ messages: [humanInput('earlier')] })
-    const { host } = pressureHost(agent)
+    const { host, subject } = pressureHost(agent)
 
-    expect(host.relatednessFor(MEMBER_ID)).toBeUndefined()
-    host.beginStep(MEMBER_ID, [humanInput('held')])
-    expect(host.relatednessFor('member:two' as AgentTeamMemberId)).toBeUndefined()
-    host.endStep(MEMBER_ID)
-    expect(host.relatednessFor(MEMBER_ID)).toBeUndefined()
+    expect(host.relatednessFor(subject)).toBeUndefined()
+    host.beginStep(subject, [humanInput('held')])
+    expect(host.relatednessFor(SessionId('session:two'))).toBeUndefined()
+    host.endStep(subject)
+    expect(host.relatednessFor(subject)).toBeUndefined()
   })
 
   it('offers no view for a step that admits only Team notices', () => {
     const { agent } = pressureAgent()
-    const { host } = pressureHost(agent)
+    const { host, subject } = pressureHost(agent)
 
-    host.beginStep(MEMBER_ID, [teamNotice('Team: a Thread moved')])
+    host.beginStep(subject, [teamNotice('Team: a Thread moved')])
 
     // Nothing a human asked for is arriving, so there is nothing to judge: the
     // gate stays off rather than asking about Team's own bookkeeping.
-    expect(host.relatednessFor(MEMBER_ID)).toBeUndefined()
+    expect(host.relatednessFor(subject)).toBeUndefined()
   })
 
   it('resolves limits, surface, log span and in-hand work from the Member\'s own Agent', () => {
     const own = [{ type: 'turn/end', seq: 3, time: 1 } as unknown as SessionEvent]
     const { agent } = pressureAgent({ sessionId: 'session:seven', inheritedEventCount: 2, generation: 5, tokens: 210_000, ownEvents: own })
     const limits = { usageTokens: 210_000, hardLimit: 256_000, handoffAt: 200_000 }
-    const { host } = pressureHost(agent, { limits })
+    const { host, subject } = pressureHost(agent, { limits })
 
-    expect(host.limitsFor(MEMBER_ID)).toEqual(limits)
-    expect(host.surfaceFor(MEMBER_ID)).toEqual({ generation: 5, tokens: 210_000 })
-    expect(host.logSpanFor(MEMBER_ID)).toEqual({ sessionId: 'session:seven', inheritedEventCount: 2, events: own })
-    expect(host.inHandFor(MEMBER_ID)).toEqual({ inHand: ['claim:a (unify forms)'], jobs: ['build'] })
-    expect(host.limitsFor('member:two' as AgentTeamMemberId)).toBeUndefined()
+    expect(host.limitsFor(subject)).toEqual(limits)
+    expect(host.surfaceFor(subject)).toEqual({ generation: 5, tokens: 210_000 })
+    expect(host.logSpanFor(subject)).toEqual({ sessionId: 'session:seven', inheritedEventCount: 2, events: own })
+    expect(host.inHandFor(subject)).toEqual({ inHand: ['claim:a (unify forms)'], jobs: ['build'] })
+    expect(host.limitsFor(SessionId('session:two'))).toBeUndefined()
   })
 
   it('refuses to report a steered notice that had no live Agent to reach', () => {
-    const { host } = pressureHost(undefined)
+    const { host, subject } = pressureHost(undefined)
 
     // The engine holds a step on the strength of this call: reporting success
     // without delivering would stall the Member behind a message that does not
     // exist, which is the one outcome the gate's own guard names.
-    expect(() => host.steer(MEMBER_ID, teamNotice('instruction'))).toThrow(/no live Agent/)
+    expect(() => host.steer(subject, teamNotice('instruction'))).toThrow(/no live Agent/)
   })
 })
 
@@ -360,7 +365,8 @@ describe('the Team pressure policy over the engine', () => {
   it('carries Team\'s own labels into the engine\'s notice', async () => {
     const { agent, steered } = pressureAgent({ ownEvents: [] })
     const policy = new TeamPressurePolicy({
-      agentForMember: () => agent,
+      agentForSession: () => agent,
+      memberForSession: () => MEMBER_ID,
       limitsForAgent: () => ({ usageTokens: 200_000, hardLimit: 256_000, handoffAt: 200_000 }),
       compactionForAgent: () => undefined,
       activeClaimLabels: () => ['claim:a (unify forms)'],
@@ -369,7 +375,7 @@ describe('the Team pressure policy over the engine', () => {
       log: () => {},
     })
 
-    const decision = await policy.onPreStep(MEMBER_ID, [humanInput('carry on')], new AbortController().signal)
+    const decision = await policy.onPreStep(SESSION_ID, [humanInput('carry on')], new AbortController().signal)
 
     expect(decision.kind).toBe('notice')
     const text = (steered[0]?.content[0] as { readonly text: string }).text
@@ -389,7 +395,8 @@ describe('the Team pressure policy over the engine', () => {
     const build = (noul: number) => {
       const { agent, steered } = pressureAgent({ ownEvents: idle })
       const policy = new TeamPressurePolicy({
-        agentForMember: () => agent,
+        agentForSession: () => agent,
+      memberForSession: () => MEMBER_ID,
         limitsForAgent: () => ({ usageTokens: 200_000, hardLimit: 256_000, handoffAt: 200_000 }),
         compactionForAgent: () => undefined,
         activeClaimLabels: () => [],
@@ -402,14 +409,14 @@ describe('the Team pressure policy over the engine', () => {
     }
 
     const unrelated = build(0.1)
-    const held = await unrelated.policy.onPreStep(MEMBER_ID, [humanInput('the other one?')], new AbortController().signal)
+    const held = await unrelated.policy.onPreStep(SESSION_ID, [humanInput('the other one?')], new AbortController().signal)
     expect(held.kind).toBe('hold')
     // The instruction quotes the held request, because the held request is the
     // one thing the model writing the handoff cannot otherwise see.
     expect((unrelated.steered[0]?.content[0] as { readonly text: string }).text).toContain('the other one?')
 
     const related = build(0.9)
-    const admitted = await related.policy.onPreStep(MEMBER_ID, [humanInput('keep going')], new AbortController().signal)
+    const admitted = await related.policy.onPreStep(SESSION_ID, [humanInput('keep going')], new AbortController().signal)
     expect(admitted.kind).toBe('notice')
   })
 
@@ -422,7 +429,8 @@ describe('the Team pressure policy over the engine', () => {
       const idle = [{ type: 'turn/end', seq: 3, time: Date.now() - idleMs } as unknown as SessionEvent]
       const { agent, steered } = pressureAgent({ ownEvents: idle })
       const policy = new TeamPressurePolicy({
-        agentForMember: () => agent,
+        agentForSession: () => agent,
+      memberForSession: () => MEMBER_ID,
         limitsForAgent: () => ({ usageTokens: 200_000, hardLimit: 256_000, handoffAt: 200_000 }),
         compactionForAgent: () => undefined,
         activeClaimLabels: () => [],
@@ -434,7 +442,7 @@ describe('the Team pressure policy over the engine', () => {
       })
       return { policy, steered }
     }
-    const step = async (policy: TeamPressurePolicy) => (await policy.onPreStep(MEMBER_ID, [humanInput('the other one?')], new AbortController().signal)).kind
+    const step = async (policy: TeamPressurePolicy) => (await policy.onPreStep(SESSION_ID, [humanInput('the other one?')], new AbortController().signal)).kind
 
     // A gap the engine's 30-minute default ignores becomes a long gap once the
     // row lowers the threshold: the same unrelated input is held, not admitted.
@@ -463,7 +471,8 @@ describe('the Team pressure policy over the engine', () => {
     const { agent } = pressureAgent({ ownEvents: idle })
     const gate: PressureGate = {}
     const policy = new TeamPressurePolicy({
-      agentForMember: () => agent,
+      agentForSession: () => agent,
+      memberForSession: () => MEMBER_ID,
       limitsForAgent: () => ({ usageTokens: 200_000, hardLimit: 256_000, handoffAt: 200_000 }),
       compactionForAgent: () => undefined,
       activeClaimLabels: () => [],
@@ -473,7 +482,7 @@ describe('the Team pressure policy over the engine', () => {
       failed: () => {},
       log: () => {},
     })
-    const step = async () => (await policy.onPreStep(MEMBER_ID, [humanInput('the other one?')], new AbortController().signal)).kind
+    const step = async () => (await policy.onPreStep(SESSION_ID, [humanInput('the other one?')], new AbortController().signal)).kind
 
     // Five idle minutes are not a long gap at the engine's 30-minute default.
     expect(await step()).toBe('notice')
@@ -489,7 +498,8 @@ describe('the Team pressure policy over the engine', () => {
     const idle = [{ type: 'turn/end', seq: 3, time: Date.now() - 33 * 60_000 } as unknown as SessionEvent]
     const { agent } = pressureAgent({ ownEvents: idle })
     const policy = new TeamPressurePolicy({
-      agentForMember: () => agent,
+      agentForSession: () => agent,
+      memberForSession: () => MEMBER_ID,
       limitsForAgent: () => ({ usageTokens: 200_000, hardLimit: 256_000, handoffAt: 200_000 }),
       compactionForAgent: () => undefined,
       activeClaimLabels: () => [],
@@ -498,7 +508,7 @@ describe('the Team pressure policy over the engine', () => {
       log: () => {},
     })
 
-    const decision = await policy.onPreStep(MEMBER_ID, [humanInput('the other one?')], new AbortController().signal)
+    const decision = await policy.onPreStep(SESSION_ID, [humanInput('the other one?')], new AbortController().signal)
 
     // A missing judge is a deployment choice, not a failure: the step is
     // admitted and only the ordinary handoff notice is steered.

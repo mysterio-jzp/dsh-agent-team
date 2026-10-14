@@ -66,6 +66,9 @@ import type {
   AgentTeamMemberId,
   AgentTeamMemberRemovedOperation,
   AgentTeamMemberResumedOperation,
+  AgentTeamMemberScopeKey,
+  AgentTeamMemberScopeSession,
+  AgentTeamMemberScopeSessionBoundOperation,
   AgentTeamMemberSessionRenewedOperation,
   AgentTeamMemberSessionRolledOverOperation,
   AgentTeamMemberSessionRestartedOperation,
@@ -142,6 +145,7 @@ import type {
   AgentTeamViewRequest,
 } from './types.ts'
 import { formatTeamTimestamp } from './time-format.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, memberScopeSession, parseMemberScopeKey } from './member-scope.ts'
 import { resolveBodyMentions } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
 
@@ -196,7 +200,31 @@ export interface AgentTeamAuthorizedRenewMemberSessionRequest {
   readonly memberId: AgentTeamMemberId
   /** The freshly minted Session the Member transitions onto. */
   readonly sessionId: SessionId
+  /** The work domain to reopen; absent means the legacy `default` domain. */
+  readonly scopeKey?: AgentTeamMemberScopeKey | undefined
   readonly actor: AgentTeamHumanActor
+}
+
+/**
+ * Host-authorized intent to bind one work domain to the fresh Session created
+ * for its first delivery. The Host executes it; the Member record is untouched.
+ */
+export interface AgentTeamAuthorizedBindMemberScopeRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly memberId: AgentTeamMemberId
+  /** The domain and the Session minted for it; namespace fields are re-derived from the key at commit. */
+  readonly binding: AgentTeamMemberScopeSession
+  readonly actor: AgentTeamHumanActor
+}
+
+/**
+ * Idempotency identity of one work domain's lazy binding — fixed per (Member,
+ * domain), so a crash between the durable commit and the activation that
+ * follows it converges on the recorded binding instead of binding twice.
+ */
+export function memberScopeBindRequestId(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): AgentTeamRequestId {
+  return `agent-team:scope-bound:${memberId}:${scopeKey}` as AgentTeamRequestId
 }
 
 /**
@@ -218,6 +246,8 @@ export interface AgentTeamAuthorizedRolloverMemberSessionRequest {
   readonly handoffEventSeq: SessionSeq
   /** Why the rollover happened: the model asked, or honored a pressure notice. */
   readonly trigger: 'model' | 'pressure'
+  /** The work domain to move; absent means the legacy `default` domain. */
+  readonly scopeKey?: AgentTeamMemberScopeKey | undefined
   /** Seed source Session for a checkpoint return; absent on a fresh rollover. */
   readonly sourceSessionId?: SessionId
   /** Exclusive end of the seeded source prefix (its exact length in the source log). */
@@ -351,6 +381,19 @@ interface AgentTeamDurableMemberResult {
 
 export type { AgentTeamDurableMemberResult }
 
+/**
+ * Result of binding one work domain to the Session its first delivery runs on.
+ * The binding is the answer that matters, but it is a durable operation like
+ * every other one, so its receipt travels with it: a retry then names the
+ * operation it resolved instead of answering with an unidentified binding.
+ */
+interface AgentTeamMemberScopeBoundResult {
+  readonly receipt: AgentTeamOperationReceipt
+  readonly binding: AgentTeamMemberScopeSession
+}
+
+export type { AgentTeamMemberScopeBoundResult }
+
 interface Confirmation {
   readonly actor: AgentTeamMemberId
   readonly workspaceId: WorkspaceId
@@ -425,10 +468,17 @@ interface Projection {
   /** Ref index over the Message facts, written by `appendMessageFact` alone. */
   readonly messagesByRef: Map<AgentTeamMessageRef, AgentTeamMessage>
   readonly attentionByThread: Map<AgentTeamThreadRef, Set<AgentTeamMemberId>>
-  /** Latest retired Session id per Member, from the most recent renewal or rollover record. */
-  readonly previousSessions: Map<AgentTeamMemberId, SessionId>
-  /** Latest rollover seed envelope per Member, keyed to its target Session; absent on fresh rollovers and renewals. */
-  readonly rolloverSeeds: Map<AgentTeamMemberId, { readonly targetSessionId: SessionId; readonly sourceSessionId: SessionId; readonly sourceThroughSeq: SessionLogOffset; readonly checkpointRef: AgentTeamContextCheckpointRef }>
+  /**
+   * Member Session buckets: the Session each work domain runs on, for every
+   * domain but `default`. The default domain is deliberately not stored here —
+   * it IS `member.sessionId`, which is what makes a ledger recorded before
+   * buckets replay into exactly the behaviour it had.
+   */
+  readonly memberScopes: Map<AgentTeamMemberId, Map<AgentTeamMemberScopeKey, AgentTeamMemberScopeSession>>
+  /** Latest retired Session id per Member and work domain, from the most recent renewal or rollover record. */
+  readonly previousSessions: Map<AgentTeamMemberId, Map<AgentTeamMemberScopeKey, SessionId>>
+  /** Latest rollover seed envelope per Member and work domain, keyed to its target Session; absent on fresh rollovers and renewals. */
+  readonly rolloverSeeds: Map<AgentTeamMemberId, Map<AgentTeamMemberScopeKey, { readonly targetSessionId: SessionId; readonly sourceSessionId: SessionId; readonly sourceThroughSeq: SessionLogOffset; readonly checkpointRef: AgentTeamContextCheckpointRef }>>
   /** Top-level anchor Message per Thread; the first topLevel Message wins, like the linear scan it replaces. */
   readonly anchorByThread: Map<AgentTeamThreadRef, AgentTeamMessage>
   /** Display ordinal per Task, in per-Channel creation order; workspace filtering happens at read time. */
@@ -458,7 +508,7 @@ function emptyProjection(): Projection {
     claims: new Map(), tasks: new Map(), threads: new Map(), attention: new Map(), directMarkers: new Map(), activityMarkers: new Map(),
     orderedFacts: [], claimsByTask: new Map(), humanTodos: new Map(), humanTodosByThread: new Map(), factsByThread: new Map(), channelRefByThread: new Map(), mentionsByMessage: new Map(), messageCountByThread: new Map(),
     messagesByRef: new Map(),
-    attentionByThread: new Map(), previousSessions: new Map(), rolloverSeeds: new Map(),
+    attentionByThread: new Map(), previousSessions: new Map(), rolloverSeeds: new Map(), memberScopes: new Map(),
     anchorByThread: new Map(), taskNumberByTask: new Map(), taskCountByChannel: new Map(), attentionThreadsByMember: new Map(),
     threadsByWriter: new Map(),
     directMarkersByMember: new Map(), activityMarkersByMember: new Map(), observationsByThread: new Map() }
@@ -840,12 +890,18 @@ export class AgentTeamLedger {
       this.assertHumanActor(request.actor)
       const prior = this.requireMember(request.memberId)
       if (prior.state !== 'enabled') throw new Error(`Agent Member '${prior.handle}' is ${prior.state}; only enabled Members can start from a new context`)
-      if (prior.sessionId === request.sessionId) throw new Error(`Agent Member '${prior.handle}' already runs Session '${request.sessionId}'`)
+      const scoped = request.scopeKey !== undefined && request.scopeKey !== DEFAULT_MEMBER_SCOPE_KEY
+      const previousSessionId = scoped ? this.memberScopeSessionFor(request.memberId, request.scopeKey!)?.sessionId : prior.sessionId
+      if (previousSessionId === undefined) throw new Error(`Agent Member '${prior.handle}' holds no Session for work domain '${request.scopeKey!}'`)
+      if (previousSessionId === request.sessionId) throw new Error(`Agent Member '${prior.handle}' already runs Session '${request.sessionId}'`)
       const member = Object.freeze({ ...prior, sessionId: request.sessionId })
       const operation: AgentTeamMemberSessionRenewedOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/member-session-renewed',
-        data: Object.freeze({ member, previousSessionId: prior.sessionId }),
+        data: Object.freeze({ member, previousSessionId, ...(scoped ? { scopeKey: request.scopeKey } : {}) }),
       })
+      // The invariant replay will re-derive, checked on the write path from the
+      // same projection state, so the two can never disagree about validity.
+      if (scoped) this.assertScopedTransition(this.state, operation, request.scopeKey!)
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
       return this.committed(this.memberResult(operation))
@@ -872,8 +928,11 @@ export class AgentTeamLedger {
       const prior = this.requireMember(request.memberId)
       if (request.actor.memberId !== request.memberId) throw new Error(`Agent Member '${prior.handle}' cannot roll over another Member's Session`)
       if (prior.state !== 'enabled') throw new Error(`Agent Member '${prior.handle}' is ${prior.state}; only enabled Members can roll over their Session`)
-      if (prior.sessionId === request.newSessionId) throw new Error(`Agent Member '${prior.handle}' already runs Session '${request.newSessionId}'`)
-      if (prior.sessionId !== request.previousSessionId) throw new Error(`Agent Member '${prior.handle}' is no longer bound to Session '${request.previousSessionId}'`)
+      const scoped = request.scopeKey !== undefined && request.scopeKey !== DEFAULT_MEMBER_SCOPE_KEY
+      const boundSessionId = scoped ? this.memberScopeSessionFor(request.memberId, request.scopeKey!)?.sessionId : prior.sessionId
+      if (boundSessionId === undefined) throw new Error(`Agent Member '${prior.handle}' holds no Session for work domain '${request.scopeKey!}'`)
+      if (boundSessionId === request.newSessionId) throw new Error(`Agent Member '${prior.handle}' already runs Session '${request.newSessionId}'`)
+      if (boundSessionId !== request.previousSessionId) throw new Error(`Agent Member '${prior.handle}' is no longer bound to Session '${request.previousSessionId}'`)
       if ((request.checkpointRef !== undefined) !== (request.sourceSessionId !== undefined)) throw new Error('rollover checkpoint fields must appear together')
       if (request.sourceSessionId !== undefined && request.sourceThroughSeq === undefined) throw new Error('rollover checkpoint seed requires a through sequence')
       if (request.sourceThroughSeq !== undefined && request.sourceSessionId === undefined) throw new Error('rollover through sequence requires a source Session')
@@ -886,14 +945,47 @@ export class AgentTeamLedger {
           newSessionId: request.newSessionId,
           handoffEventSeq: request.handoffEventSeq,
           trigger: request.trigger,
+          ...(scoped ? { scopeKey: request.scopeKey } : {}),
           ...(request.sourceSessionId === undefined ? {} : { sourceSessionId: request.sourceSessionId }),
           ...(request.sourceThroughSeq === undefined ? {} : { sourceThroughSeq: request.sourceThroughSeq }),
           ...(request.checkpointRef === undefined ? {} : { checkpointRef: request.checkpointRef }),
         }),
       })
+      if (scoped) this.assertScopedTransition(this.state, operation, request.scopeKey!)
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
       return this.committed(this.memberResult(operation))
+    })
+  }
+
+  /**
+   * Bind one work domain to the Session its first delivery runs on. Called
+   * lazily by the Host: a Member only ever gains a context for a domain that
+   * actually has facts to deliver, so a Member that talks in one discussion
+   * holds one extra context and not one per Thread it has seen.
+   */
+  bindMemberScopeSession(request: AgentTeamAuthorizedBindMemberScopeRequest): Promise<AgentTeamLedgerResult<AgentTeamMemberScopeBoundResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameMemberScopeBound(existing, request)
+        return this.resolved(this.memberScopeBoundResult(existing))
+      }
+      this.assertHumanActor(request.actor)
+      const member = this.requireMember(request.memberId)
+      if (member.state !== 'enabled') throw new Error(`Agent Member '${member.handle}' is ${member.state}; only enabled Members can bind a work domain`)
+      if (!this.participatesIn(request.memberId, request.workspaceId)) throw new Error(`Agent Member '${member.handle}' does not participate in this Workspace`)
+      // Re-derived from the key, then held to the same invariant replay
+      // enforces: the write path and the read path share one authority.
+      const binding = memberScopeSession(request.binding.scopeKey, request.binding.sessionId)
+      this.assertMemberScopeBinding(this.state, request.memberId, binding)
+      const operation: AgentTeamMemberScopeSessionBoundOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/member-scope-session-bound',
+        data: Object.freeze({ memberId: request.memberId, binding }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.memberScopeBoundResult(operation))
     })
   }
 
@@ -902,29 +994,52 @@ export class AgentTeamLedger {
   }
 
   /**
-   * The retired Session this Member most recently left through a renewal or
-   * rollover — the lineage parent a crash between the durable binding commit
-   * and the new Session's activation must reconstruct a handoff from. Read
-   * from the audit projection; the Member record itself only names the
-   * current Session.
+   * Every Session bucket this Member holds, the default domain first: its
+   * `default` binding is the Member record's own `sessionId`, so a ledger
+   * recorded before buckets reports exactly the one Session it always had and
+   * a Member that never received a scoped delivery holds no extra context.
    */
-  previousSessionForMember(memberId: AgentTeamMemberId): SessionId | undefined {
-    return this.state.previousSessions.get(memberId)
+  memberScopeSessions(memberId: AgentTeamMemberId): readonly AgentTeamMemberScopeSession[] {
+    const member = this.state.members.get(memberId)
+    if (member === undefined) return []
+    return Object.freeze([
+      memberScopeSession(DEFAULT_MEMBER_SCOPE_KEY, member.sessionId),
+      ...this.state.memberScopes.get(memberId)?.values() ?? [],
+    ])
+  }
+
+  /** The Session one work domain runs on, or undefined when it holds no binding. */
+  memberScopeSessionFor(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): AgentTeamMemberScopeSession | undefined {
+    if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) {
+      const member = this.state.members.get(memberId)
+      return member === undefined ? undefined : memberScopeSession(scopeKey, member.sessionId)
+    }
+    return this.state.memberScopes.get(memberId)?.get(scopeKey)
   }
 
   /**
-   * The latest session transition this Member committed: the retired Session
-   * and the target it moved onto, through either a renewal or a rollover.
-   * Crash recovery binds carried-input redelivery to the recorded target —
-   * the CURRENT Session being that target proves the old generation's
-   * unconsumed input still belongs here, regardless of whether the handoff
-   * itself already landed.
+   * The retired Session of one work domain, from its most recent renewal or
+   * rollover — the lineage parent a crash between the durable binding commit
+   * and the new Session's activation must reconstruct a handoff from. Read from
+   * the audit projection; the binding itself only names the current Session.
    */
-  lastTransitionForMember(memberId: AgentTeamMemberId): { readonly previousSessionId: SessionId; readonly targetSessionId: SessionId } | undefined {
-    const previousSessionId = this.state.previousSessions.get(memberId)
-    const member = this.state.members.get(memberId)
-    if (previousSessionId === undefined || member === undefined) return undefined
-    return { previousSessionId, targetSessionId: member.sessionId }
+  previousSessionForMember(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): SessionId | undefined {
+    return this.state.previousSessions.get(memberId)?.get(scopeKey)
+  }
+
+  /**
+   * The latest session transition one work domain committed: the retired
+   * Session and the target it moved onto, through either a renewal or a
+   * rollover. Crash recovery binds carried-input redelivery to the recorded
+   * target — the domain's CURRENT Session being that target proves the old
+   * generation's unconsumed input still belongs here, regardless of whether the
+   * handoff itself already landed.
+   */
+  lastTransitionForMember(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): { readonly previousSessionId: SessionId; readonly targetSessionId: SessionId } | undefined {
+    const previousSessionId = this.state.previousSessions.get(memberId)?.get(scopeKey)
+    const targetSessionId = this.memberScopeSessionFor(memberId, scopeKey)?.sessionId
+    if (previousSessionId === undefined || targetSessionId === undefined) return undefined
+    return { previousSessionId, targetSessionId }
   }
 
   /**
@@ -945,8 +1060,8 @@ export class AgentTeamLedger {
    * rollover clears the envelope. Crash recovery reads this to rebuild the
    * child generation from the recorded seed instead of an empty context.
    */
-  rolloverSeedForMember(memberId: AgentTeamMemberId, targetSessionId: SessionId): { readonly sourceSessionId: SessionId; readonly sourceThroughSeq: SessionLogOffset; readonly checkpointRef: AgentTeamContextCheckpointRef } | undefined {
-    const seed = this.state.rolloverSeeds.get(memberId)
+  rolloverSeedForMember(memberId: AgentTeamMemberId, targetSessionId: SessionId, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): { readonly sourceSessionId: SessionId; readonly sourceThroughSeq: SessionLogOffset; readonly checkpointRef: AgentTeamContextCheckpointRef } | undefined {
+    const seed = this.state.rolloverSeeds.get(memberId)?.get(scopeKey)
     // Bind the envelope to its recorded target: a later renewal or fresh
     // rollover that reused or replaced the binding must never consume an
     // older generation's seed.
@@ -2333,6 +2448,12 @@ export class AgentTeamLedger {
       case 'team/member-updated':
       case 'team/member-removed':
         return this.memberWorkspaceScopes(operation.data.member.memberId)
+      case 'team/member-scope-session-bound':
+        // The binding is Member-private runtime state, but it is this Member's
+        // surfaces that may have changed: the same Workspace scopes every other
+        // Member-lifecycle operation wakes, so a roster or presence reader
+        // rederives instead of showing a Member whose domains moved.
+        return this.memberWorkspaceScopes(operation.data.memberId)
       case 'team/member-archived':
         return this.withReleasedActivityScopes(
           this.memberWorkspaceScopes(operation.data.member.memberId),
@@ -2452,6 +2573,7 @@ export class AgentTeamLedger {
       case 'team/member-context-cleared':
       case 'team/member-session-renewed':
       case 'team/member-session-rolled-over':
+      case 'team/member-scope-session-bound':
       case 'team/member-updated':
       case 'team/channel-member-added':
       case 'team/thread-read':
@@ -2561,6 +2683,10 @@ export class AgentTeamLedger {
     if (operation.kind === 'team/member-session-renewed') {
       assertHuman()
       const prior = projection.members.get(operation.data.member.memberId)
+      if (operation.data.scopeKey !== undefined && operation.data.scopeKey !== DEFAULT_MEMBER_SCOPE_KEY) {
+        this.assertScopedTransition(projection, operation, operation.data.scopeKey)
+        return
+      }
       // The renewal moves exactly the sessionId: the prior Member must be
       // enabled on the recorded previous Session, and every other fact must
       // carry over unchanged.
@@ -2578,6 +2704,11 @@ export class AgentTeamLedger {
       const actorMember = assertMember()
       const prior = projection.members.get(operation.data.member.memberId)
       if (actorMember.memberId !== operation.data.member.memberId) throw new Error('rolled-over Member must match its actor')
+      if (operation.data.scopeKey !== undefined && operation.data.scopeKey !== DEFAULT_MEMBER_SCOPE_KEY) {
+        this.assertScopedTransition(projection, operation, operation.data.scopeKey)
+        if (operation.data.member.sessionId !== operation.data.newSessionId) throw new Error('invalid Member session rollover')
+        return
+      }
       if (prior === undefined || prior.state !== 'enabled'
         || prior.sessionId !== operation.data.previousSessionId
         || operation.data.member.sessionId !== operation.data.newSessionId
@@ -2586,6 +2717,11 @@ export class AgentTeamLedger {
       if (operation.data.sourceSessionId !== undefined && operation.data.sourceThroughSeq === undefined) throw new Error('rolled-over checkpoint seed requires a through sequence')
       if (operation.data.sourceThroughSeq !== undefined && operation.data.sourceSessionId === undefined) throw new Error('rolled-over through sequence requires a source Session')
       if ((operation.data.checkpointRef !== undefined) !== (operation.data.sourceSessionId !== undefined)) throw new Error('rolled-over checkpoint fields must appear together')
+      return
+    }
+    if (operation.kind === 'team/member-scope-session-bound') {
+      assertHuman()
+      this.assertMemberScopeBinding(projection, operation.data.memberId, operation.data.binding)
       return
     }
     if (operation.kind === 'team/channel-updated') {
@@ -3179,26 +3315,42 @@ export class AgentTeamLedger {
       // untouched; the Host recreated the live Session empty under the same id.
       return
     }
-    if (operation.kind === 'team/member-session-renewed') {
-      target.members.set(operation.data.member.memberId, operation.data.member)
-      target.previousSessions.set(operation.data.member.memberId, operation.data.previousSessionId)
-      // A Human-side renewal is always a fresh start: a stale checkpoint
-      // seed from an earlier rollover must never re-seed it.
-      target.rolloverSeeds.delete(operation.data.member.memberId)
+    if (operation.kind === 'team/member-session-renewed' || operation.kind === 'team/member-session-rolled-over') {
+      const scopeKey = operation.data.scopeKey ?? DEFAULT_MEMBER_SCOPE_KEY
+      // A renewal or rollover of a work domain moves that domain's binding and
+      // nothing else: the Member row keeps naming the default domain, so it is
+      // not rewritten. The default domain's own transition is the legacy one,
+      // where the Member row IS the binding.
+      if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) target.members.set(operation.data.member.memberId, operation.data.member)
+      else {
+        const scopes = target.memberScopes.get(operation.data.member.memberId) ?? new Map<AgentTeamMemberScopeKey, AgentTeamMemberScopeSession>()
+        scopes.set(scopeKey, memberScopeSession(scopeKey, operation.data.member.sessionId))
+        target.memberScopes.set(operation.data.member.memberId, scopes)
+      }
+      const last = target.previousSessions.get(operation.data.member.memberId) ?? new Map<AgentTeamMemberScopeKey, SessionId>()
+      last.set(scopeKey, operation.data.previousSessionId)
+      target.previousSessions.set(operation.data.member.memberId, last)
+      const seeds = target.rolloverSeeds.get(operation.data.member.memberId) ?? new Map<AgentTeamMemberScopeKey, { readonly targetSessionId: SessionId; readonly sourceSessionId: SessionId; readonly sourceThroughSeq: SessionLogOffset; readonly checkpointRef: AgentTeamContextCheckpointRef }>()
+      const { sourceSessionId, sourceThroughSeq, checkpointRef } = operation.kind === 'team/member-session-rolled-over'
+        ? operation.data
+        : { sourceSessionId: undefined, sourceThroughSeq: undefined, checkpointRef: undefined }
+      // A checkpoint return records its seed envelope, keyed to the domain it
+      // was recorded for: a crash between this commit and the new Session's
+      // activation rebuilds that child from the recorded source. A renewal is
+      // always a fresh start — a stale seed from an earlier rollover must never
+      // re-seed it — so the domain's envelope is dropped either way.
+      if (sourceSessionId !== undefined && sourceThroughSeq !== undefined && checkpointRef !== undefined) {
+        seeds.set(scopeKey, { targetSessionId: operation.data.member.sessionId, sourceSessionId, sourceThroughSeq, checkpointRef })
+      } else {
+        seeds.delete(scopeKey)
+      }
+      target.rolloverSeeds.set(operation.data.member.memberId, seeds)
       return
     }
-    if (operation.kind === 'team/member-session-rolled-over') {
-      target.members.set(operation.data.member.memberId, operation.data.member)
-      target.previousSessions.set(operation.data.member.memberId, operation.data.previousSessionId)
-      // A checkpoint return records its seed envelope: a crash between this
-      // commit and the new Session's activation rebuilds the child from the
-      // recorded source instead of an empty context.
-      const { sourceSessionId, sourceThroughSeq, checkpointRef } = operation.data
-      if (sourceSessionId !== undefined && sourceThroughSeq !== undefined && checkpointRef !== undefined) {
-        target.rolloverSeeds.set(operation.data.member.memberId, { targetSessionId: operation.data.newSessionId, sourceSessionId, sourceThroughSeq, checkpointRef })
-      } else {
-        target.rolloverSeeds.delete(operation.data.member.memberId)
-      }
+    if (operation.kind === 'team/member-scope-session-bound') {
+      const scopes = target.memberScopes.get(operation.data.memberId) ?? new Map<AgentTeamMemberScopeKey, AgentTeamMemberScopeSession>()
+      scopes.set(operation.data.binding.scopeKey, operation.data.binding)
+      target.memberScopes.set(operation.data.memberId, scopes)
       return
     }
     if (operation.kind === 'team/channel-updated') {
@@ -4618,7 +4770,15 @@ export class AgentTeamLedger {
 
   private assertSameMemberSessionRenewed(operation: AgentTeamOperation, request: AgentTeamAuthorizedRenewMemberSessionRequest): asserts operation is AgentTeamMemberSessionRenewedOperation {
     if (operation.kind !== 'team/member-session-renewed' || !this.sameActor(operation.actor, request.actor)
-      || operation.data.member.memberId !== request.memberId || operation.data.member.sessionId !== request.sessionId) this.throwRequestCollision(request.requestId)
+      || operation.data.member.memberId !== request.memberId || operation.data.member.sessionId !== request.sessionId
+      || (operation.data.scopeKey ?? DEFAULT_MEMBER_SCOPE_KEY) !== (request.scopeKey ?? DEFAULT_MEMBER_SCOPE_KEY)) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameMemberScopeBound(operation: AgentTeamOperation, request: AgentTeamAuthorizedBindMemberScopeRequest): asserts operation is AgentTeamMemberScopeSessionBoundOperation {
+    if (operation.kind !== 'team/member-scope-session-bound' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.memberId !== request.memberId
+      || operation.data.binding.scopeKey !== request.binding.scopeKey
+      || operation.data.binding.sessionId !== request.binding.sessionId) this.throwRequestCollision(request.requestId)
   }
 
   private assertSameMemberSessionRolledOver(operation: AgentTeamOperation, request: AgentTeamAuthorizedRolloverMemberSessionRequest): asserts operation is AgentTeamMemberSessionRolledOverOperation {
@@ -4628,7 +4788,8 @@ export class AgentTeamLedger {
       || operation.data.trigger !== request.trigger
       || operation.data.sourceSessionId !== request.sourceSessionId
       || operation.data.sourceThroughSeq !== request.sourceThroughSeq
-      || operation.data.checkpointRef !== request.checkpointRef) this.throwRequestCollision(request.requestId)
+      || operation.data.checkpointRef !== request.checkpointRef
+      || (operation.data.scopeKey ?? DEFAULT_MEMBER_SCOPE_KEY) !== (request.scopeKey ?? DEFAULT_MEMBER_SCOPE_KEY)) this.throwRequestCollision(request.requestId)
   }
 
   private assertSameChannelUpdate(operation: AgentTeamOperation, request: AgentTeamAuthorizedUpdateChannelRequest): asserts operation is AgentTeamChannelUpdatedOperation {
@@ -4814,6 +4975,58 @@ export class AgentTeamLedger {
     return left.threadRef === right.threadRef && left.taskRef === right.taskRef && left.revision === right.revision
   }
 
+  /**
+   * Whether one work domain's durable binding is well formed, against the very
+   * projection it joins. The write path and replay call this same authority, so
+   * a binding that commit accepts cannot fail replay, and one replay rejects
+   * can never be written.
+   */
+  private assertMemberScopeBinding(projection: Projection, memberId: AgentTeamMemberId, binding: AgentTeamMemberScopeSession): void {
+    // Every namespace field is derived from the key, so a binding that
+    // disagrees with its own key is a corrupt record, not a variant shape.
+    if (!isDeepStrictEqual(memberScopeSession(binding.scopeKey, binding.sessionId), binding)) throw new Error('invalid Member scope binding')
+    const { scopeKind, scopeRef } = parseMemberScopeKey(binding.scopeKey)
+    // The default domain IS `member.sessionId`; binding it as well would give
+    // one Session two authorities and let a transition move the wrong one.
+    if (scopeKind === 'default') throw new Error('the default Member scope is the Member Session itself')
+    const member = projection.members.get(memberId)
+    const scopes = projection.memberScopes.get(memberId)
+    if (member === undefined || member.state !== 'enabled' || binding.sessionId === member.sessionId
+      || scopes?.has(binding.scopeKey) === true
+      // One Session holds one context: two domains sharing it would deliver
+      // each other's facts into the same window, which is the whole defect this
+      // binding exists to remove.
+      || [...scopes?.values() ?? []].some(other => other.sessionId === binding.sessionId)) {
+      throw new Error('invalid Member scope binding')
+    }
+    // The domain's ref must be one this ledger knows: a binding to a Thread,
+    // Channel, or Member that never existed is state no reader can resolve.
+    const known = scopeRef !== undefined && (scopeKind === 'thread'
+      ? projection.threads.has(scopeRef as AgentTeamThreadRef)
+      : scopeKind === 'channel' ? projection.channels.has(scopeRef as AgentTeamChannelRef) : projection.members.has(scopeRef as AgentTeamMemberId))
+    if (!known) throw new Error('invalid Member scope binding ref')
+  }
+
+  /**
+   * A renewal or rollover inside one work domain: the domain's binding moves
+   * and the Member row does not. The recorded Member therefore still names
+   * every Member fact, and its `sessionId` names the domain's new Session
+   * rather than the default domain's — which is why the Member row is not
+   * rewritten from a scoped transition.
+   */
+  private assertScopedTransition(projection: Projection, operation: AgentTeamMemberSessionRenewedOperation | AgentTeamMemberSessionRolledOverOperation, scopeKey: AgentTeamMemberScopeKey): void {
+    const memberId = operation.data.member.memberId
+    const prior = projection.members.get(memberId)
+    const binding = projection.memberScopes.get(memberId)?.get(scopeKey)
+    if (prior === undefined || prior.state !== 'enabled' || binding === undefined) throw new Error('invalid Member session transition scope')
+    if (!this.sameMemberFacts(prior, operation.data.member)
+      // The default domain's Session must survive a scoped transition untouched,
+      // and the domain must move off the Session it was bound to.
+      || operation.data.member.sessionId === prior.sessionId
+      || binding.sessionId !== operation.data.previousSessionId
+      || binding.sessionId === operation.data.member.sessionId) throw new Error('invalid Member session transition scope')
+  }
+
   private sameMemberIdentity(left: AgentTeamAgentMember, right: AgentTeamAgentMember): boolean {
     return left.memberId === right.memberId && left.sessionId === right.sessionId && left.workspaceId === right.workspaceId
       && left.handle === right.handle && left.description === right.description && left.presetId === right.presetId
@@ -4870,6 +5083,10 @@ export class AgentTeamLedger {
 
   private channelUpdateResult(operation: AgentTeamChannelUpdatedOperation): AgentTeamUpdateChannelResult {
     return Object.freeze({ receipt: this.receipt(operation), channel: operation.data.channel })
+  }
+
+  private memberScopeBoundResult(operation: AgentTeamMemberScopeSessionBoundOperation): AgentTeamMemberScopeBoundResult {
+    return Object.freeze({ receipt: this.receipt(operation), binding: operation.data.binding })
   }
 
   private memberResult(operation: AgentTeamMemberAddedOperation | AgentTeamMemberSuspendedOperation | AgentTeamMemberResumedOperation | AgentTeamMemberSessionRestartedOperation | AgentTeamMemberSessionRenewedOperation | AgentTeamMemberSessionRolledOverOperation | AgentTeamMemberUpdatedOperation): AgentTeamDurableMemberResult {

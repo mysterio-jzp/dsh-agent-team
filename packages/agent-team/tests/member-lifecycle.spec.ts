@@ -28,6 +28,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { AgentTeamLedger } from '../src/ledger.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY } from '../src/member-scope.ts'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -576,7 +577,7 @@ describe('Agent Team Member lifecycle', () => {
     expect(restored).toMatchObject({ availability: 'archived', presence: 'unavailable' })
     expect(restored?.member.sessionId).toBe(added.status.member.sessionId)
     expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
     expect(ctx.agentTeam.view({ workspaceId }).members).toEqual([])
     expect(ctx.agentTeam.members().filter(item => item.member.memberId === memberId)).toHaveLength(1)
@@ -589,7 +590,7 @@ describe('Agent Team Member lifecycle', () => {
       handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
     const memberId = added.status.member.memberId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
-    const handle = ctx.agentTeam['handles'].get(memberId)!
+    const handle = ctx.agentTeam['handles'].get(memberId)!.get(DEFAULT_MEMBER_SCOPE_KEY)!
     vi.spyOn(handle, 'dispose').mockRejectedValueOnce(new Error('agent disposal failed (test seam)'))
 
     // Durable state says archived while the generation is still live — the
@@ -598,14 +599,14 @@ describe('Agent Team Member lifecycle', () => {
       .rejects.toThrow('agent disposal failed')
     expect(ctx.agentTeam.members().find(item => item.member.memberId === memberId)?.availability).toBe('archived')
     expect(ctx.agents.get(added.status.member.sessionId)).toBeDefined()
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(true)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(true)
 
     await teamFiber.dispose()
     await ctx.plugin(AgentTeam)
 
     expect(archived).toEqual([added.status.member.sessionId])
     expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
     expect(ctx.agentTeam.members().filter(item => item.member.memberId === memberId)).toHaveLength(1)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -633,7 +634,7 @@ describe('Agent Team Member lifecycle', () => {
 
     await expect(access(memoryPath)).rejects.toThrow()
     expect(archived).toEqual([added.status.member.sessionId])
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
     expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
@@ -677,17 +678,17 @@ describe('Agent Team Member lifecycle', () => {
       handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
     const memberId = added.status.member.memberId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
-    const handle = ctx.agentTeam['handles'].get(memberId)!
+    const handle = ctx.agentTeam['handles'].get(memberId)!.get(DEFAULT_MEMBER_SCOPE_KEY)!
     vi.spyOn(handle, 'dispose').mockRejectedValueOnce(new Error('agent disposal failed (test seam)'))
 
     await expect(ctx.agentTeam.suspendMember({ requestId: requestId('susp-boot'), memberId }))
       .rejects.toThrow('agent disposal failed')
     expect(ctx.agentTeam.members().find(item => item.member.memberId === memberId)?.availability).toBe('suspended')
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(true)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(true)
 
     const retried = await ctx.agentTeam.suspendMember({ requestId: requestId('susp-boot'), memberId })
     expect(retried.status.availability).toBe('suspended')
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
     expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
     // Suspended keeps the Session: nothing archives it, memory stays.
     expect(archived).toEqual([])
@@ -700,7 +701,7 @@ describe('Agent Team Member lifecycle', () => {
     expect(restored).toMatchObject({ availability: 'suspended', presence: 'unavailable' })
     expect(restored?.member.sessionId).toBe(added.status.member.sessionId)
     expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
     expect(archived).toEqual([])
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -711,17 +712,17 @@ describe('Agent Team Member lifecycle', () => {
     const added = await ctx.agentTeam.addMember({ requestId: requestId('susp-recover-add'), workspaceId,
       handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
     const memberId = added.status.member.memberId
-    const handle = ctx.agentTeam['handles'].get(memberId)!
+    const handle = ctx.agentTeam['handles'].get(memberId)!.get(DEFAULT_MEMBER_SCOPE_KEY)!
     vi.spyOn(handle, 'dispose').mockRejectedValueOnce(new Error('agent disposal failed (test seam)'))
     await expect(ctx.agentTeam.suspendMember({ requestId: requestId('susp-recover'), memberId }))
       .rejects.toThrow('agent disposal failed')
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(true)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(true)
 
     // The durable state already says no live generation, so explicit
     // recovery converges the stray handle instead of feeding it a resume.
     const recovered = await ctx.agentTeam.recoverMember({ requestId: requestId('susp-recover-recover'), workspaceId, memberId })
     expect(recovered.status.availability).toBe('suspended')
-    expect(ctx.agentTeam['handles'].has(memberId)).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
     expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
     expect(archived).toEqual([])
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()

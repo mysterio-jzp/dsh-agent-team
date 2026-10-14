@@ -12,6 +12,8 @@ import type {
   AgentTeamHumanTodo,
   AgentTeamInboxDelta,
   AgentTeamMemberId,
+  AgentTeamMemberScopeKey,
+  AgentTeamMemberScopeSession,
   AgentTeamMessage,
   AgentTeamStoredMessage,
   AgentTeamStoredThreadReadFact,
@@ -120,6 +122,13 @@ export interface AgentTeamMemberSessionRenewedOperation extends AgentTeamOperati
     readonly member: AgentTeamAgentMember
     /** The Session the Member ran on before this renewal. */
     readonly previousSessionId: SessionId
+    /**
+     * The work domain this Session transition acts on, when it is not the
+     * legacy `default` domain; absent means `default`. See
+     * {@link AgentTeamMemberScopeKey} on the rollover operation for the rule
+     * both transitions share.
+     */
+    readonly scopeKey?: AgentTeamMemberScopeKey | undefined
   }
 }
 
@@ -156,6 +165,37 @@ export interface AgentTeamMemberSessionRolledOverOperation extends AgentTeamOper
     readonly checkpointRef?: AgentTeamContextCheckpointRef
     /** Why the rollover happened: the model asked, or a pressure notice was honored. */
     readonly trigger: 'model' | 'pressure'
+    /**
+     * The work domain this transition acts on; absent means the legacy
+     * `default` domain, whose Session is `member.sessionId`.
+     *
+     * Both transitions read their target Session from their own Session field —
+     * `member.sessionId` for a renewal, `newSessionId` for a rollover. On a
+     * non-default domain the Member record rides along unchanged (its
+     * `sessionId` keeps naming the default domain) and that field names the
+     * domain's Session instead; replay then writes the domain binding and never
+     * the Member row, because a Session transition changes nothing else.
+     */
+    readonly scopeKey?: AgentTeamMemberScopeKey | undefined
+  }
+}
+
+/**
+ * First delivery into a work domain binds it to its own freshly created
+ * Session. The binding is created lazily — only a domain that actually has
+ * facts to deliver ever gets one, so a Member with one busy discussion holds
+ * one extra context and not a bucket per Thread it once saw.
+ *
+ * The Host is the executor and commits under the Team's Human authority, the
+ * same authority every other Host-side write carries. The Member record is
+ * untouched: a domain binding is not Member identity.
+ */
+export interface AgentTeamMemberScopeSessionBoundOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/member-scope-session-bound'
+  readonly data: {
+    readonly memberId: AgentTeamMemberId
+    /** The domain and the Session it runs on; its namespace fields agree with its key by construction. */
+    readonly binding: AgentTeamMemberScopeSession
   }
 }
 
@@ -469,6 +509,7 @@ export type AgentTeamOperation =
   | AgentTeamMemberContextClearedOperation
   | AgentTeamMemberSessionRenewedOperation
   | AgentTeamMemberSessionRolledOverOperation
+  | AgentTeamMemberScopeSessionBoundOperation
   | AgentTeamChannelUpdatedOperation
   | AgentTeamMemberUpdatedOperation
   | AgentTeamChannelMemberAddedOperation

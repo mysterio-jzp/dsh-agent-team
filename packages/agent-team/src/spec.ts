@@ -12,6 +12,7 @@ import type {
   AgentTeamContextCheckpointRef,
   AgentTeamHumanTodoRef,
   AgentTeamMemberId,
+  AgentTeamMemberScopeKey,
   AgentTeamMessageRef,
   AgentTeamOperation,
   AgentTeamOperationId,
@@ -25,6 +26,23 @@ const requestIdSchema = z.string().min(1).transform(value => value as AgentTeamR
 const memberIdSchema = z.string().regex(/^member:[^:]+$/).transform(value => value as AgentTeamMemberId)
 const workspaceIdSchema = z.string().min(1).transform(value => value as WorkspaceId)
 const sessionIdSchema = z.string().min(1).transform(value => value as SessionId)
+/**
+ * A Member Session bucket key: its namespace plus the immutable ref it names,
+ * or `default`. Refs already carry their own namespace, so a Thread key reads
+ * `thread:thread:<uuid>` — the kind, then the ref the fact itself carried.
+ * `thread` is the only namespace this bundle writes, so it is the only one the
+ * durable schema admits; anything else is a record no reader can resolve.
+ */
+const memberScopeKeySchema = z.string()
+  .regex(/^(default|thread:thread:[^:]+)$/)
+  .transform(value => value as AgentTeamMemberScopeKey)
+const memberScopeSessionSchema = z.object({
+  scopeKey: memberScopeKeySchema,
+  scopeKind: z.union([z.literal('thread'), z.literal('default')]),
+  // Absent on the default domain, which names no ref.
+  scopeRef: z.string().min(1).optional(),
+  sessionId: sessionIdSchema,
+}).strict()
 const sessionSeqSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(value => value as SessionSeq)
 const contextCheckpointRefSchema = z.string().regex(/^(context-checkpoint-[0-9a-f]{64}|team-boundary-[0-9a-f]{64})$/).transform(value => value as AgentTeamContextCheckpointRef)
 const channelRefSchema = z.string().regex(/^channel:[^:]+$/).transform(value => value as AgentTeamChannelRef)
@@ -415,7 +433,7 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-session-renewed'),
-    data: z.object({ member: memberSchema, previousSessionId: sessionIdSchema }).strict(),
+    data: z.object({ member: memberSchema, previousSessionId: sessionIdSchema, scopeKey: memberScopeKeySchema.optional() }).strict(),
   }).strict(),
   z.object({
     ...operationBase,
@@ -430,7 +448,14 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
       handoffEventSeq: sessionSeqSchema,
       checkpointRef: contextCheckpointRefSchema.optional(),
       trigger: z.enum(['model', 'pressure']),
+      scopeKey: memberScopeKeySchema.optional(),
     }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/member-scope-session-bound'),
+    data: z.object({ memberId: memberIdSchema, binding: memberScopeSessionSchema }).strict(),
   }).strict(),
   z.object({
     ...operationBase,

@@ -95,6 +95,40 @@ export interface AgentTeamMemberCapabilities {
   readonly skills?: { readonly allow?: readonly string[] } | undefined
 }
 
+/**
+ * Which work domain one Member Session bucket belongs to — the namespace its
+ * key encodes. `thread` is the granularity the Human fixed (one discussion, one
+ * bucket); a discussion's Task does not split it further.
+ */
+export type AgentTeamMemberScopeKind = 'thread' | 'default'
+
+/**
+ * Stable key of one Member Session bucket: `thread:<threadRef>` for one
+ * discussion, or `default` for facts that belong to no discussion (Member
+ * lifecycle, recovery, delivery) — including the single Session a ledger
+ * recorded before buckets holds.
+ *
+ * Built from immutable refs only: a Channel name or a Member handle would move
+ * the key under a rename. It is deliberately not derived from a Task, because a
+ * taskless discussion becomes taskful in place (`promoteThread`), and the domain
+ * must not change identity when it does.
+ */
+export type AgentTeamMemberScopeKey = Branded<'AgentTeamMemberScopeKey'>
+
+/**
+ * One Member's durable binding of a work domain to its own Session. The
+ * `default` domain is not stored as one of these: it IS `member.sessionId`,
+ * which is what keeps a ledger recorded before buckets replaying unchanged.
+ */
+export interface AgentTeamMemberScopeSession {
+  readonly scopeKey: AgentTeamMemberScopeKey
+  readonly scopeKind: AgentTeamMemberScopeKind
+  /** The immutable ref the kind names; absent on the `default` domain. */
+  readonly scopeRef?: string | undefined
+  /** The Session this domain runs on; every domain has its own context. */
+  readonly sessionId: SessionId
+}
+
 /** Durable identity and lifecycle intent of one team-managed Agent. */
 export interface AgentTeamAgentMember {
   readonly memberId: AgentTeamMemberId

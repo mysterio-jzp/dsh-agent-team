@@ -200,90 +200,102 @@ export const TEAM_PRESSURE_GATE_SCHEMA = z.object({
 })
 
 export interface TeamPressurePolicyOptions {
-  /** Resolve the live Agent of one Member; absent means nothing to read. */
-  readonly agentForMember: (memberId: AgentTeamMemberId) => Agent | undefined
+  /**
+   * Resolve the live Agent of one pressure subject. The subject is the live
+   * Session, not the Member: one Member runs one Session per work domain, and
+   * the engine's own subject key is what keeps each domain's notice latch,
+   * overflow-recovery chain and admission view its own.
+   */
+  readonly agentForSession: (sessionId: SessionId) => Agent | undefined
+  /** The Member one live Session belongs to; absent means the Session is not Team's. */
+  readonly memberForSession: (sessionId: SessionId) => AgentTeamMemberId | undefined
   /** Effective budgets for one Member's current route; undefined means unknown. */
   readonly limitsForAgent: (agent: Agent) => PressureLimits | undefined | Promise<PressureLimits | undefined>
   /** The reduction capability in one Member's preset scope, or absent when it mounts none. */
   readonly compactionForAgent: (agent: Agent) => PressureCompaction | undefined
   /** The model-visible active-Claim labels for one Member's notice. */
   readonly activeClaimLabels: (memberId: AgentTeamMemberId) => readonly string[]
-  /** The model-visible running-job labels for one Member's notice. */
-  readonly runningJobLabels: (memberId: AgentTeamMemberId) => readonly string[]
+  /** The model-visible running-job labels for one Session's notice. */
+  readonly runningJobLabels: (sessionId: SessionId) => readonly string[]
   /** The long-gap gate's thresholds; an omitted field keeps the engine's default. */
   readonly gate?: PressureGate | undefined
   /**
-   * The relatedness judge in one Member's scope, when the deployment installed
-   * one. Absent — the member itself, or the whole deployment — switches the
+   * The relatedness judge in one Session's scope, when the deployment installed
+   * one. Absent — the surface itself, or the whole deployment — switches the
    * long-gap gate off; a missing judge is a deployment choice, never a failure.
    */
   readonly judgeForAgent?: ((agent: Agent) => PressureJudgement | undefined) | undefined
   /** Report a blocked request with a recoverable diagnostic. */
-  readonly failed: (memberId: AgentTeamMemberId, diagnostic: string) => void
-  /** Log one engine diagnostic, attributable to the Member it names. */
-  readonly log: (message: string, memberId: AgentTeamMemberId) => void
+  readonly failed: (sessionId: SessionId, diagnostic: string) => void
+  /** Log one engine diagnostic, attributable to the Session it names. */
+  readonly log: (message: string, sessionId: SessionId) => void
 }
 
 /**
- * Team's `PressurePolicyHost`. Every member is resolved per Member at call
- * time, because one policy serves every Member this Host runs. The readings
- * that need the step's own argument are fed for exactly one policy call —
- * {@link beginStep} to {@link endStep} — so a judgement is never made from a
- * neighbour Member's messages.
+ * Team's `PressurePolicyHost`, one subject per live Member Session. Every
+ * reading is resolved per Session at call time, because one policy serves every
+ * Session this Host runs and each work domain must be judged, latched and
+ * reduced on its own context. The readings that need the step's own argument
+ * are fed for exactly one policy call — {@link beginStep} to {@link endStep} —
+ * so a judgement is never made from a neighbouring Session's messages.
  */
-export class TeamPressurePolicyHost implements PressurePolicyHost<AgentTeamMemberId> {
+export class TeamPressurePolicyHost implements PressurePolicyHost<SessionId> {
   readonly pluginId = AGENT_TEAM_PLUGIN_ID
-  private readonly admitting = new Map<AgentTeamMemberId, readonly UserMessage[]>()
+  private readonly admitting = new Map<SessionId, readonly UserMessage[]>()
 
   constructor(private readonly options: TeamPressurePolicyOptions) {}
 
   /** Record the input one step is admitting: the host's own pre-step argument. */
-  beginStep(memberId: AgentTeamMemberId, messages: readonly UserMessage[]): void {
-    this.admitting.set(memberId, messages)
+  beginStep(sessionId: SessionId, messages: readonly UserMessage[]): void {
+    this.admitting.set(sessionId, messages)
   }
 
   /** Forget that input again: the view lives only while its policy call runs. */
-  endStep(memberId: AgentTeamMemberId): void {
-    this.admitting.delete(memberId)
+  endStep(sessionId: SessionId): void {
+    this.admitting.delete(sessionId)
   }
 
-  limitsFor(memberId: AgentTeamMemberId): PressureLimits | undefined | Promise<PressureLimits | undefined> {
-    const agent = this.options.agentForMember(memberId)
+  limitsFor(sessionId: SessionId): PressureLimits | undefined | Promise<PressureLimits | undefined> {
+    const agent = this.options.agentForSession(sessionId)
     return agent === undefined ? undefined : this.options.limitsForAgent(agent)
   }
 
   /**
-   * The Member's durable surface, for proving a reduction. Without a live Agent
-   * there is nothing to measure; the policy reaches this only for a Member whose
-   * limits resolved, which already requires one.
+   * This Session's durable surface, for proving a reduction. Without a live
+   * Agent there is nothing to measure; the policy reaches this only for a
+   * Session whose limits resolved, which already requires one.
    */
-  surfaceFor(memberId: AgentTeamMemberId): PressureSurface {
-    const agent = this.options.agentForMember(memberId)
+  surfaceFor(sessionId: SessionId): PressureSurface {
+    const agent = this.options.agentForSession(sessionId)
     if (agent === undefined) return { generation: 0 }
     const tokens = agent.ctx.get('tokenMeter')?.measure(agent.session)?.totalTokens
     return { generation: agent.session.surface.replaceGeneration, ...(tokens === undefined ? {} : { tokens }) }
   }
 
-  compactionFor(memberId: AgentTeamMemberId): PressureCompaction | undefined {
-    const agent = this.options.agentForMember(memberId)
+  compactionFor(sessionId: SessionId): PressureCompaction | undefined {
+    const agent = this.options.agentForSession(sessionId)
     return agent === undefined ? undefined : this.options.compactionForAgent(agent)
   }
 
   /**
-   * The Member's durable log, as the notice latch and the idle gap read it. The
-   * engine's contract asks for the span's own events and the inherited count
+   * This Session's durable log, as the notice latch and the idle gap read it.
+   * The engine's contract asks for the span's own events and the inherited count
    * beside them; the `ownEvents()` reader is what states that boundary today.
    */
-  logSpanFor(memberId: AgentTeamMemberId): PressureLogSpan {
-    const agent = this.options.agentForMember(memberId)
+  logSpanFor(sessionId: SessionId): PressureLogSpan {
+    const agent = this.options.agentForSession(sessionId)
     if (agent === undefined) return { sessionId: '', inheritedEventCount: 0, events: [] }
     return { sessionId: agent.session.id, inheritedEventCount: agent.session.inheritedEventCount, events: agent.session.ownEvents() }
   }
 
-  inHandFor(memberId: AgentTeamMemberId): PressureInHand {
+  inHandFor(sessionId: SessionId): PressureInHand {
+    const memberId = this.options.memberForSession(sessionId)
     return {
-      inHand: this.options.activeClaimLabels(memberId),
-      jobs: this.options.runningJobLabels(memberId),
+      // Durable work belongs to the Member, not to one of its domains: every
+      // domain's notice states the same claims, and only the jobs are the
+      // surface's own.
+      inHand: memberId === undefined ? [] : this.options.activeClaimLabels(memberId),
+      jobs: this.options.runningJobLabels(sessionId),
     }
   }
 
@@ -293,9 +305,9 @@ export class TeamPressurePolicyHost implements PressurePolicyHost<AgentTeamMembe
    * what a human sent, and a rederived Team notification is neither the request
    * being held nor evidence of what the request continues.
    */
-  relatednessFor(memberId: AgentTeamMemberId): PressureRelatedness | undefined {
-    const agent = this.options.agentForMember(memberId)
-    const admitted = this.admitting.get(memberId)
+  relatednessFor(sessionId: SessionId): PressureRelatedness | undefined {
+    const agent = this.options.agentForSession(sessionId)
+    const admitted = this.admitting.get(sessionId)
     if (agent === undefined || admitted === undefined) return undefined
     const input = externalInputText(admitted)
     if (input.trim().length === 0) return undefined
@@ -317,31 +329,31 @@ export class TeamPressurePolicyHost implements PressurePolicyHost<AgentTeamMembe
       .slice(-RECENT_INPUT_LIMIT)
   }
 
-  judgeFor(memberId: AgentTeamMemberId): PressureJudgement | undefined {
+  judgeFor(sessionId: SessionId): PressureJudgement | undefined {
     const resolve = this.options.judgeForAgent
-    const agent = this.options.agentForMember(memberId)
+    const agent = this.options.agentForSession(sessionId)
     if (resolve === undefined || agent === undefined) return undefined
     return resolve(agent)
   }
 
   /**
-   * Steer one notice into the Member's running turn. A Member with no live
+   * Steer one notice into this Session's running turn. A Session with no live
    * Agent throws rather than reporting success: the caller holds a step on the
    * strength of this call, and a held step whose instruction never arrived
-   * would stall the Member behind a message that does not exist.
+   * would stall the surface behind a message that does not exist.
    */
-  steer(memberId: AgentTeamMemberId, notice: UserMessage): void {
-    const agent = this.options.agentForMember(memberId)
-    if (agent === undefined) throw new Error('the Member has no live Agent to steer the notice into')
+  steer(sessionId: SessionId, notice: UserMessage): void {
+    const agent = this.options.agentForSession(sessionId)
+    if (agent === undefined) throw new Error('the Session has no live Agent to steer the notice into')
     agent.steer(notice)
   }
 
-  failedFor(memberId: AgentTeamMemberId, diagnostic: string): void {
-    this.options.failed(memberId, diagnostic)
+  failedFor(sessionId: SessionId, diagnostic: string): void {
+    this.options.failed(sessionId, diagnostic)
   }
 
-  log(message: string, memberId: AgentTeamMemberId): void {
-    this.options.log(message, memberId)
+  log(message: string, sessionId: SessionId): void {
+    this.options.log(message, sessionId)
   }
 }
 
@@ -354,29 +366,29 @@ export class TeamPressurePolicyHost implements PressurePolicyHost<AgentTeamMembe
  */
 export class TeamPressurePolicy {
   private readonly host: TeamPressurePolicyHost
-  private readonly policy: ContextPressurePolicy<AgentTeamMemberId>
+  private readonly policy: ContextPressurePolicy<SessionId>
 
   constructor(options: TeamPressurePolicyOptions) {
     this.host = new TeamPressurePolicyHost(options)
     this.policy = new ContextPressurePolicy(this.host, TEAM_PRESSURE_TEXT, options.gate)
   }
 
-  /** The pre-step decision for one Member, with the input that step claims. */
-  async onPreStep(memberId: AgentTeamMemberId, messages: readonly UserMessage[], signal: AbortSignal): Promise<PressureStepDecision> {
-    this.host.beginStep(memberId, messages)
+  /** The pre-step decision for one live Session, with the input that step claims. */
+  async onPreStep(sessionId: SessionId, messages: readonly UserMessage[], signal: AbortSignal): Promise<PressureStepDecision> {
+    this.host.beginStep(sessionId, messages)
     try {
-      return await this.policy.onPreStep(memberId, signal)
+      return await this.policy.onPreStep(sessionId, signal)
     } finally {
-      this.host.endStep(memberId)
+      this.host.endStep(sessionId)
     }
   }
 
-  onRequestError(memberId: AgentTeamMemberId, failure: { readonly code?: string | undefined }, signal: AbortSignal): Promise<boolean> {
-    return this.policy.onRequestError(memberId, failure, signal)
+  onRequestError(sessionId: SessionId, failure: { readonly code?: string | undefined }, signal: AbortSignal): Promise<boolean> {
+    return this.policy.onRequestError(sessionId, failure, signal)
   }
 
-  onAssistantMessage(memberId: AgentTeamMemberId): void {
-    this.policy.onAssistantMessage(memberId)
+  onAssistantMessage(sessionId: SessionId): void {
+    this.policy.onAssistantMessage(sessionId)
   }
 
   dispose(): void {
