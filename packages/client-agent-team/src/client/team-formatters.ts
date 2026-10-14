@@ -180,6 +180,26 @@ export function humanMentionHandle(humanName: string): MentionHandle {
 }
 
 /**
+ * Whether one Message's body itself spells a handle of the reader: the same
+ * shared scan the mention chips render by, so the row's mark says what the
+ * words say. This is deliberately not the delivery set — a Thread delivers to
+ * its Human without ever naming them, and a delivery is not a mention, so a
+ * delivery-based answer would light the mark on Messages that never addressed
+ * the reader.
+ *
+ * The question is about the reader and nobody else, so the scan runs over the
+ * reader's own handles rather than over the Message's mentioned Members: naming
+ * someone else is the one thing that must never raise this. An unknown reader is
+ * named by nothing. It also answers nothing about reading state: the fact is
+ * that the body named the reader, and acknowledging the Message does not unsay
+ * it — unread is a Thread-level notion with its own counters and badges.
+ */
+export function bodyMentionsHuman(body: string, humanName: string | undefined): boolean {
+  if (humanName === undefined) return false
+  return scanBodyHandles(body, mentionHandlesOf(humanMentionHandle(humanName)).handles).length > 0
+}
+
+/**
  * One mentioned Member as a Message renders them: the display name the seat
  * prints, plus every older handle that still addresses the same person. A
  * rename must not orphan the mentions written before it — the bodies say

@@ -24,10 +24,10 @@ export interface TeamMessageProps {
   readonly senderTitle?: string
   /** Continuation of one same-sender run: suppress repeated identity chrome. */
   readonly grouped?: boolean
-  /** This Message carries a structured direct mention of the Human reader, so
-      the bubble marks it. The flag never moves the bubble: an Agent's mention
-      of the reader is still the Agent's Message, and a reader who saw it on
-      their own side would think they wrote it. */
+  /** This Message's own body names the Human reader, so the bubble marks it.
+      The flag never moves the bubble: an Agent's mention of the reader is still
+      the Agent's Message, and a reader who saw it on their own side would think
+      they wrote it. */
   readonly mentionsHuman?: boolean
   /** The reader's own display name, so the trailing fallback row never repeats
       the reader back to themselves: the badge already states the mention when it
