@@ -17,7 +17,7 @@
 
 本节只列尚未结束的工作项；已结束的见 `archive/YYYY-MM/`。
 
-（当前没有未结束的工作项。）
+- [Req7 — Work-domain directory sets](active/req7-work-domain-directories/README.md)（Host 侧域目录集实现与验证已完成，静态代码审查通过，待本地提交和 Task 最终验收；独立于 Req5 UI 与 Req5 路由链）。
 
 已归档：[Thread 的引用与 mention 语义](archive/2026-10/thread-quoting-and-mentions/README.md)（2026-10-10 归档：消息行 hover 的层次与时间座位、右侧动作卡（复制 / 引用）、「提到了你」、打开 Thread 命中第一条未读点名消息、引用可直接送达发出者；读侧引用与 Host 侧 `replyToMessageRef` 一并落地，回合分隔线最终不带时刻。durable 结论见 `docs/frontend-design/thread-and-composer.md` 等双语对与 CHANGELOG）、[Issue #43 逐条复现与判定](archive/2026-10/issue-43-triage/README.md)（2026-10-10 归档：10 条 + 2 条附注逐条复现，5 条成立、2 条部分成立、3 条不成立；按批准的工单实施 02/03/05/06/07，01 关闭，04 取做法 A。对外回复草稿见该归档的 `reply.md`）、[状态机、数据请求与诊断日志](archive/2026-10/state-requests-diagnostics/README.md)（task:60eadddc #113，2026-10-09 归档：6 票全部完成——成员执行隔离、共享读取与过期响应保护、有界投影、通知与恢复追踪、规模与故障整体验收）、[Context 管理：三个动作与一个状态面](archive/2026-10/context-relevant-turn-reduction/README.md)（task:1e3b9e0f #45 → 实现 #6，2026-10-04 归档）、[质量改进审计](archive/2026-10/quality-improvement/README.md)（task:e33c4efd #105，2026-10-01 归档）、[0.1.7 UI 设计语言再基线](archive/2026-09/ui-parity-0.1.7/README.md)（task:d3ec167b，2026-09-24 归档）、[Member Session 架构](archive/2026-09/member-session-architecture/README.md)、[Context continuity](archive/2026-09/context-continuity/README.md)。
 

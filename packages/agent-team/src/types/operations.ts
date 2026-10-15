@@ -23,6 +23,7 @@ import type {
   AgentTeamThread,
   AgentTeamThreadAttention,
   AgentTeamThreadRef,
+  AgentTeamWorkingDirectorySet,
 } from "./entities.ts"
 
 /** The first durable operation in every Agent Team ledger. */
@@ -194,6 +195,8 @@ export interface AgentTeamMemberScopeSessionBoundOperation extends AgentTeamOper
   readonly kind: 'team/member-scope-session-bound'
   readonly data: {
     readonly memberId: AgentTeamMemberId
+    /** Workspace owning the Thread; absent on bindings recorded before directory snapshots. */
+    readonly workspaceId?: WorkspaceId | undefined
     /** The domain and the Session it runs on; its namespace fields agree with its key by construction. */
     readonly binding: AgentTeamMemberScopeSession
   }
@@ -205,6 +208,29 @@ export interface AgentTeamChannelUpdatedOperation extends AgentTeamOperationBase
   readonly data: {
     readonly workspaceId: WorkspaceId
     readonly channel: AgentTeamChannel
+  }
+}
+
+/** Durable Human replacement or clearing of a Channel's ordered default work directories. */
+export interface AgentTeamChannelWorkingDirectoriesUpdatedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/channel-working-directories-updated'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly channelRef: AgentTeamChannelRef
+    /** `null` clears the configured default. */
+    readonly workingDirectories: AgentTeamWorkingDirectorySet | null
+  }
+}
+
+/** Durable Human replacement or clearing of one Member × Channel directory override. */
+export interface AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/channel-member-working-directories-updated'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly channelRef: AgentTeamChannelRef
+    readonly memberId: AgentTeamMemberId
+    /** `null` clears the override and restores inheritance. */
+    readonly workingDirectories: AgentTeamWorkingDirectorySet | null
   }
 }
 
@@ -511,6 +537,8 @@ export type AgentTeamOperation =
   | AgentTeamMemberSessionRolledOverOperation
   | AgentTeamMemberScopeSessionBoundOperation
   | AgentTeamChannelUpdatedOperation
+  | AgentTeamChannelWorkingDirectoriesUpdatedOperation
+  | AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation
   | AgentTeamMemberUpdatedOperation
   | AgentTeamChannelMemberAddedOperation
   | AgentTeamChannelMemberRemovedOperation

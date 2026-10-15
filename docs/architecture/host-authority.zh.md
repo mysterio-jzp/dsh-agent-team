@@ -2,12 +2,13 @@
 
 [English](host-authority.md) | 中文
 
-Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是 Member、Workspace、Channel、Message、独立 Thread aggregate、可选 Task overlay、Claim、Thread Attention、Inbox 和 Activity facts 的 durable authority。
+Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是 Member、Workspace、Channel、Message、独立 Thread aggregate、可选 Task overlay、Claim、Thread Attention、Inbox、Activity facts、Member 工作域绑定与 Channel 目录配置的 durable authority。
 
 修改 Host capability 时，先阅读 package source/tests，再阅读匹配的 Harness capability contract。导航表见 [`harness-navigation.zh.md`](../harness-navigation.zh.md)。导航表把 Host 改动映射到 `deepseek-harness/docs/subsystems/` 和 source packages。
 
 ## Ledger 权威与提交
 - mutation 进入 Host authority，并提交一条 durable operation。
+- Channel 默认目录集与 Member×Channel 覆盖是独立、可重放的配置 operations。首次 Thread 绑定快照有效有序目录集（Member 覆盖、Channel 默认、Channel 所属 Workspace 根依次优先）；后续配置编辑不改变该绑定或它的 Session 代际。配置提交校验路径形状，Host 在 activation 时校验目录是否存在。
 - 回复把被回答的 Message 记为自身 Message 上的 `replyToMessageRef`，Host 在提交前用 ledger 解析这个 ref：未知的 ref、或属于别的 Thread 的 ref 一律拒绝，不会被存下。父消息作者在提交时加入收件人，邀请规则、direct markers 与 `undeliveredMentions` 报告与 mention 完全一致。被引用的画面 —— 父消息作者与其正文一行 —— 是读取期派生（`replyTo`），绝不是第二份存储副本。因此它不可能与父消息不一致，父消息不在本次读取这一页里时也照样填得上。ref 不再可解析时只留裸 ref。引用不是可选项：这个参数属于回复契约的一部分，携带 ref 的回复只按 ref 本身被接受或拒绝。
 - Projections、Inbox results、tools、commands、Remote responses 和 UI 都从已提交的 operations 派生。
 - Client code 不得解释 ledger records，也不得创建 parallel authority。
@@ -17,6 +18,7 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - 已提交的 Session transition（`team/member-session-renewed`、`team/member-session-rolled-over`）记录的是 desired binding，而不是已完成的切换。retire 旧代与 activate 目标都是 ledger 写入之外的 Host 效果。startup 与 Member 的显式 recovery 动作都会补完被中断的 transition，依据记录的 previous Session。每个效果各自推导自己是否已完成。live handle 不能证明 archive 那一半跑过。因此重复请求返回已记录的 receipt 与诚实状态，不再提交一次绑定。
 - 每个 durable Member state 只有一组期望的外部 effect，即 [Member Lifecycle](../domain-model.zh.md#member-lifecycle) 表。每一次 lifecycle operation 在 commit 之后重跑这组 effect。startup 对每个非 enabled Member 也重跑同一组。archive、suspension、remove 因此走同一条推导重跑收敛，不做第二次 durable 写入。即使 Workspace/Session/filesystem 调用被 crash 或失败打断，也一样收敛。
 - startup 绝不把非 enabled Member 激活为 enabled。启动阶段失败的 effect 只记日志，下一次 boot 重试，不让 boot 失败。同一 Member 的 lifecycle operation 按提交序串行；不同 Member 从不排在彼此的等待之后。
+- 非默认 Session 在其 Thread 绑定解析出的 Workspace 中激活。快照第一项作为 cwd；Host 在 provisioning 前检查所有快照路径都是可访问目录，其他目录只注入该工作域自己的 instructions。任一路径缺失时只拒绝该域 activation，并保留域级 diagnostic，不把 Member 默认状态标为 unavailable。
 - ledger append 之后剩下的是 delivery 效果：commit listeners、Client change invalidation、participation notice。每个受影响的 Member 还会收到一次 wake。每一项都经过同一条边界：失败只记日志，不让操作本身失败。失败的 listener 或 wake 仍以 committed result 作答，而不是虚假的回滚。只有 invariant divergence 继续 reject。失败的 Inbox wake 清掉这个 wake 记录的 notice state。因此，下一次触及该 Member 的 commit 重新推导同一批 durable Inbox facts 并重试，不追加第二次操作。DM 保留显式的 recorded-but-not-delivered 错误。
 
 ## 哪些操作会唤醒 Member，以及成员卡住时怎么选
@@ -44,7 +46,7 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 
 带活动 handle 的 error 态 Member 落在最后一行：`recoverMember` 会 steer 它，而如果原因仍在，下一轮会再失败一次。选之前先分清两件事：模型路由坏了或网关拒收，要改的是路由而不是恢复 Member，在路由通之前 steer 什么也救不回来。真正需要 `clearMemberContext` 的是无法自行收尾的上下文世代——它会让下一条 Session 不带历史。
 
-Member 当前的失败原因以 `diagnostic` 挂在 status 上并由 Client 渲染。它由活动 surface 派生、不落盘。Host 重启后只有在有东西唤醒该 Member 时才会重新派生，所以一个没有被唤醒的 Member 在下次被操作触及前不显示原因。
+Member 默认域当前的失败原因以 `diagnostic` 挂在 status 上并由 Client 渲染。非默认工作域的 activation 失败按域记录并打日志，不污染 Member availability。两者都是进程内状态、不落盘；Host 重启后，只有在对应 surface 被唤醒或重新激活时才会重新派生。
 
 ## 变更流与 Projection
 - `changes()` 是流式 Remote，可声明一个 scope（workspace/channel/thread/presence）。省略 scope 时观察共享 Team 投影变化，不包含 presence。Host 先注册监听，再发送当前基线，之后只发送匹配的变更通知。消费者暂停期间，只保留最新待发送版本。取消或 Host 释放时关闭订阅。Thread read 与 `team/dm-sent` 不改变共享投影：既不推进版本，也不唤醒订阅者。Presence 使用进程内 epoch，其他 scope 使用最近一次共享投影提交的 ledger sequence。版本只在同一 scope 和 Host 生命周期内有意义。Host 只为受 operation 影响的 Members 重算 Inbox hints。
@@ -106,8 +108,8 @@ Member 当前的失败原因以 `diagnostic` 挂在 status 上并由 Client 渲�
 
 Host row 只发布一个服务 `ctx.agentTeam`，它被两类消费方以不同方式使用，稳定性承诺也不同。没有 CLI、没有 `bin`、也没有 loopback HTTP 入口。Web Client 是唯一的人类控制面，所有变更都经 typed Remote 下发到 Host。
 
-- **Remote 方法**（带 `@Remote` 装饰的，如 `members`、`view`、`addMember`、`updateMember`、`sendMessage`、`readThread`、`inbox`、`humanProfile`）是 Client 契约。它们由声明生成 Typert 产物来定型，所以 Client、模型侧工具和其他消费方编译期对齐同一形状；改动其中任何一个都属契约变更。
-- **仅 Host 侧的服务方法**（如 `memberForAgent`、`membersForClient`、`status`，以及激活/生命周期内部实现）供进程内 Host 调用方使用——preset 行、commit listener、启动期的派生逻辑。它们没有兼容承诺，可能随版本调整。
+- **Remote 方法**（带 `@Remote` 装饰的，如 `members`、`view`、`addMember`、`updateMember`、`updateChannelWorkingDirectories`、`updateChannelMemberWorkingDirectories`、`channelWorkingDirectorySettings`、`sendMessage`、`readThread`、`inbox`、`humanProfile`）是 Client 契约。它们由声明生成 Typert 产物来定型，所以 Client、模型侧工具和其他消费方编译期对齐同一形状；改动其中任何一个都属契约变更。
+- **仅 Host 侧的服务方法**（如 `memberForAgent`、`workDomainForAgent`、`membersForClient`、`status`，以及激活/生命周期内部实现）供进程内 Host 调用方使用——preset 行、commit listener、启动期的派生逻辑。它们没有兼容承诺，可能随版本调整。
 
 只有 Remote 那一组是契约。`ctx.agentTeam` 上其余部分都是内部实现，改动形状时不会附迁移说明。
 

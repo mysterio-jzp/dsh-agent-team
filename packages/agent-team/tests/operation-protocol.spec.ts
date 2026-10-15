@@ -207,10 +207,27 @@ const memberScopeSessionBound: Op<'team/member-scope-session-bound'> = {
   data: {
     memberId,
     binding: {
-      scopeKey: 'thread:thread:protocol-fixture' as AgentTeamMemberScopeKey,
+      scopeKey: `thread:${memberThread}` as AgentTeamMemberScopeKey,
       scopeKind: 'thread',
-      scopeRef: 'thread:protocol-fixture',
+      scopeRef: memberThread,
       sessionId: SessionId('session:protocol-scope'),
+      workingDirectories: ['/tmp/protocol-domain', '/tmp/protocol-shared'],
+    },
+    workspaceId: alpha,
+  },
+}
+
+const memberScopeSessionBoundLegacy: Op<'team/member-scope-session-bound'> = {
+  ...opBase('operation:protocol-30-legacy', 'request:protocol-member-scope-session-bound-legacy', 30),
+  previousOperationId,
+  kind: 'team/member-scope-session-bound',
+  data: {
+    memberId,
+    binding: {
+      scopeKey: `thread:${memberThread}` as AgentTeamMemberScopeKey,
+      scopeKind: 'thread',
+      scopeRef: memberThread,
+      sessionId: SessionId('session:protocol-scope-legacy'),
     },
   },
 }
@@ -233,6 +250,20 @@ const channelUpdated: Op<'team/channel-updated'> = {
   previousOperationId,
   kind: 'team/channel-updated',
   data: { workspaceId: alpha, channel: fixtureChannel },
+}
+
+const channelWorkingDirectoriesUpdated: Op<'team/channel-working-directories-updated'> = {
+  ...opBase('operation:protocol-31', 'request:protocol-channel-working-directories-updated', 31),
+  previousOperationId,
+  kind: 'team/channel-working-directories-updated',
+  data: { workspaceId: alpha, channelRef, workingDirectories: ['/tmp/protocol-channel', '/tmp/protocol-shared'] },
+}
+
+const channelMemberWorkingDirectoriesUpdated: Op<'team/channel-member-working-directories-updated'> = {
+  ...opBase('operation:protocol-32', 'request:protocol-channel-member-working-directories-updated', 32),
+  previousOperationId,
+  kind: 'team/channel-member-working-directories-updated',
+  data: { workspaceId: alpha, channelRef, memberId, workingDirectories: ['/tmp/protocol-member', '/tmp/protocol-private'] },
 }
 
 const memberUpdated: Op<'team/member-updated'> = {
@@ -747,7 +778,7 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
   },
   'team/member-scope-session-bound': {
     stored: memberScopeSessionBound,
-    legacyShapes: [],
+    legacyShapes: [memberScopeSessionBoundLegacy],
     retry: {
       same: async () => {
         const out = await ledger.bindMemberScopeSession({
@@ -827,6 +858,38 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
         name: 'protocol-renamed',
         description: channelUpdated.data.channel.description,
       }),
+    },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'derived', inbox: 'none' },
+  },
+  'team/channel-working-directories-updated': {
+    stored: channelWorkingDirectoriesUpdated,
+    legacyShapes: [],
+    retry: {
+      same: async () => {
+        const out = await ledger.updateChannelWorkingDirectories({ requestId: channelWorkingDirectoriesUpdated.requestId, actor: human,
+          workspaceId: alpha, channelRef, workingDirectories: channelWorkingDirectoriesUpdated.data.workingDirectories })
+        expect(out.value.workingDirectories).toEqual(channelWorkingDirectoriesUpdated.data.workingDirectories)
+        return out
+      },
+      changed: () => ledger.updateChannelWorkingDirectories({ requestId: channelWorkingDirectoriesUpdated.requestId, actor: human,
+        workspaceId: alpha, channelRef, workingDirectories: ['/tmp/protocol-changed'] }),
+    },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'derived', inbox: 'none' },
+  },
+  'team/channel-member-working-directories-updated': {
+    stored: channelMemberWorkingDirectoriesUpdated,
+    legacyShapes: [],
+    retry: {
+      same: async () => {
+        const out = await ledger.updateChannelMemberWorkingDirectories({ requestId: channelMemberWorkingDirectoriesUpdated.requestId, actor: human,
+          workspaceId: alpha, channelRef, memberId, workingDirectories: channelMemberWorkingDirectoriesUpdated.data.workingDirectories })
+        expect(out.value.workingDirectories).toEqual(channelMemberWorkingDirectoriesUpdated.data.workingDirectories)
+        return out
+      },
+      changed: () => ledger.updateChannelMemberWorkingDirectories({ requestId: channelMemberWorkingDirectoriesUpdated.requestId, actor: human,
+        workspaceId: alpha, channelRef, memberId, workingDirectories: ['/tmp/protocol-changed'] }),
     },
     legacy: { normalize: 'none', repair: 'none' },
     intent: { scopes: 'derived', inbox: 'none' },

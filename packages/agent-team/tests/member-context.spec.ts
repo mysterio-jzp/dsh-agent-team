@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { renderMemberIdentity, renderMemberMemory } from '../src/member-context.ts'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { renderMemberIdentity, renderMemberMemory, renderMemberWorkDomain } from '../src/member-context.ts'
+import { threadMemberScopeKey } from '../src/member-scope.ts'
+import type { AgentTeamMemberScopeSession, AgentTeamThreadRef } from '../src/types.ts'
 
 describe('Team Member private memory context', () => {
   it('escapes framing and preserves a bounded private index', () => {
@@ -53,5 +56,20 @@ describe('Team Member identity context', () => {
   it('omits the description segment when the description is empty', () => {
     expect(renderMemberIdentity({ handle: 'Builder', description: '' }))
       .toBe('Team identity: you are @Builder.')
+  })
+})
+
+describe('Team Member work-domain context', () => {
+  it('renders only the bound Thread domain snapshot and never adds directories to the default scope', () => {
+    const threadRef = 'thread:current' as AgentTeamThreadRef
+    const binding: AgentTeamMemberScopeSession = {
+      scopeKey: threadMemberScopeKey(threadRef), scopeKind: 'thread', scopeRef: threadRef,
+      sessionId: SessionId('session:current'), workingDirectories: ['/workspace/project', '/workspace/shared'],
+    }
+    const rendered = renderMemberWorkDomain(binding)
+    expect(rendered).toContain('Work-domain root (this Session\'s cwd): "/workspace/project".')
+    expect(rendered).toContain('"/workspace/shared"')
+    expect(rendered).toContain('Do not carry bare relative paths from another work domain')
+    expect(renderMemberWorkDomain({ scopeKey: 'default', scopeKind: 'default', sessionId: 'session:default' } as AgentTeamMemberScopeSession)).toBe('')
   })
 })

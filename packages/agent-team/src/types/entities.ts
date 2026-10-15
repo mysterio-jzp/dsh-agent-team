@@ -117,7 +117,7 @@ export type AgentTeamMemberScopeKey = Branded<'AgentTeamMemberScopeKey'>
 
 /**
  * One Member's durable binding of a work domain to its own Session. The
- * `default` domain is not stored as one of these: it IS `member.sessionId`,
+ * `default` domain has no separate durable binding: it IS `member.sessionId`,
  * which is what keeps a ledger recorded before buckets replaying unchanged.
  */
 export interface AgentTeamMemberScopeSession {
@@ -127,7 +127,12 @@ export interface AgentTeamMemberScopeSession {
   readonly scopeRef?: string | undefined
   /** The Session this domain runs on; every domain has its own context. */
   readonly sessionId: SessionId
+  /** Ordered absolute roots snapshotted on first Thread binding; absent for `default` and pre-snapshot legacy bindings. */
+  readonly workingDirectories?: AgentTeamWorkingDirectorySet | undefined
 }
+
+/** Ordered absolute directory paths configured for one work domain (one to four; Host validates writes). */
+export type AgentTeamWorkingDirectorySet = readonly string[]
 
 /** Durable identity and lifecycle intent of one team-managed Agent. */
 export interface AgentTeamAgentMember {

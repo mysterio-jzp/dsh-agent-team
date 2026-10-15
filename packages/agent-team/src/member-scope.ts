@@ -3,6 +3,7 @@ import type {
   AgentTeamMemberScopeKind,
   AgentTeamMemberScopeSession,
   AgentTeamThreadRef,
+  AgentTeamWorkingDirectorySet,
 } from './types.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 
@@ -58,7 +59,14 @@ export function parseMemberScopeKey(scopeKey: string): { readonly scopeKind: Age
  * caller cannot state a kind the key disagrees with. This is the only way a
  * binding is built, on the write path and in replay validation alike.
  */
-export function memberScopeSession(scopeKey: AgentTeamMemberScopeKey, sessionId: SessionId): AgentTeamMemberScopeSession {
+export function memberScopeSession(
+  scopeKey: AgentTeamMemberScopeKey,
+  sessionId: SessionId,
+  workingDirectories?: AgentTeamWorkingDirectorySet,
+): AgentTeamMemberScopeSession {
   const { scopeKind, scopeRef } = parseMemberScopeKey(scopeKey)
-  return Object.freeze({ scopeKey, scopeKind, ...(scopeRef === undefined ? {} : { scopeRef }), sessionId })
+  return Object.freeze({
+    scopeKey, scopeKind, ...(scopeRef === undefined ? {} : { scopeRef }), sessionId,
+    ...(workingDirectories === undefined ? {} : { workingDirectories: Object.freeze([...workingDirectories]) }),
+  })
 }

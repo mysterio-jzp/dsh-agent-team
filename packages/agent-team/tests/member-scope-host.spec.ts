@@ -7,7 +7,9 @@
  * Message carry" is readable from the committed result without reaching into
  * Host state — the same surface a reader of the Thread sees.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { randomUUID } from 'node:crypto'
+import { dirname } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Storage from '@deepseek-ai/dsh-storage'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
@@ -51,9 +53,9 @@ async function harness(): Promise<{ readonly ctx: Context }> {
   })
   ctx.provide('agents', { create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') } })
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) })
-  ctx.provide('agentPresets', { mount: async () => { throw new Error('unused') } })
+  ctx.provide('agentPresets', { mount: async () => { throw new Error('unused') }, composedPreset: () => ({}) })
   ctx.provide('tools', { schemas: () => [] })
-  ctx.provide('sessionPersistence', { list: async () => [] })
+  ctx.provide('sessionPersistence', { list: async () => [], stat: async () => undefined })
   await ctx.plugin(agentTeamInvariant)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
@@ -135,7 +137,7 @@ describe('one Message, one work domain', () => {
     // The discussion is a real domain: bound in the ledger for its first delivery.
     const discussionSessionId = SessionId('session:reader-discussion')
     await ctx.agentTeam['ledger']!.bindMemberScopeSession({
-      requestId: requestId('bind-discussion'), workspaceId: alpha, memberId: member.memberId,
+      requestId: requestId('bind-discussion'), workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
       binding: memberScopeSession(scopeKey, discussionSessionId), actor: agentTeamHumanActor(),
     })
 
@@ -187,6 +189,76 @@ describe('one Message, one work domain', () => {
     if (sent.kind !== 'committed') throw new Error(`expected a committed Message, received ${sent.kind}`)
     expect(sent.message.artifacts).toEqual([artifact(sender.sessionId, `${cwd}/docs/sender.md`, 'the docs/sender.md')])
     expect(ctx.agentTeam['claimedDeliveries'].get(other.sessionId), 'the other Member\'s declaration is untouched').toBeUndefined()
+  })
+})
+
+describe('work-domain activation paths', () => {
+  it('returns the exact default binding without synthesizing a directory snapshot', async () => {
+    const { ctx } = await harness()
+    const { channelRef } = await channelWithThread(ctx)
+    const member = await addMember(ctx, channelRef, 'default-domain')
+    const agent = liveAgent(ctx.sessions.create(member.sessionId, { meta: { cwd } }))
+    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, agent]])
+
+    expect(ctx.agentTeam.workDomainForAgent(agent)).toEqual({
+      scopeKey: DEFAULT_MEMBER_SCOPE_KEY, scopeKind: 'default', sessionId: member.sessionId,
+    })
+  })
+
+  it('rejects a missing configured directory without marking the Member unavailable', async () => {
+    const { ctx } = await harness()
+    const { channelRef, threadRef } = await channelWithThread(ctx)
+    const member = await addMember(ctx, channelRef, 'path-check')
+    const missingDirectory = `${cwd}/.missing-work-domain-${randomUUID()}`
+    await ctx.agentTeam.updateChannelWorkingDirectories({ requestId: requestId('missing-dir-config'),
+      workspaceId: alpha, channelRef, workingDirectories: [cwd, missingDirectory] })
+    expect(ctx.agentTeam.channelWorkingDirectorySettings({ workspaceId: alpha, channelRef }).defaultWorkingDirectories)
+      .toEqual([cwd, missingDirectory])
+    const bound = await ctx.agentTeam['ledger']!.bindMemberScopeSession({ requestId: requestId('missing-dir-bind'), actor: agentTeamHumanActor(),
+      workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
+      binding: memberScopeSession(threadMemberScopeKey(threadRef), SessionId('session:path-check-domain')) })
+    if (!bound.committed) throw new Error('domain binding unexpectedly resolved instead of committing')
+
+    const defaultSession = ctx.sessions.create(member.sessionId, { meta: { cwd } })
+    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, liveAgent(defaultSession)]])
+    const warning = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    await ctx.agentTeam['activateMember'](ctx.agentTeam['ledger']!.getMember(member.memberId)!, bound.value.binding)
+
+    expect(warning.mock.calls.some(([message]) => String(message).includes(missingDirectory))).toBe(true)
+    expect(ctx.agentTeam['memberStatus'](ctx.agentTeam['ledger']!.getMember(member.memberId)!).availability).toBe('active')
+    warning.mockRestore()
+  })
+
+  it('uses the first snapshotted directory as the Session cwd', async () => {
+    const { ctx } = await harness()
+    const { channelRef, threadRef } = await channelWithThread(ctx)
+    const member = await addMember(ctx, channelRef, 'cwd-check')
+    const domainRoot = dirname(cwd)
+    await ctx.agentTeam.updateChannelWorkingDirectories({ requestId: requestId('cwd-dir-config'),
+      workspaceId: alpha, channelRef, workingDirectories: [domainRoot, cwd] })
+    const bound = await ctx.agentTeam['ledger']!.bindMemberScopeSession({ requestId: requestId('cwd-dir-bind'), actor: agentTeamHumanActor(),
+      workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
+      binding: memberScopeSession(threadMemberScopeKey(threadRef), SessionId('session:cwd-check-domain')) })
+    if (!bound.committed) throw new Error('domain binding unexpectedly resolved instead of committing')
+
+    ctx.agentTeam['memberRuntime']['initializePrivateMemory'] = async () => {}
+    let activatedCwd: string | undefined
+    let createdAgent: Agent | undefined
+    const agents = ctx.agents as unknown as {
+      create: (request: { readonly sessionId: SessionId; readonly meta: { readonly cwd: string } }) => Promise<AgentHandle>
+    }
+    agents.create = async request => {
+      activatedCwd = request.meta.cwd
+      const session = ctx.sessions.create(request.sessionId, { meta: request.meta })
+      const agent = Object.assign(liveAgent(session), { ctx: new Context() }) as Agent
+      createdAgent = agent
+      return { agent, dispose: async () => {} } as AgentHandle
+    }
+    await ctx.agentTeam['activateMember'](ctx.agentTeam['ledger']!.getMember(member.memberId)!, bound.value.binding,
+      undefined, undefined, undefined, { deferNotify: true })
+
+    expect(activatedCwd).toBe(domainRoot)
+    expect(ctx.agentTeam.workDomainForAgent(createdAgent!)?.workingDirectories).toEqual([domainRoot, cwd])
   })
 })
 

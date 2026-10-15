@@ -36,12 +36,15 @@ const sessionIdSchema = z.string().min(1).transform(value => value as SessionId)
 const memberScopeKeySchema = z.string()
   .regex(/^(default|thread:thread:[^:]+)$/)
   .transform(value => value as AgentTeamMemberScopeKey)
+const workingDirectorySetSchema = z.array(z.string().min(1)).min(1).max(4)
 const memberScopeSessionSchema = z.object({
   scopeKey: memberScopeKeySchema,
   scopeKind: z.union([z.literal('thread'), z.literal('default')]),
   // Absent on the default domain, which names no ref.
   scopeRef: z.string().min(1).optional(),
   sessionId: sessionIdSchema,
+  // Bindings recorded before work-domain directory snapshots remain replayable.
+  workingDirectories: workingDirectorySetSchema.optional(),
 }).strict()
 const sessionSeqSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).transform(value => value as SessionSeq)
 const contextCheckpointRefSchema = z.string().regex(/^(context-checkpoint-[0-9a-f]{64}|team-boundary-[0-9a-f]{64})$/).transform(value => value as AgentTeamContextCheckpointRef)
@@ -122,7 +125,6 @@ const channelSchema = z.object({
   // Ledgers written before Channel archival existed omit the field.
   state: z.enum(['active', 'archived']).default('active'),
 }).strict()
-
 // Ledgers written before message occurredAt, attachments, or artifacts existed
 // store bare messages; the union schema below stamps occurredAt on load and
 // leaves absent attachment and artifact metadata undefined, so old ledgers
@@ -455,13 +457,34 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-scope-session-bound'),
-    data: z.object({ memberId: memberIdSchema, binding: memberScopeSessionSchema }).strict(),
+    data: z.object({ memberId: memberIdSchema, workspaceId: workspaceIdSchema.optional(), binding: memberScopeSessionSchema }).strict(),
   }).strict(),
   z.object({
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/channel-updated'),
     data: z.object({ workspaceId: workspaceIdSchema, channel: channelSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/channel-working-directories-updated'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      channelRef: channelRefSchema,
+      workingDirectories: workingDirectorySetSchema.nullable(),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/channel-member-working-directories-updated'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      channelRef: channelRefSchema,
+      memberId: memberIdSchema,
+      workingDirectories: workingDirectorySetSchema.nullable(),
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,

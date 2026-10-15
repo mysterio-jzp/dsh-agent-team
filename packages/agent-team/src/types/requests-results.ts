@@ -33,6 +33,7 @@ import type {
   AgentTeamThreadFact,
   AgentTeamThreadReadFact,
   AgentTeamThreadRef,
+  AgentTeamWorkingDirectorySet,
 } from "./entities.ts"
 
 /** Receipt returned after an operation is durable or an identical retry resolves it. */
@@ -91,6 +92,58 @@ export interface AgentTeamUpdateChannelRequest {
 export interface AgentTeamUpdateChannelResult {
   readonly receipt: AgentTeamOperationReceipt
   readonly channel: AgentTeamChannel
+}
+
+/** Human intent to replace or clear the Channel's ordered default work directories. */
+export interface AgentTeamUpdateChannelWorkingDirectoriesRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly channelRef: AgentTeamChannelRef
+  /** Ordered absolute paths; `null` clears the configured default. */
+  readonly workingDirectories: AgentTeamWorkingDirectorySet | null
+}
+
+/** Result of updating or clearing a Channel's default work directories. */
+export interface AgentTeamUpdateChannelWorkingDirectoriesResult {
+  readonly receipt: AgentTeamOperationReceipt
+  readonly channelRef: AgentTeamChannelRef
+  readonly workingDirectories: AgentTeamWorkingDirectorySet | null
+}
+
+/** Human intent to replace or clear one Member × Channel work-directory override. */
+export interface AgentTeamUpdateChannelMemberWorkingDirectoriesRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly channelRef: AgentTeamChannelRef
+  readonly memberId: AgentTeamMemberId
+  /** Ordered absolute paths; `null` clears the override and restores inheritance. */
+  readonly workingDirectories: AgentTeamWorkingDirectorySet | null
+}
+
+/** Result of updating or clearing one Member × Channel work-directory override. */
+export interface AgentTeamUpdateChannelMemberWorkingDirectoriesResult {
+  readonly receipt: AgentTeamOperationReceipt
+  readonly channelRef: AgentTeamChannelRef
+  readonly memberId: AgentTeamMemberId
+  readonly workingDirectories: AgentTeamWorkingDirectorySet | null
+}
+
+/** Human read request for the default and all Member overrides of one Channel. */
+export interface AgentTeamChannelWorkingDirectorySettingsRequest {
+  readonly workspaceId: WorkspaceId
+  readonly channelRef: AgentTeamChannelRef
+}
+
+export interface AgentTeamChannelWorkingDirectoryOverride {
+  readonly memberId: AgentTeamMemberId
+  readonly workingDirectories: AgentTeamWorkingDirectorySet
+}
+
+/** Human-only settings projection; deliberately separate from model-facing `view`. */
+export interface AgentTeamChannelWorkingDirectorySettingsResult {
+  readonly channelRef: AgentTeamChannelRef
+  readonly defaultWorkingDirectories: AgentTeamWorkingDirectorySet | null
+  readonly memberOverrides: readonly AgentTeamChannelWorkingDirectoryOverride[]
 }
 
 /** Human intent to archive one Channel: hidden everywhere, facts kept. */

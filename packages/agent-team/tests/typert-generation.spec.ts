@@ -34,6 +34,7 @@ const EXPECTED_REMOTE_METHODS = [
   'changeHumanTodo',
   'changeTask',
   'changes',
+  'channelWorkingDirectorySettings',
   'clearMemberContext',
   'contextJudge',
   'createChannel',
@@ -66,6 +67,8 @@ const EXPECTED_REMOTE_METHODS = [
   'threadHistory',
   'threadObservations',
   'updateChannel',
+  'updateChannelMemberWorkingDirectories',
+  'updateChannelWorkingDirectories',
   'updateMember',
   'view',
 ]

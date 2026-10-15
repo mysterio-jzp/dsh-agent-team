@@ -12,9 +12,11 @@ A stable identity authorized to read, speak, claim work, and receive Inbox hints
 
 ## Workspace Participation
 
-A join/leave relation between a Member and a Workspace, committed as ledger operations — the same relation shape as Channel participation, one rung above it (Workspace participation → Channel participation, derived from Threads → Thread Attention). A Member's `workspaceId` records where it was created and never changes; authorization everywhere reads the current participation set, not the creation field. Joining grants collaboration immediately; it does not move or create the Member's Session. Each Member retains one Session lineage in its creation Workspace.
+A join/leave relation between a Member and a Workspace, committed as ledger operations — the same relation shape as Channel participation, one rung above it (Workspace participation → Channel participation, derived from Threads → Thread Attention). A Member's `workspaceId` records where it was created and never changes; authorization everywhere reads the current participation set, not the creation field.
 
-Joining does not create another Session or offer cwd switching; collaboration in other participated Workspaces uses the same Session. The Human Member participates in every Workspace.
+Joining grants collaboration immediately; it does not move or create the Member's default Session or change any already-bound work domain. The default Session lineage stays in the creation Workspace; a bound Thread domain uses its own captured directory root.
+
+Joining does not create a default Session or offer cwd switching; collaboration in other participated Workspaces uses the same default Session unless a Thread has its own bound work domain. The Human Member participates in every Workspace.
 
 ## Human Member
 
@@ -22,7 +24,7 @@ The special Member corresponding to the current Harness user. It participates in
 
 ## Agent Member
 
-A Member created and managed by Team. Created inside one Workspace (its creation record), it joins further Workspaces through Workspace Participation. It runs one explicit team-enabled preset Session at a time, rooted in its creation Workspace; ordinary Sessions and forks do not gain membership automatically.
+A Member created and managed by Team. Created inside one Workspace (its creation record), it joins further Workspaces through Workspace Participation. Its implicit default Session is rooted in its creation Workspace; each durable Thread work-domain binding owns a separate Session and captured directory set. Ordinary Sessions and forks do not gain membership automatically, and Member-level identity, capabilities, and private memory remain shared across domains.
 
 ## Member Capabilities
 
@@ -30,7 +32,15 @@ Durable capability intent on the Member entity (optional `capabilities` field: `
 
 ## Workspace
 
-A project and shared working directory. An Agent Member's Session cwd is the Workspace project directory; private memory lives outside the project root.
+A project and shared working directory. The Agent Member's implicit default Session cwd is the creation Workspace project directory; a non-default work domain may use its own captured root. Private memory lives outside the project root.
+
+## Work Domain
+
+One Member-specific context bucket: the implicit `default` domain is `member.sessionId`; a durable non-default binding maps a Thread key to its own Session and snapshots the complete ordered absolute directory set.
+
+Channel defaults and Member×Channel overrides are configuration facts. The first successful binding captures the effective override, Channel default, or current Workspace root. Its first directory is the Session cwd, and later directories are declared only in that domain's instructions.
+
+Configuration edits do not move an existing binding or its later Session generations. Domains isolate context, not identity, authorization, tools, or private memory. Thread-first delivery routing is a separate runtime integration from this directory configuration.
 
 ## Channel
 
@@ -110,7 +120,7 @@ The `class` routes which recovery action actually helps: a non-remediable refusa
 
 ## Context Generation
 
-One Member Session's working context between two context boundaries. A fresh generation starts empty except for the handoff delivery; a checkpoint-returned generation seeds the exact completed-turn prefix of its source. The ledger records the current binding (one per Member at all times) and the previous Session of the latest renewal/rollover; the Session logs themselves hold the context history. Every generation keeps Member identity, model, private memory, skills, Claims, and Attention.
+One domain Session's working context between two context boundaries. A fresh generation starts empty except for the handoff delivery; a checkpoint-returned generation seeds the exact completed-turn prefix of its source. The Member's default Session is implicit in `member.sessionId`; each non-default work domain has its own durable binding and previous Session of its latest renewal/rollover. Session logs hold the context history. Every generation keeps Member identity, model, private memory, skills, Claims, and Attention.
 
 ## Context Checkpoint
 

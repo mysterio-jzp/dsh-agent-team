@@ -5,7 +5,7 @@ import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
 import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { matchesProducerKind } from './context-source.ts'
-import type { AgentTeamAgentMember } from './types.ts'
+import type { AgentTeamAgentMember, AgentTeamMemberScopeSession } from './types.ts'
 import { memberMemoryDirectoryPath } from './member-runtime.ts'
 
 export const name = 'wowyuarm-agent-team-member-context'
@@ -48,7 +48,10 @@ export function apply(ctx: Context): void {
         : 'memory.md is currently unreadable; do not use any earlier private memory context.')
     }
     const workspaces = renderMemberWorkspaces(host.workspacesForAgent(agent))
-    const text = `${renderMemberIdentity(member)}\n\n${memory}${workspaces === '' ? '' : `\n\n${workspaces}`}`
+    const workDomain = host.workDomainForAgent(agent)
+    const text = [renderMemberIdentity(member), memory, workspaces, workDomain === undefined ? '' : renderMemberWorkDomain(workDomain)]
+      .filter(section => section !== '')
+      .join('\n\n')
     const latestText = agent.session.surface.nodes.toReversed().flatMap(sequence => {
       // `nodes` are event identities (SessionSeq); snapshotEvents takes log
       // offsets. Re-entering through the validating constructor keeps the two
@@ -81,13 +84,28 @@ export function renderMemberWorkspaces(workspaces: readonly { readonly workspace
   if (workspaces.length <= 1) return ''
   return [
     'Team Workspace participation — this list replaces all earlier participation context.',
-    ...workspaces.map(workspace => `${workspace.workspaceId}${workspace.default ? ' (default; Session cwd)' : ''}: ${workspace.path === undefined
+    ...workspaces.map(workspace => `${workspace.workspaceId}${workspace.default ? ' (Member default Workspace)' : ''}: ${workspace.path === undefined
       ? 'Workspace path unavailable; ask @human before filesystem work.'
       : `${JSON.stringify(workspace.path)}; instructions: ${JSON.stringify(join(workspace.path, 'AGENTS.md'))}`}`),
-    'Your single Session and cwd stay in the default Workspace. Joining another Workspace does not move them.',
+    'Workspace participation is separate from work-domain directories. Each bound Thread domain has its own Session cwd and snapshotted directory set; joining another Workspace does not move the Member default or an existing domain.',
     'For filesystem work in another Workspace, use absolute paths (or an explicit command cwd). Before working there, read its AGENTS.md and applicable directory instructions yourself; their contents are not injected here.',
     'Pass workspace explicitly to team_view, team_thread, team_message, team_claim and team_todo. team_inbox is the cross-Workspace triage entry point.',
     'If an instruction is ambiguous about which Workspace it concerns, ask @human before acting. Participation does not itself join Channels.',
+  ].join('\n')
+}
+
+/** Only this Session's binding is rendered; no other work domain's path set is copied into it. */
+export function renderMemberWorkDomain(binding: AgentTeamMemberScopeSession): string {
+  if (binding.scopeKind === 'default') return ''
+  const directories = binding.workingDirectories
+  if (directories === undefined) {
+    return `Work domain ${binding.scopeKey}: this legacy binding uses its Workspace root and has no configured additional directories. Do not reuse bare relative paths from another work domain.`
+  }
+  return [
+    `Work domain ${binding.scopeKey}: this Session is isolated from the Member default and every other Thread domain.`,
+    `Work-domain root (this Session's cwd): ${JSON.stringify(directories[0])}.`,
+    ...(directories.length < 2 ? [] : ['Additional directories available to this domain:', ...directories.slice(1).map(path => `- ${JSON.stringify(path)}`)]),
+    'Do not carry bare relative paths from another work domain into this one; use a domain-labeled absolute path or name its source domain and root.',
   ].join('\n')
 }
 

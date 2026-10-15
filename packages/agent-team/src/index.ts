@@ -9,6 +9,7 @@
 import { randomUUID } from 'node:crypto'
 import { requestScopedUuid } from './request-scoped-id.ts'
 import { readFileSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, Service, type Volatile } from '@deepseek-ai/cordis'
@@ -170,6 +171,12 @@ import type {
   AgentTeamThreadObservationsRequest,
   AgentTeamUpdateChannelRequest,
   AgentTeamUpdateChannelResult,
+  AgentTeamUpdateChannelWorkingDirectoriesRequest,
+  AgentTeamUpdateChannelWorkingDirectoriesResult,
+  AgentTeamUpdateChannelMemberWorkingDirectoriesRequest,
+  AgentTeamUpdateChannelMemberWorkingDirectoriesResult,
+  AgentTeamChannelWorkingDirectorySettingsRequest,
+  AgentTeamChannelWorkingDirectorySettingsResult,
   AgentTeamUpdateMemberRequest,
   AgentTeamUpdateMemberResult,
   AgentTeamView,
@@ -1250,7 +1257,8 @@ export default class AgentTeam extends TypertRemoteService {
   private async restoreMemberDomains(member: AgentTeamAgentMember, knownWorkspacePath?: string, knownSessions?: ReadonlySet<SessionId>): Promise<void> {
     for (const binding of this.requireLedger().memberScopeSessions(member.memberId)) {
       if (this.handleFor(member.memberId, binding.scopeKey) !== undefined) continue
-      await this.activateMember(member, binding, knownWorkspacePath, knownSessions)
+      await this.activateMember(member, binding,
+        binding.scopeKey === DEFAULT_MEMBER_SCOPE_KEY ? knownWorkspacePath : undefined, knownSessions)
     }
   }
 
@@ -1400,6 +1408,33 @@ export default class AgentTeam extends TypertRemoteService {
     const result = await this.requireLedger().updateChannel({ ...request, actor: agentTeamHumanActor() })
     if (result.committed) this.emitCommitted(result.value.receipt)
     return result.value
+  }
+
+  /** Replace or clear one Channel's ordered default work-directory set. */
+  @Remote('updateChannelWorkingDirectories')
+  async updateChannelWorkingDirectories(request: AgentTeamUpdateChannelWorkingDirectoriesRequest): Promise<AgentTeamUpdateChannelWorkingDirectoriesResult> {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    const result = await this.requireLedger().updateChannelWorkingDirectories({ ...request, actor: agentTeamHumanActor() })
+    if (result.committed) this.emitCommitted(result.value.receipt)
+    return result.value
+  }
+
+  /** Replace or clear one Member's override for a Channel's work-directory set. */
+  @Remote('updateChannelMemberWorkingDirectories')
+  async updateChannelMemberWorkingDirectories(request: AgentTeamUpdateChannelMemberWorkingDirectoriesRequest): Promise<AgentTeamUpdateChannelMemberWorkingDirectoriesResult> {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    const result = await this.requireLedger().updateChannelMemberWorkingDirectories({ ...request, actor: agentTeamHumanActor() })
+    if (result.committed) this.emitCommitted(result.value.receipt)
+    return result.value
+  }
+
+  /** Human settings projection for one Channel; never added to a model-facing view. */
+  @Remote('channelWorkingDirectorySettings')
+  channelWorkingDirectorySettings(request: AgentTeamChannelWorkingDirectorySettingsRequest): AgentTeamChannelWorkingDirectorySettingsResult {
+    this.requireWorkspace(request.workspaceId)
+    return this.requireLedger().channelWorkingDirectorySettings(request)
   }
 
   /**
@@ -2661,6 +2696,20 @@ export default class AgentTeam extends TypertRemoteService {
     })))
   }
 
+  /** A live generation's durable work-domain binding, with the legacy Thread-root fallback. */
+  workDomainForAgent(agent: Agent): AgentTeamMemberScopeSession | undefined {
+    const live = this.surfaceOfSession(agent.session.id)
+    if (live === undefined || live.handle.agent !== agent) return undefined
+    const ledger = this.requireLedger()
+    const binding = ledger.memberScopeSessionFor(live.memberId, live.scopeKey)
+    if (binding === undefined || live.scopeKey === DEFAULT_MEMBER_SCOPE_KEY || binding.workingDirectories !== undefined) return binding
+    // A pre-snapshot Thread binding keeps its historical Workspace-root cwd; do
+    // not silently upgrade it to a directory configuration added later.
+    const workspaceId = ledger.workspaceForMemberScope(live.memberId, live.scopeKey)
+    const workspacePath = workspaceId === undefined ? undefined : this.ctx.workspaceRegistry.get(workspaceId)?.path
+    return workspacePath === undefined ? binding : memberScopeSession(binding.scopeKey, binding.sessionId, [workspacePath])
+  }
+
   /** Agent-only bounded discovery projection; participation list carries registry titles when known. */
   viewForAgent(agent: Agent, request: AgentTeamViewRequest): AgentTeamView {
     const member = this.memberForAgent(agent)
@@ -3481,6 +3530,24 @@ export default class AgentTeam extends TypertRemoteService {
     }
   }
 
+  private async validateWorkingDirectories(
+    member: AgentTeamAgentMember,
+    scopeKey: AgentTeamMemberScopeKey,
+    directories: readonly string[],
+  ): Promise<void> {
+    for (const path of directories) {
+      let directory: Awaited<ReturnType<typeof stat>>
+      try {
+        directory = await stat(path)
+      } catch (error) {
+        throw new Error(`work domain '${scopeKey}' for Member '${member.handle}' cannot activate: directory '${path}' is unavailable (${failureDetail(error)})`, { cause: error })
+      }
+      if (!directory.isDirectory()) {
+        throw new Error(`work domain '${scopeKey}' for Member '${member.handle}' cannot activate: '${path}' is not a directory`)
+      }
+    }
+  }
+
   /**
    * Start one Member's work domain on the Session its binding records: the
    * `default` domain for identity and lifecycle work, one discussion's Session
@@ -3494,8 +3561,14 @@ export default class AgentTeam extends TypertRemoteService {
     if (this.handleFor(member.memberId, scopeKey) !== undefined) return
     let created: AgentHandle | undefined
     try {
-      const workspace = this.requireWorkspace(member.workspaceId)
-      const workspacePath = knownWorkspacePath ?? workspace.path
+      const workspaceId = this.requireLedger().workspaceForMemberScope(member.memberId, scopeKey)
+      if (workspaceId === undefined) throw new Error(`work domain '${scopeKey}' has no Workspace binding`)
+      const workspace = this.requireWorkspace(workspaceId)
+      const workspacePath = (scopeKey === DEFAULT_MEMBER_SCOPE_KEY ? knownWorkspacePath : undefined) ?? workspace.path
+      const workingDirectories = binding.workingDirectories ?? (workspacePath === undefined ? undefined : [workspacePath])
+      if (workingDirectories === undefined) throw new Error(`work domain '${scopeKey}' has no working-directory snapshot and its Workspace root is unavailable`)
+      await this.validateWorkingDirectories(member, scopeKey, workingDirectories)
+      const cwd = workingDirectories[0]!
       // Existing Members carry the pre-sanitization ledger path; activation
       // migrates it onto the sanitized directory before provisioning.
       const sanitizedMemoryPath = dshHomePath('agent-team', 'members', memberMemoryDirectoryName(member.memberId))
@@ -3631,7 +3704,7 @@ export default class AgentTeam extends TypertRemoteService {
             // checkpoint return parents at the seed source and marks the
             // fork seeded with its exact inherited prefix length.
             meta: {
-              cwd: workspacePath,
+              cwd,
               agentPreset: member.presetId,
               ...(effectiveParent === undefined ? {} : { parentSession: effectiveParent }),
               ...(options?.seed === undefined && !seededFromLedger ? {} : { isSeeded: true }),
@@ -3649,7 +3722,7 @@ export default class AgentTeam extends TypertRemoteService {
       await workspace.attachSession(sessionId)
       this.registerHandle(member.memberId, scopeKey, created)
       this.modelSelections.set(sessionId, selected)
-      this.clearMemberFailure(member.memberId, 'activation')
+      if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) this.clearMemberFailure(member.memberId, 'activation')
       this.clearMemberFailure(member.memberId, 'preTurnCancellation')
       this.clearMemberFailure(member.memberId, 'capabilityApply')
       this.nameMemberSession(member, created.agent)
@@ -3727,7 +3800,9 @@ export default class AgentTeam extends TypertRemoteService {
       this.memberRuntime.forgetMember(member.memberId, scopeKey)
       const message = error instanceof Error ? error.message : String(error)
       this.ctx.logger.warn(`agent-team: activation failed for member '${this.memberLabel(member.memberId)}' in work domain '${scopeKey}': ${message}`)
-      this.setActivationDiagnostic(member.memberId, this.activationDiagnosticOf(error, sessionId))
+      if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) {
+        this.setActivationDiagnostic(member.memberId, this.activationDiagnosticOf(error, sessionId))
+      }
     } finally {
       // Activation only changes this Workspace's presence projection.
       this.emitMemberPresenceChanged(member)

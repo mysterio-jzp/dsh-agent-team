@@ -64,6 +64,7 @@ describe('Team Member private memory composition', () => {
     ctx.provide('agentTeam', {
       memberForAgent: (subject: Agent) => subject === agent ? { privateMemoryPath: root } : undefined,
       workspacesForAgent: () => workspaces,
+      workDomainForAgent: () => undefined,
     } as never)
     await mount(ctx)
 
@@ -88,6 +89,34 @@ describe('Team Member private memory composition', () => {
     const removed = await preStep(ctx, agent)
     expect(removed.kind === 'enter' && removed.messages.at(-1)?.content[0]).toEqual(expect.objectContaining({ text: expect.stringContaining('index is empty') }))
     expect(removed.kind === 'enter' && removed.messages.at(-1)?.content[0]).toEqual(expect.objectContaining({ text: expect.stringContaining(`Memory index: ${root}/memory.md`) }))
+    await ctx.fiber.dispose()
+  })
+
+  it('injects only the bound domain directory snapshot into its Session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'team-member-domain-'))
+    roots.push(root)
+    const ctx = new Context()
+    const agent = fakeAgent(ctx)
+    const selectedRoot = join(root, 'domain-current')
+    const selectedAdditional = join(root, 'domain-current-extra')
+    const otherDomainPath = join(root, 'domain-other')
+    ctx.provide('agentTeam', {
+      memberForAgent: () => ({ privateMemoryPath: root }),
+      workspacesForAgent: () => [{ workspaceId: 'workspace:default', path: root, default: true }],
+      workDomainForAgent: () => ({
+        scopeKey: 'thread:thread:current', scopeKind: 'thread', scopeRef: 'thread:current',
+        sessionId: agent.session.id, workingDirectories: [selectedRoot, selectedAdditional],
+      }),
+    } as never)
+    await mount(ctx)
+
+    const result = await preStep(ctx, agent)
+    const content = result.kind === 'enter' ? result.messages.at(-1)?.content[0] : undefined
+    const text = content?.type === 'text' ? content.text : undefined
+    expect(text).toContain(selectedRoot)
+    expect(text).toContain(selectedAdditional)
+    expect(text).not.toContain(otherDomainPath)
+    expect(text).toContain('Do not carry bare relative paths from another work domain')
     await ctx.fiber.dispose()
   })
 

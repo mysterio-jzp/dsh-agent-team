@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isAbsolute } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
 import type { SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
@@ -22,6 +23,8 @@ import type {
   AgentTeamChannelMemberRemovedOperation,
   AgentTeamChannelRef,
   AgentTeamChannelUpdatedOperation,
+  AgentTeamChannelWorkingDirectoriesUpdatedOperation,
+  AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation,
   AgentTeamContextCheckpointRef,
   AgentTeamClaim,
   AgentTeamClaimActivity,
@@ -35,6 +38,12 @@ import type {
   AgentTeamConfirmationToken,
   AgentTeamCreateChannelRequest,
   AgentTeamCreateChannelResult,
+  AgentTeamChannelWorkingDirectorySettingsResult,
+  AgentTeamChannelWorkingDirectorySettingsRequest,
+  AgentTeamUpdateChannelWorkingDirectoriesRequest,
+  AgentTeamUpdateChannelWorkingDirectoriesResult,
+  AgentTeamUpdateChannelMemberWorkingDirectoriesRequest,
+  AgentTeamUpdateChannelMemberWorkingDirectoriesResult,
   AgentTeamDirectMarker,
   AgentTeamDmRequest,
   AgentTeamActiveTaskThread,
@@ -133,6 +142,7 @@ import type {
   AgentTeamThreadObservations,
   AgentTeamThreadObservationsRequest,
   AgentTeamThreadRef,
+  AgentTeamWorkingDirectorySet,
   AgentTeamThreadPromotedOperation,
   AgentTeamPromoteThreadRequest,
   AgentTeamPromoteThreadResult,
@@ -215,6 +225,8 @@ export interface AgentTeamAuthorizedBindMemberScopeRequest {
   readonly memberId: AgentTeamMemberId
   /** The domain and the Session minted for it; namespace fields are re-derived from the key at commit. */
   readonly binding: AgentTeamMemberScopeSession
+  /** Current root of the domain's Workspace, used only when no configured set overrides it. */
+  readonly workspaceRoot?: string | undefined
   readonly actor: AgentTeamHumanActor
 }
 
@@ -339,6 +351,14 @@ export interface AgentTeamAuthorizedUpdateChannelRequest extends AgentTeamUpdate
   readonly actor: AgentTeamHumanActor
 }
 
+export interface AgentTeamAuthorizedUpdateChannelWorkingDirectoriesRequest extends AgentTeamUpdateChannelWorkingDirectoriesRequest {
+  readonly actor: AgentTeamHumanActor
+}
+
+export interface AgentTeamAuthorizedUpdateChannelMemberWorkingDirectoriesRequest extends AgentTeamUpdateChannelMemberWorkingDirectoriesRequest {
+  readonly actor: AgentTeamHumanActor
+}
+
 export interface AgentTeamAuthorizedArchiveChannelRequest extends AgentTeamArchiveChannelRequest {
   readonly actor: AgentTeamHumanActor
 }
@@ -442,6 +462,8 @@ interface Projection {
   /** Member ↔ Workspace participation relation: the Workspace authorization set, seeded by member-added with the Member's default Workspace. */
   readonly participations: Map<AgentTeamMemberId, Set<WorkspaceId>>
   readonly memberships: Map<AgentTeamChannelRef, Set<AgentTeamMemberId>>
+  readonly channelWorkingDirectories: Map<AgentTeamChannelRef, AgentTeamWorkingDirectorySet>
+  readonly channelMemberWorkingDirectories: Map<AgentTeamChannelRef, Map<AgentTeamMemberId, AgentTeamWorkingDirectorySet>>
   readonly claims: Map<AgentTeamClaimRef, AgentTeamClaim>
   readonly humanTodos: Map<AgentTeamHumanTodoRef, AgentTeamHumanTodo>
   readonly tasks: Map<AgentTeamTaskRef, AgentTeamTask>
@@ -505,6 +527,7 @@ interface AgentTeamAttentionObservation {
 
 function emptyProjection(): Projection {
   return { byRequest: new Map(), byOperation: new Map(), ordered: [], channels: new Map(), members: new Map(), participations: new Map(), memberships: new Map(),
+    channelWorkingDirectories: new Map(), channelMemberWorkingDirectories: new Map(),
     claims: new Map(), tasks: new Map(), threads: new Map(), attention: new Map(), directMarkers: new Map(), activityMarkers: new Map(),
     orderedFacts: [], claimsByTask: new Map(), humanTodos: new Map(), humanTodosByThread: new Map(), factsByThread: new Map(), channelRefByThread: new Map(), mentionsByMessage: new Map(), messageCountByThread: new Map(),
     messagesByRef: new Map(),
@@ -784,6 +807,66 @@ export class AgentTeamLedger {
     })
   }
 
+  /** Human replacement or clearing of one Channel's ordered default directory set. */
+  updateChannelWorkingDirectories(request: AgentTeamAuthorizedUpdateChannelWorkingDirectoriesRequest): Promise<AgentTeamLedgerResult<AgentTeamUpdateChannelWorkingDirectoriesResult>> {
+    return this.enqueue(async () => {
+      const workingDirectories = this.normalizeWorkingDirectorySet(request.workingDirectories)
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameChannelWorkingDirectoriesUpdate(existing, request, workingDirectories)
+        return this.resolved(this.channelWorkingDirectoriesUpdateResult(existing))
+      }
+      this.assertHumanActor(request.actor)
+      this.requireActiveChannel(request.workspaceId, request.channelRef)
+      const operation: AgentTeamChannelWorkingDirectoriesUpdatedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/channel-working-directories-updated',
+        data: Object.freeze({ workspaceId: request.workspaceId, channelRef: request.channelRef, workingDirectories }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.channelWorkingDirectoriesUpdateResult(operation))
+    })
+  }
+
+  /** Human replacement or clearing of one Member × Channel directory override. */
+  updateChannelMemberWorkingDirectories(request: AgentTeamAuthorizedUpdateChannelMemberWorkingDirectoriesRequest): Promise<AgentTeamLedgerResult<AgentTeamUpdateChannelMemberWorkingDirectoriesResult>> {
+    return this.enqueue(async () => {
+      const workingDirectories = this.normalizeWorkingDirectorySet(request.workingDirectories)
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameChannelMemberWorkingDirectoriesUpdate(existing, request, workingDirectories)
+        return this.resolved(this.channelMemberWorkingDirectoriesUpdateResult(existing))
+      }
+      this.assertHumanActor(request.actor)
+      const channel = this.requireActiveChannel(request.workspaceId, request.channelRef)
+      const member = this.requireMember(request.memberId)
+      if (member.state === 'inactive' || member.state === 'archived') throw new Error(`Agent Member '${member.handle}' is ${member.state} and cannot receive a Channel directory override`)
+      if (!this.participatesIn(request.memberId, channel.workspaceId) || this.state.memberships.get(channel.channelRef)?.has(member.memberId) !== true) {
+        throw new Error(`Agent Member '${member.handle}' is not a member of Channel '${channel.channelRef}'`)
+      }
+      const operation: AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/channel-member-working-directories-updated',
+        data: Object.freeze({ workspaceId: request.workspaceId, channelRef: request.channelRef, memberId: request.memberId, workingDirectories }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.channelMemberWorkingDirectoriesUpdateResult(operation))
+    })
+  }
+
+  /** Read the Human-facing settings projection, separate from model-facing `view`. */
+  channelWorkingDirectorySettings(request: AgentTeamChannelWorkingDirectorySettingsRequest): AgentTeamChannelWorkingDirectorySettingsResult {
+    this.requireActiveChannel(request.workspaceId, request.channelRef)
+    const overrides = [...(this.state.channelMemberWorkingDirectories.get(request.channelRef)?.entries() ?? [])]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([memberId, workingDirectories]) => Object.freeze({ memberId, workingDirectories }))
+    return Object.freeze({
+      channelRef: request.channelRef,
+      defaultWorkingDirectories: this.state.channelWorkingDirectories.get(request.channelRef) ?? null,
+      memberOverrides: Object.freeze(overrides),
+    })
+  }
+
   addMember(request: AgentTeamAuthorizedAddMemberRequest): Promise<AgentTeamLedgerResult<AgentTeamDurableMemberResult>> {
     return this.enqueue(async () => {
       const existing = this.state.byRequest.get(request.requestId)
@@ -975,13 +1058,21 @@ export class AgentTeamLedger {
       const member = this.requireMember(request.memberId)
       if (member.state !== 'enabled') throw new Error(`Agent Member '${member.handle}' is ${member.state}; only enabled Members can bind a work domain`)
       if (!this.participatesIn(request.memberId, request.workspaceId)) throw new Error(`Agent Member '${member.handle}' does not participate in this Workspace`)
-      // Re-derived from the key, then held to the same invariant replay
-      // enforces: the write path and the read path share one authority.
-      const binding = memberScopeSession(request.binding.scopeKey, request.binding.sessionId)
-      this.assertMemberScopeBinding(this.state, request.memberId, binding)
+      const scope = memberScopeSession(request.binding.scopeKey, request.binding.sessionId)
+      this.assertMemberScopeBinding(this.state, request.memberId, scope)
+      if (scope.scopeKind !== 'thread' || scope.scopeRef === undefined) throw new Error('only a Thread work domain can bind a scoped Session')
+      const channelRef = this.channelRefForThreadFrom(this.state, scope.scopeRef as AgentTeamThreadRef)
+      if (channelRef === undefined) throw new Error(`Thread '${scope.scopeRef}' has no active Channel`)
+      const channel = this.requireActiveChannel(request.workspaceId, channelRef)
+      if (channel.workspaceId !== request.workspaceId) throw new Error(`Thread '${scope.scopeRef}' belongs to another Workspace`)
+      const workingDirectories = this.effectiveWorkingDirectories(this.state, channelRef, request.memberId, request.workspaceRoot)
+      // Namespace metadata and the effective ordered path set are derived at
+      // the one durable bind. Retries return this snapshot even after config edits.
+      const binding = memberScopeSession(scope.scopeKey, scope.sessionId, workingDirectories)
+      this.assertMemberScopeBinding(this.state, request.memberId, binding, request.workspaceId)
       const operation: AgentTeamMemberScopeSessionBoundOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/member-scope-session-bound',
-        data: Object.freeze({ memberId: request.memberId, binding }),
+        data: Object.freeze({ memberId: request.memberId, workspaceId: request.workspaceId, binding }),
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
@@ -1015,6 +1106,11 @@ export class AgentTeamLedger {
       return member === undefined ? undefined : memberScopeSession(scopeKey, member.sessionId)
     }
     return this.state.memberScopes.get(memberId)?.get(scopeKey)
+  }
+
+  /** Workspace that owns a work domain: the Member's default Workspace or the Thread's Channel Workspace. */
+  workspaceForMemberScope(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): WorkspaceId | undefined {
+    return this.workspaceForScopeFrom(this.state, memberId, scopeKey)
   }
 
   /**
@@ -2438,6 +2534,9 @@ export class AgentTeamLedger {
       case 'team/channel-updated':
         // The rename is visible in the sidebar list and any open Channel/Thread header.
         return [{ kind: 'workspace', workspaceId: operation.data.workspaceId }, { kind: 'channel', channelRef: operation.data.channel.channelRef }]
+      case 'team/channel-working-directories-updated':
+      case 'team/channel-member-working-directories-updated':
+        return [{ kind: 'workspace', workspaceId: operation.data.workspaceId }, { kind: 'channel', channelRef: operation.data.channelRef }]
       case 'team/member-added':
       case 'team/member-suspended':
       case 'team/member-resumed':
@@ -2565,6 +2664,8 @@ export class AgentTeamLedger {
       case 'team/initialized':
       case 'team/channel-created':
       case 'team/channel-updated':
+      case 'team/channel-working-directories-updated':
+      case 'team/channel-member-working-directories-updated':
       case 'team/member-added':
       case 'team/member-workspace-joined':
       case 'team/member-suspended':
@@ -2721,7 +2822,7 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/member-scope-session-bound') {
       assertHuman()
-      this.assertMemberScopeBinding(projection, operation.data.memberId, operation.data.binding)
+      this.assertMemberScopeBinding(projection, operation.data.memberId, operation.data.binding, operation.data.workspaceId)
       return
     }
     if (operation.kind === 'team/channel-updated') {
@@ -2732,6 +2833,28 @@ export class AgentTeamLedger {
         || operation.data.channel.state !== prior.state) {
         throw new Error('invalid Channel update')
       }
+      return
+    }
+    if (operation.kind === 'team/channel-working-directories-updated') {
+      assertHuman()
+      const channel = projection.channels.get(operation.data.channelRef)
+      if (channel === undefined || channel.state !== 'active' || channel.workspaceId !== operation.data.workspaceId) {
+        throw new Error('invalid Channel working-directory update')
+      }
+      this.normalizeWorkingDirectorySet(operation.data.workingDirectories)
+      return
+    }
+    if (operation.kind === 'team/channel-member-working-directories-updated') {
+      assertHuman()
+      const channel = projection.channels.get(operation.data.channelRef)
+      const member = projection.members.get(operation.data.memberId)
+      if (channel === undefined || channel.state !== 'active' || channel.workspaceId !== operation.data.workspaceId
+        || member === undefined || member.state === 'inactive' || member.state === 'archived'
+        || !this.participatesInFrom(projection, operation.data.memberId, channel.workspaceId)
+        || projection.memberships.get(channel.channelRef)?.has(member.memberId) !== true) {
+        throw new Error('invalid Member × Channel working-directory update')
+      }
+      this.normalizeWorkingDirectorySet(operation.data.workingDirectories)
       return
     }
     if (operation.kind === 'team/member-updated') {
@@ -3324,7 +3447,8 @@ export class AgentTeamLedger {
       if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) target.members.set(operation.data.member.memberId, operation.data.member)
       else {
         const scopes = target.memberScopes.get(operation.data.member.memberId) ?? new Map<AgentTeamMemberScopeKey, AgentTeamMemberScopeSession>()
-        scopes.set(scopeKey, memberScopeSession(scopeKey, operation.data.member.sessionId))
+        const prior = scopes.get(scopeKey)
+        scopes.set(scopeKey, memberScopeSession(scopeKey, operation.data.member.sessionId, prior?.workingDirectories))
         target.memberScopes.set(operation.data.member.memberId, scopes)
       }
       const last = target.previousSessions.get(operation.data.member.memberId) ?? new Map<AgentTeamMemberScopeKey, SessionId>()
@@ -3349,12 +3473,29 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/member-scope-session-bound') {
       const scopes = target.memberScopes.get(operation.data.memberId) ?? new Map<AgentTeamMemberScopeKey, AgentTeamMemberScopeSession>()
-      scopes.set(operation.data.binding.scopeKey, operation.data.binding)
+      const binding = memberScopeSession(operation.data.binding.scopeKey, operation.data.binding.sessionId, operation.data.binding.workingDirectories)
+      scopes.set(binding.scopeKey, binding)
       target.memberScopes.set(operation.data.memberId, scopes)
       return
     }
     if (operation.kind === 'team/channel-updated') {
       target.channels.set(operation.data.channel.channelRef, operation.data.channel)
+      return
+    }
+    if (operation.kind === 'team/channel-working-directories-updated') {
+      if (operation.data.workingDirectories === null) target.channelWorkingDirectories.delete(operation.data.channelRef)
+      else target.channelWorkingDirectories.set(operation.data.channelRef, this.normalizeWorkingDirectorySet(operation.data.workingDirectories)!)
+      return
+    }
+    if (operation.kind === 'team/channel-member-working-directories-updated') {
+      const overrides = target.channelMemberWorkingDirectories.get(operation.data.channelRef) ?? new Map<AgentTeamMemberId, AgentTeamWorkingDirectorySet>()
+      if (operation.data.workingDirectories === null) {
+        overrides.delete(operation.data.memberId)
+        if (overrides.size === 0) target.channelMemberWorkingDirectories.delete(operation.data.channelRef)
+      } else {
+        overrides.set(operation.data.memberId, this.normalizeWorkingDirectorySet(operation.data.workingDirectories)!)
+        target.channelMemberWorkingDirectories.set(operation.data.channelRef, overrides)
+      }
       return
     }
     if (operation.kind === 'team/member-updated') {
@@ -4775,10 +4916,35 @@ export class AgentTeamLedger {
   }
 
   private assertSameMemberScopeBound(operation: AgentTeamOperation, request: AgentTeamAuthorizedBindMemberScopeRequest): asserts operation is AgentTeamMemberScopeSessionBoundOperation {
+    const operationWorkspaceId = operation.kind === 'team/member-scope-session-bound'
+      ? operation.data.workspaceId ?? this.workspaceForScopeFrom(this.state, operation.data.memberId, operation.data.binding.scopeKey)
+      : undefined
     if (operation.kind !== 'team/member-scope-session-bound' || !this.sameActor(operation.actor, request.actor)
       || operation.data.memberId !== request.memberId
       || operation.data.binding.scopeKey !== request.binding.scopeKey
-      || operation.data.binding.sessionId !== request.binding.sessionId) this.throwRequestCollision(request.requestId)
+      || operation.data.binding.sessionId !== request.binding.sessionId
+      || operationWorkspaceId !== request.workspaceId) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameChannelWorkingDirectoriesUpdate(
+    operation: AgentTeamOperation,
+    request: AgentTeamAuthorizedUpdateChannelWorkingDirectoriesRequest,
+    workingDirectories: AgentTeamWorkingDirectorySet | null,
+  ): asserts operation is AgentTeamChannelWorkingDirectoriesUpdatedOperation {
+    if (operation.kind !== 'team/channel-working-directories-updated' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.channelRef !== request.channelRef
+      || !isDeepStrictEqual(operation.data.workingDirectories, workingDirectories)) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameChannelMemberWorkingDirectoriesUpdate(
+    operation: AgentTeamOperation,
+    request: AgentTeamAuthorizedUpdateChannelMemberWorkingDirectoriesRequest,
+    workingDirectories: AgentTeamWorkingDirectorySet | null,
+  ): asserts operation is AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation {
+    if (operation.kind !== 'team/channel-member-working-directories-updated' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.channelRef !== request.channelRef
+      || operation.data.memberId !== request.memberId
+      || !isDeepStrictEqual(operation.data.workingDirectories, workingDirectories)) this.throwRequestCollision(request.requestId)
   }
 
   private assertSameMemberSessionRolledOver(operation: AgentTeamOperation, request: AgentTeamAuthorizedRolloverMemberSessionRequest): asserts operation is AgentTeamMemberSessionRolledOverOperation {
@@ -4975,16 +5141,62 @@ export class AgentTeamLedger {
     return left.threadRef === right.threadRef && left.taskRef === right.taskRef && left.revision === right.revision
   }
 
+  private workspaceForScopeFrom(projection: Projection, memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): WorkspaceId | undefined {
+    const member = projection.members.get(memberId)
+    if (member === undefined) return undefined
+    if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) return member.workspaceId
+    const { scopeKind, scopeRef } = parseMemberScopeKey(scopeKey)
+    if (scopeKind !== 'thread' || scopeRef === undefined) return undefined
+    const channelRef = this.channelRefForThreadFrom(projection, scopeRef as AgentTeamThreadRef)
+    return channelRef === undefined ? undefined : projection.channels.get(channelRef)?.workspaceId
+  }
+
+  private effectiveWorkingDirectories(
+    projection: Projection,
+    channelRef: AgentTeamChannelRef,
+    memberId: AgentTeamMemberId,
+    workspaceRoot: string | undefined,
+  ): AgentTeamWorkingDirectorySet {
+    const configured = projection.channelMemberWorkingDirectories.get(channelRef)?.get(memberId)
+      ?? projection.channelWorkingDirectories.get(channelRef)
+    if (configured !== undefined) return configured
+    if (workspaceRoot === undefined) throw new Error(`Workspace root is unavailable and Channel '${channelRef}' has no configured work directories`)
+    const fallback = this.normalizeWorkingDirectorySet([workspaceRoot])
+    if (fallback === null) throw new Error('Workspace root must be an absolute directory path')
+    return fallback
+  }
+
+  private normalizeWorkingDirectorySet(value: AgentTeamWorkingDirectorySet | null): AgentTeamWorkingDirectorySet | null {
+    if (value === null) return null
+    if (!Array.isArray(value) || value.length < 1 || value.length > 4) {
+      throw new Error('working directory set must contain between one and four absolute paths')
+    }
+    for (const path of value) {
+      if (typeof path !== 'string' || path.length === 0 || path.includes(String.fromCharCode(0)) || !isAbsolute(path)) {
+        throw new Error('each working directory must be a non-empty absolute path')
+      }
+    }
+    return Object.freeze([...value])
+  }
+
   /**
    * Whether one work domain's durable binding is well formed, against the very
    * projection it joins. The write path and replay call this same authority, so
    * a binding that commit accepts cannot fail replay, and one replay rejects
    * can never be written.
    */
-  private assertMemberScopeBinding(projection: Projection, memberId: AgentTeamMemberId, binding: AgentTeamMemberScopeSession): void {
-    // Every namespace field is derived from the key, so a binding that
-    // disagrees with its own key is a corrupt record, not a variant shape.
-    if (!isDeepStrictEqual(memberScopeSession(binding.scopeKey, binding.sessionId), binding)) throw new Error('invalid Member scope binding')
+  private assertMemberScopeBinding(
+    projection: Projection,
+    memberId: AgentTeamMemberId,
+    binding: AgentTeamMemberScopeSession,
+    workspaceId?: WorkspaceId,
+  ): void {
+    // Every namespace field and path set is derived from durable facts, so a
+    // binding that disagrees with its key or carries an invalid snapshot is corrupt.
+    const directories = binding.workingDirectories === undefined
+      ? undefined
+      : this.normalizeWorkingDirectorySet(binding.workingDirectories) ?? undefined
+    if (!isDeepStrictEqual(memberScopeSession(binding.scopeKey, binding.sessionId, directories), binding)) throw new Error('invalid Member scope binding')
     const { scopeKind, scopeRef } = parseMemberScopeKey(binding.scopeKey)
     // The default domain IS `member.sessionId`; binding it as well would give
     // one Session two authorities and let a transition move the wrong one.
@@ -4999,12 +5211,20 @@ export class AgentTeamLedger {
       || [...scopes?.values() ?? []].some(other => other.sessionId === binding.sessionId)) {
       throw new Error('invalid Member scope binding')
     }
-    // The domain's ref must be one this ledger knows: a binding to a Thread,
-    // Channel, or Member that never existed is state no reader can resolve.
-    const known = scopeRef !== undefined && (scopeKind === 'thread'
-      ? projection.threads.has(scopeRef as AgentTeamThreadRef)
-      : scopeKind === 'channel' ? projection.channels.has(scopeRef as AgentTeamChannelRef) : projection.members.has(scopeRef as AgentTeamMemberId))
-    if (!known) throw new Error('invalid Member scope binding ref')
+    const channelRef = scopeRef === undefined || scopeKind !== 'thread'
+      ? undefined
+      : this.channelRefForThreadFrom(projection, scopeRef as AgentTeamThreadRef)
+    const channel = channelRef === undefined ? undefined : projection.channels.get(channelRef)
+    const resolvedWorkspaceId = this.workspaceForScopeFrom(projection, memberId, binding.scopeKey)
+    const legacySnapshot = binding.workingDirectories === undefined && workspaceId === undefined
+    if (channelRef === undefined || channel === undefined || channel.state !== 'active' || resolvedWorkspaceId === undefined
+      || (workspaceId !== undefined && resolvedWorkspaceId !== workspaceId)
+      || !this.participatesInFrom(projection, memberId, channel.workspaceId)
+      || projection.memberships.get(channelRef)?.has(memberId) !== true
+      || (!legacySnapshot && binding.workingDirectories === undefined)
+      || (binding.workingDirectories !== undefined && workspaceId === undefined)) {
+      throw new Error('invalid Member scope binding ref or Workspace')
+    }
   }
 
   /**
@@ -5083,6 +5303,15 @@ export class AgentTeamLedger {
 
   private channelUpdateResult(operation: AgentTeamChannelUpdatedOperation): AgentTeamUpdateChannelResult {
     return Object.freeze({ receipt: this.receipt(operation), channel: operation.data.channel })
+  }
+
+  private channelWorkingDirectoriesUpdateResult(operation: AgentTeamChannelWorkingDirectoriesUpdatedOperation): AgentTeamUpdateChannelWorkingDirectoriesResult {
+    return Object.freeze({ receipt: this.receipt(operation), channelRef: operation.data.channelRef, workingDirectories: operation.data.workingDirectories })
+  }
+
+  private channelMemberWorkingDirectoriesUpdateResult(operation: AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation): AgentTeamUpdateChannelMemberWorkingDirectoriesResult {
+    return Object.freeze({ receipt: this.receipt(operation), channelRef: operation.data.channelRef, memberId: operation.data.memberId,
+      workingDirectories: operation.data.workingDirectories })
   }
 
   private memberScopeBoundResult(operation: AgentTeamMemberScopeSessionBoundOperation): AgentTeamMemberScopeBoundResult {
