@@ -33,15 +33,16 @@ export function TeamMemberAvatar({ status, t, avatarUrl, memberAvatars }: {
   const face = avatarUrl ?? resolved
   return (
     <Tooltip label={label} delayMs={300}>
-      <MemberAvatarSeat
-        memberId={status.member.memberId}
-        handle={status.member.handle}
-        avatarUrl={face}
-        size={24}
-        label={label}
-        className={css.agentAvatar}
-        badge={<span className={css.agentAvatarBadge} aria-hidden="true"><TeamStateDot state={state} /></span>}
-      />
+      <span className={css.agentAvatar}>
+        <MemberAvatarSeat
+          memberId={status.member.memberId}
+          handle={status.member.handle}
+          avatarUrl={face}
+          size={24}
+          label={label}
+        />
+        <span className={css.agentAvatarBadge} aria-hidden="true"><TeamStateDot state={state} /></span>
+      </span>
     </Tooltip>
   )
 }

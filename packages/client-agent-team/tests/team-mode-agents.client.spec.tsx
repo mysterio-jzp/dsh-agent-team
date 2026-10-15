@@ -106,6 +106,20 @@ describe('Team agent surfaces', () => {
     await b.runtime.dispose()
   })
 
+  it('keeps the sidebar presence badge outside the avatar clipping seat', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1' })
+    await waitFor(() => expect(b.view.container.querySelectorAll('[draggable="true"]').length).toBeGreaterThanOrEqual(4))
+    const row = b.view.container.querySelector('[data-agent-row]')
+    expect(row).not.toBeNull()
+    const avatar = row!.querySelector('[data-avatar-size="24"]')
+    const badge = row!.querySelector('[class*="agentAvatarBadge"]')
+    expect(avatar).not.toBeNull()
+    expect(badge).not.toBeNull()
+    expect(badge?.parentElement).toBe(avatar?.parentElement)
+    expect(avatar?.contains(badge)).toBe(false)
+    await b.runtime.dispose()
+  })
+
   it('enters Team with existing Workspaces and restores the shipped seats', async () => {
     const b = await runtimeWithTeam()
     expect(b.view.getByText('普通工作区')).toBeTruthy()
