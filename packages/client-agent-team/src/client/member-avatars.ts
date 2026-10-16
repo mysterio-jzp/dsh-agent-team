@@ -79,29 +79,32 @@ export class TeamMemberAvatars {
    * @param url - displayable URL, or null when the bytes do not decode.
    */
   seed(avatarRef: string, url: string | null): void {
+    // Uploaded bytes supersede any Host read that is still in flight.
+    this.pending.delete(avatarRef)
     this.commit(avatarRef, url === null ? UNAVAILABLE : { status: 'ready', url })
   }
 
   private load(avatarRef: string): Promise<void> {
     const running = this.pending.get(avatarRef)
     if (running !== undefined) return running
-    const loading = this.read(avatarRef).finally(() => {
+    const loading = this.read(avatarRef).then(url => {
+      if (this.pending.get(avatarRef) !== loading) return
+      this.commit(avatarRef, url === null ? UNAVAILABLE : { status: 'ready', url })
+    }).finally(() => {
       if (this.pending.get(avatarRef) === loading) this.pending.delete(avatarRef)
     })
     this.pending.set(avatarRef, loading)
     return loading
   }
 
-  private async read(avatarRef: string): Promise<void> {
-    let url: string | null
+  private async read(avatarRef: string): Promise<string | null> {
     try {
-      url = await this.loader.loadAvatarUrl(avatarRef)
+      return await this.loader.loadAvatarUrl(avatarRef)
     } catch {
       // A dropped carrier and a refused read both leave the seat without bytes,
       // and the initial is what it owes the reader either way.
-      url = null
+      return null
     }
-    this.commit(avatarRef, url === null ? UNAVAILABLE : { status: 'ready', url })
   }
 
   private commit(avatarRef: string, state: TeamMemberAvatarState): void {

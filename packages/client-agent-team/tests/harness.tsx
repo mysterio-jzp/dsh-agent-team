@@ -3,7 +3,7 @@ import type { AgentTeamChangesRequest } from '@contexera/dsh-agent-team/types'
 import { afterEach, expect, vi } from 'vitest'
 import { useState } from 'react'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import type { AgentTeamAddMemberRequest, AgentTeamCreateChannelRequest, AgentTeamMemberDiagnostic, AgentTeamReplyRequest, AgentTeamSendMessageRequest, AgentTeamTask } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamAddMemberRequest, AgentTeamClientMember, AgentTeamCreateChannelRequest, AgentTeamMemberDiagnostic, AgentTeamReplyRequest, AgentTeamSendMessageRequest, AgentTeamTask, AgentTeamUpdateMemberRequest } from '@contexera/dsh-agent-team/types'
 import { COMMON_NS, LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { en as commonEn, zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/index.ts'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -87,7 +87,7 @@ interface EnvironmentSeed {
 interface SeededMessage {
   readonly body: string
   readonly occurredAt: string
-  readonly sender?: 'human' | 'agent'
+  readonly sender?: 'human' | 'agent' | 'worker'
   readonly mentions?: readonly string[]
 }
 
@@ -179,9 +179,12 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
     presence,
     ...(diagnostic === undefined ? {} : { diagnostic }),
   })
-  let memberRows = [
+  type TestMemberRow = ReturnType<typeof status> & {
+    member: ReturnType<typeof status>['member'] & Pick<AgentTeamClientMember, 'model' | 'capabilities'>
+  }
+  let memberRows: TestMemberRow[] = [
     status('member:builder', 'w1', 'builder', 'available', undefined, options?.memberAvatarRefs?.['member:builder']),
-    status('member:worker', 'w1', 'worker', 'working'),
+    status('member:worker', 'w1', 'worker', 'working', undefined, options?.memberAvatarRefs?.['member:worker']),
     status('member:failed', 'w1', 'failed', 'error', { class: 'runtime', detail: 'model failed' }),
     status('member:offline', 'w1', 'offline', 'unavailable', { class: 'preset-composition', detail: 'preset missing' }),
     status('member:builder-beta', 'w2', 'builder', 'available'),
@@ -215,7 +218,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   const seedTaskRef = options?.seedTaskRef ?? 'task:1'
   const seedThreadRef = options?.seedThreadRef ?? 'thread:1'
   let viewItems: Array<Record<string, unknown>> = (options?.seededMessages ?? []).map((seed, index) => ({
-    message: { messageRef: `message:seed-${index}`, channelRef: 'channel:engineering', threadRef: seedThreadRef, taskRef: seedTaskRef, sender: seed.sender === 'agent' ? 'member:builder' : 'member:human', body: seed.body, topLevel: true, sequence: index + 1, occurredAt: seed.occurredAt },
+    message: { messageRef: `message:seed-${index}`, channelRef: 'channel:engineering', threadRef: seedThreadRef, taskRef: seedTaskRef, sender: seed.sender === 'agent' ? 'member:builder' : seed.sender === 'worker' ? 'member:worker' : 'member:human', body: seed.body, topLevel: true, sequence: index + 1, occurredAt: seed.occurredAt },
     mentions: seed.mentions ?? [],
     task: { taskRef: seedTaskRef, channelRef: 'channel:engineering', threadRef: seedThreadRef,
       status: options?.seedTaskStatus ?? 'todo', resolution: 'open' },
@@ -248,10 +251,26 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
       ? { ...channel, name: request.name, description: request.description } : channel)
     return { ok: true as const, value: { receipt: {}, channel: channels.find(channel => channel.channelRef === request.channelRef) } }
   })
-  const updateMember = vi.fn(async (request: { requestId: string; memberId: string; handle: string; description: string; model?: { provider: string; model: string } }) => {
-    memberRows = memberRows.map(entry => entry.member.memberId === request.memberId
-      ? { ...entry, member: { ...entry.member, handle: request.handle, description: request.description, ...(request.model === undefined ? {} : { model: request.model }) } }
-      : entry)
+  const updateMember = vi.fn(async (request: AgentTeamUpdateMemberRequest) => {
+    memberRows = memberRows.map(entry => {
+      if (entry.member.memberId !== request.memberId) return entry
+      const { model: priorModel, capabilities: priorCapabilities, avatarRef: priorAvatarRef, ...member } = entry.member
+      const model = request.model === undefined ? priorModel : request.model === null ? undefined : request.model
+      const capabilities = request.capabilities === undefined ? priorCapabilities : request.capabilities === null ? undefined : request.capabilities
+      const avatarRef = request.avatarRef === undefined ? priorAvatarRef : request.avatarRef === null ? undefined : request.avatarRef
+      return {
+        ...entry,
+        member: {
+          ...member,
+          handle: request.handle,
+          description: request.description,
+          ...(model === undefined ? {} : { model }),
+          ...(capabilities === undefined ? {} : { capabilities }),
+          ...(avatarRef === undefined ? {} : { avatarRef }),
+        },
+      }
+    })
+    publishWorkspaceUpdate()
     const status = memberRows.find(entry => entry.member.memberId === request.memberId)
     return { ok: true as const, value: { receipt: {}, ...(status === undefined ? {} : { status }) } }
   })

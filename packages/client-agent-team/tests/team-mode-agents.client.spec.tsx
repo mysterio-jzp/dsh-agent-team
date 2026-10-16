@@ -415,6 +415,27 @@ describe('Team agent surfaces', () => {
     await b.runtime.dispose()
   })
 
+  it('shows a newly saved Member avatar in the sidebar from the upload cache', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1' })
+    try {
+      await b.view.findByText('builder')
+      expect(b.view.container.querySelector('[data-agent-row] [data-avatar-size="24"]')?.getAttribute('data-avatar')).toBe('initial')
+      fireEvent.click(b.view.getByRole('button', { name: 'builder 的操作' }))
+      fireEvent.click(await b.view.findByRole('menuitem', { name: '编辑 Agent' }))
+      const editor = b.view.getByRole('dialog', { name: '编辑 Agent' })
+      const picker = editor.querySelector('input[type="file"]') as HTMLInputElement
+      fireEvent.change(picker, { target: { files: [new File(['avatar-bytes'], 'avatar.png', { type: 'image/png' })] } })
+      await waitFor(() => expect(b.updateMember).toHaveBeenCalledWith(expect.objectContaining({
+        memberId: 'member:builder', avatarRef: 'member-avatar:1',
+      })))
+      await waitFor(() => expect(editor.querySelector('[data-avatar-size="64"]')?.getAttribute('data-avatar')).toBe('image'))
+      await waitFor(() => expect(b.view.container.querySelector('[data-agent-row] [data-avatar-size="24"]')?.getAttribute('data-avatar')).toBe('image'))
+      expect(b.getMemberAvatar).not.toHaveBeenCalledWith({ avatarRef: 'member-avatar:1' })
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
+
   it('opens the Member Session inside Team mode from the Agent card', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
     await b.runtime.sessions.add({ id: 'session:member:builder' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
@@ -665,10 +686,10 @@ describe('Team member editor partial update payload', () => {
     fireEvent.change(within(editor).getByLabelText('名称'), { target: { value: 'architect' } })
     fireEvent.click(within(editor).getByRole('button', { name: '保存' }))
     await waitFor(() => { expect(b.updateMember).toHaveBeenCalled() })
-    const payload = b.updateMember.mock.calls.at(-1)?.[0] as Record<string, unknown>
+    const payload = b.updateMember.mock.calls.at(-1)?.[0]
     // "Follow global default" is an explicit clear now; an omitted field would
     // keep a stuck pin. Capabilities stay out: an absent field no longer clears.
-    expect(payload.model).toBeNull()
-    expect('capabilities' in payload).toBe(false)
+    expect(payload?.model).toBeNull()
+    expect(payload).not.toHaveProperty('capabilities')
   })
 })

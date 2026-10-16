@@ -145,7 +145,8 @@ export const TeamMessage = memo(function TeamMessage({ senderName, memberId, hum
   // anything else keeps the initial, which is what the fallback promises.
   // A Member's own ref resolves through the shared map; the Human's row never
   // asks it, and a Member's row never reads `avatarUrl`.
-  const identityImage = useAvatarImage(human ? avatarUrl : useMemberAvatarUrl(memberAvatars, memberAvatarRef))
+  const memberAvatarUrl = useMemberAvatarUrl(memberAvatars, human ? undefined : memberAvatarRef)
+  const identityImage = useAvatarImage(human ? avatarUrl : memberAvatarUrl)
   // Literal bodies carry mention chips inline — Human input always, and
   // plain-prose Agent bodies where literal rendering loses nothing. Rich
   // Markdown keeps unmatched structured mentions in the trailing row.

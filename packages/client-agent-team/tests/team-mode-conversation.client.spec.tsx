@@ -205,6 +205,52 @@ describe('Team conversation surfaces', () => {
     await b.runtime.dispose()
   })
 
+  it('keeps saved Member avatars on their own Thread message seats', async () => {
+    const b = await runtimeWithTeam({
+      mode: 'team', workspaceId: 'w1', initialChannels: true,
+      seededMessages: [
+        { body: 'builder message', occurredAt: '2026-08-21T09:00:00.000Z', sender: 'agent' },
+        { body: 'worker message', occurredAt: '2026-08-21T09:01:00.000Z', sender: 'worker' },
+        { body: 'human message', occurredAt: '2026-08-21T09:02:00.000Z', sender: 'human' },
+      ],
+      memberAvatarRefs: { 'member:worker': 'member-avatar:worker' },
+      memberAvatarBytes: { 'member-avatar:worker': 'd29ya2Vy' },
+      humanProfile: { avatarRef: 'human-avatar:1' },
+    })
+    try {
+      fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+      const doors = await b.view.findAllByRole('button', { name: /打开 Task #1/ })
+      fireEvent.click(doors[0]!)
+      await b.view.findByRole('heading', { name: 'Task #1' })
+
+      const message = (index: number) => b.view.container.querySelector(`article[data-message-ref="message:seed-${index}"]`)
+      const memberSeat = (index: number) => message(index)?.querySelector('[data-avatar-size="24"]')
+      await waitFor(() => expect(memberSeat(1)?.getAttribute('data-avatar')).toBe('image'))
+      await waitFor(() => expect(message(2)?.querySelector('img[data-avatar="image"]')?.getAttribute('src')).toBe('data:image/png;base64,AAAA'))
+      expect(memberSeat(0)?.getAttribute('data-avatar')).toBe('initial')
+      expect(memberSeat(1)?.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,d29ya2Vy')
+
+      fireEvent.click(b.view.getByRole('button', { name: 'builder 的操作' }))
+      fireEvent.click(await b.view.findByRole('menuitem', { name: '编辑 Agent' }))
+      const editor = b.view.getByRole('dialog', { name: '编辑 Agent' })
+      const picker = editor.querySelector('input[type="file"]') as HTMLInputElement
+      fireEvent.change(picker, { target: { files: [new File(['avatar-bytes'], 'avatar.png', { type: 'image/png' })] } })
+      await waitFor(() => expect(b.updateMember).toHaveBeenCalledWith(expect.objectContaining({
+        memberId: 'member:builder', avatarRef: 'member-avatar:2',
+      })))
+      expect(b.getMemberAvatar).not.toHaveBeenCalledWith({ avatarRef: 'member-avatar:2' })
+      const persisted = await b.members({ workspaceId: 'w1' })
+      expect(persisted.value.find(status => status.member.memberId === 'member:builder')?.member.avatarRef).toBe('member-avatar:2')
+
+      await waitFor(() => expect(memberSeat(0)?.getAttribute('data-avatar')).toBe('image'))
+      expect(memberSeat(0)?.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,YXZhdGFyLWJ5dGVz')
+      expect(memberSeat(1)?.querySelector('img')?.getAttribute('src')).toBe('data:image/png;base64,d29ya2Vy')
+      expect(message(2)?.querySelector('img[data-avatar="image"]')?.getAttribute('src')).toBe('data:image/png;base64,AAAA')
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
+
   it('linkifies branded refs in agent plain-prose bodies that skip the mention path', async () => {
     const taskRef = 'task:0f0ad7ce-11d3-4c05-8a9e-6f2b1c9d7e31'
     const b = await runtimeWithTeam({

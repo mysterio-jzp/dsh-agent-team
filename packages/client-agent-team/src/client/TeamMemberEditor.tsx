@@ -335,10 +335,11 @@ export function AgentEditorDialog({ status, updateMember, loadModels, putMemberA
     }
     setAvatarBusy(true)
     try {
+      const bytesBase64 = bytesToBase64(new Uint8Array(await file.arrayBuffer()))
       const put = await putMemberAvatar({
         name: file.name,
         ...(file.type === '' ? {} : { mediaType: file.type }),
-        bytesBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
+        bytesBase64,
       })
       if (!put.ok) {
         setAvatarNotice(t('memberAvatarFailed', { message: put.error.message }))
@@ -349,6 +350,7 @@ export function AgentEditorDialog({ status, updateMember, loadModels, putMemberA
         setAvatarNotice(t('memberAvatarFailed', { message: saved.error.message }))
         return
       }
+      memberAvatars?.seed(put.value.avatarRef, `data:${put.value.mediaType};base64,${bytesBase64}`)
       setAvatarRef(put.value.avatarRef)
       await onCommitted()
     } finally {

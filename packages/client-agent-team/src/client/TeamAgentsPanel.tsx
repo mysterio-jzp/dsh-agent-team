@@ -374,7 +374,7 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
             setRowAlert(t('openAgentSessionFailed', { name: status.member.handle.replace(/^@/, ''), message }))
           })
         }}>
-          <TeamMemberIdentity status={status} name={status.member.handle.replace(/^@/, '')} className={css.agentCopy} t={t} />
+          <TeamMemberIdentity status={status} name={status.member.handle.replace(/^@/, '')} className={css.agentCopy} t={t} memberAvatars={memberAvatars} />
         </button>
         <span className={css.rowMenu}>
           <TeamRowMenu

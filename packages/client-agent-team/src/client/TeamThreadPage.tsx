@@ -41,6 +41,7 @@ interface TeamThreadPageProps {
   /** The Human's own display name and avatar, from the shared identity projection. */
   readonly humanName: string
   readonly humanAvatarUrl?: string | undefined
+  readonly memberAvatars: TeamConversationProps['memberAvatars']
   readonly channelRef?: AgentTeamChannelRef
   readonly taskRef?: AgentTeamTaskRef
   readonly threadRef: AgentTeamThreadRef
@@ -135,7 +136,7 @@ function firstUnreadMention(facts: readonly AgentTeamThreadReadFact[]): AgentTea
 
 export function TeamThreadPage(props: TeamThreadPageProps) {
   const {
-    workspaceId, humanName, humanAvatarUrl, channelRef, taskRef, threadRef, taskNumber, backToWorkspace, selectChannel, selectThread, resolveTaskRefs, resolveThreadRefs, openMemberSession, putAttachment,
+    workspaceId, humanName, humanAvatarUrl, memberAvatars, channelRef, taskRef, threadRef, taskNumber, backToWorkspace, selectChannel, selectThread, resolveTaskRefs, resolveThreadRefs, openMemberSession, putAttachment,
     loadChannels, readThread, loadThreadHistory, threadObservations,
     subscribeChanges, loadMembers, drafts, getAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, loadHumanTodos, changeHumanTodo, t,
   } = props
@@ -820,6 +821,8 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         {...(repliesOffered ? { onReply: handleReply } : {})}
         readerName={humanName}
         {...(human && humanAvatarUrl !== undefined ? { avatarUrl: humanAvatarUrl } : {})}
+        memberAvatarRef={human ? undefined : senderStatus?.member.avatarRef}
+        memberAvatars={memberAvatars}
         body={fact.message.body}
         attachments={fact.message.attachments}
         loadAttachment={getAttachment}
