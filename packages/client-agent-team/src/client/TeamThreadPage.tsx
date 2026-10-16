@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
 import type {
-  AgentTeamClientMemberStatus,
+  AgentTeamAttachmentId,
   AgentTeamChannelRef,
+  AgentTeamClientMemberStatus,
   AgentTeamConfirmationToken,
   AgentTeamHumanTodo,
   AgentTeamHumanTodoRef,
@@ -665,6 +666,9 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     fact.kind === 'message' ? fact.message.sender : undefined
 
   const [pendingFiles, setPendingFiles] = useState<readonly File[]>([])
+  // Confirmation binds the Host's attachment-path body, so retries must reuse
+  // the upload ids for each unchanged File object.
+  const uploadedAttachmentIds = useRef(new WeakMap<File, AgentTeamAttachmentId>())
 
   // Branded-ref navigation for message bodies: channel refs hop to the
   // Channel; thread and task refs cited here resolve through the Host and
@@ -994,6 +998,10 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     setReplyRequestId(current => current === undefined ? current : undefined)
     setStatusMessage(current => current === undefined ? current : undefined)
   }, [])
+  const updatePendingFiles = useCallback((files: readonly File[]): void => {
+    clearSendState()
+    setPendingFiles(files)
+  }, [clearSendState])
 
   const sendReply = async (): Promise<void> => {
     // Read the draft at send time: this page no longer subscribes to it, so a
@@ -1007,7 +1015,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     try {
       // Upload chosen files first; any failure aborts the reply with the
       // existing error surface and keeps the chips for a retry.
-      const upload = await uploadComposerFiles(putAttachment, workspaceId, pendingFiles)
+      const upload = await uploadComposerFiles(putAttachment, workspaceId, pendingFiles, uploadedAttachmentIds.current)
       if (!upload.ok) {
         setError(upload.error)
         return
@@ -1033,6 +1041,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         drafts.clear(draftKey)
         setReplyTarget(undefined)
         setPendingFiles([])
+        uploadedAttachmentIds.current = new WeakMap()
         setReplyRequestId(undefined)
         setConfirmation(undefined)
         setStatusMessage(undefined)
@@ -1248,7 +1257,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
       onSubmit={() => { void sendReply() }}
       placeholder={t('replyPlaceholder')}
       pendingFiles={pendingFiles}
-      onFilesChange={setPendingFiles}
+      onFilesChange={updatePendingFiles}
       {...(replyTarget === undefined || !repliesOffered ? {} : {
         replyTo: (() => {
           const target = cachedResolvedMessageRef(replyTarget)

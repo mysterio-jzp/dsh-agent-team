@@ -637,6 +637,48 @@ describe('Team conversation surfaces', () => {
     await b.runtime.dispose()
   })
 
+  it('reuses an uploaded attachment when confirming a first Thread invitation', async () => {
+    const b = await runtimeWithTeam({ initialChannels: true, remainingUnreadCounts: [1], seededMessages: [{ body: 'Task opener', occurredAt: '2026-08-21T09:00:00.000Z' }] })
+    fireEvent.click(b.view.getByRole('button', { name: '团队' }))
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
+    expect(await b.view.findByRole('heading', { name: 'Task #1' })).toBeTruthy()
+
+    const input = b.view.container.querySelector('input[type="file"]') as HTMLInputElement
+    const image = new File(['png'], 'invite.png', { type: 'image/png' })
+    fireEvent.change(input, { target: { files: [image] } })
+    await waitFor(() => expect(b.view.container.querySelectorAll('ul[aria-label="添加附件"] > li')).toHaveLength(1))
+
+    const draft = b.view.getByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
+    fireEvent.change(draft, { target: { value: '请看图 @' } })
+    const menu = await b.view.findByRole('listbox')
+    fireEvent.click(within(menu).getByRole('option', { name: /@builder/ }))
+    expect(draft.value).toBe('请看图 @builder ')
+
+    b.reply.mockResolvedValueOnce({
+      ok: true,
+      value: { kind: 'confirmation_required', confirmationToken: 'confirmation:invite' },
+    } as never)
+    const send = () => fireEvent.click(b.view.getByRole('button', { name: '发送' }))
+    send()
+    expect(await b.view.findByText('提及未关注成员需要确认，再次发送以继续')).toBeTruthy()
+    send()
+    await waitFor(() => expect(b.reply).toHaveBeenCalledTimes(2))
+
+    const [firstRequest, confirmedRequest] = b.reply.mock.calls.map(([request]) => request)
+    expect(firstRequest!.attachments).toEqual(['attachment:1'])
+    expect(confirmedRequest!.attachments).toEqual(firstRequest!.attachments)
+    expect(confirmedRequest!.requestId).toBe(firstRequest!.requestId)
+    expect(confirmedRequest!.confirmationToken).toBe('confirmation:invite')
+    expect(confirmedRequest!.recipients).toEqual(['member:builder'])
+    expect(b.putAttachment).toHaveBeenCalledTimes(1)
+    await waitFor(() => {
+      const rows = Array.from(b.view.container.querySelectorAll('[data-human] div[class*="messageText"]'))
+      expect(rows.some(row => row.textContent === '请看图 @builder')).toBe(true)
+    })
+    await b.runtime.dispose()
+  })
+
   it('turns pasted clipboard files into composer chips and sends their ids', async () => {
     const b = await runtimeWithTeam({ initialChannels: true })
     fireEvent.click(b.view.getByRole('button', { name: '团队' }))
