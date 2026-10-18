@@ -491,6 +491,13 @@ const threadAttentionChanged: Op<'team/thread-attention-changed'> = {
   data: { workspaceId: alpha, action: 'follow', memberId: human.memberId, thread: plainThread, inbox: emptyInbox },
 }
 
+const threadMemberRemoved: Op<'team/thread-member-removed'> = {
+  ...opBase('operation:protocol-30', 'request:protocol-thread-member-removed', 30),
+  previousOperationId,
+  kind: 'team/thread-member-removed',
+  data: { workspaceId: alpha, threadRef: humanThread, memberId, inbox: emptyInbox },
+}
+
 /** The receipt form every current read writes: the record's current shape. */
 const threadReadReceipt: AgentTeamThreadReadReceipt = {
   workspaceId: alpha,
@@ -1160,6 +1167,26 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
         threadRef: threadAttentionChanged.data.thread.threadRef,
         action: 'unfollow',
       }),
+    },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'derived', inbox: 'delta' },
+  },
+  'team/thread-member-removed': {
+    stored: threadMemberRemoved,
+    legacyShapes: [],
+    retry: {
+      same: async () => {
+        const out = await ledger.removeThreadMember({ requestId: threadMemberRemoved.requestId, actor: human,
+          workspaceId: threadMemberRemoved.data.workspaceId, threadRef: threadMemberRemoved.data.threadRef,
+          memberId: threadMemberRemoved.data.memberId })
+        expect(out.value.kind, 'the removal mapper returns the stored committed outcome').toBe('committed')
+        if (out.value.kind !== 'committed') throw new Error('expected the stored removal to commit')
+        expect(out.value.receipt.operationId).toBe(threadMemberRemoved.operationId)
+        return out
+      },
+      changed: () => ledger.removeThreadMember({ requestId: threadMemberRemoved.requestId, actor: human,
+        workspaceId: threadMemberRemoved.data.workspaceId, threadRef: threadMemberRemoved.data.threadRef,
+        memberId: otherMemberId }),
     },
     legacy: { normalize: 'none', repair: 'none' },
     intent: { scopes: 'derived', inbox: 'delta' },

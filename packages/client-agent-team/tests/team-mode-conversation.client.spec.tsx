@@ -110,6 +110,202 @@ describe('Team conversation surfaces', () => {
     await b.runtime.dispose()
   })
 
+  it('does not show an empty roster or member actions before the Host snapshot succeeds', async () => {
+    const b = await runtimeWithTeam({
+      mode: 'team', workspaceId: 'w1', initialChannels: true,
+      seededMessages: [{ body: 'Thread snapshot loading', occurredAt: '2026-08-21T09:00:00.000Z' }],
+      seedThreadMembers: [{ memberId: 'member:builder', following: true }],
+    })
+    let resolveSnapshot!: (value: Awaited<ReturnType<typeof b.threadObservations>>) => void
+    const pendingSnapshot = new Promise<Awaited<ReturnType<typeof b.threadObservations>>>(resolve => { resolveSnapshot = resolve })
+    b.threadObservations.mockImplementation(async () => pendingSnapshot)
+
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
+    const loadingTrigger = await b.view.findByRole('button', { name: /成员信息加载中/ })
+    expect(loadingTrigger.textContent).not.toContain('0')
+    fireEvent.click(loadingTrigger)
+    const dialog = await b.view.findByRole('dialog', { name: '管理 Thread 成员' })
+    expect(within(dialog).getByRole('status').textContent).toContain('正在读取 Host 的 Thread 成员快照')
+    expect(dialog.querySelector('[data-thread-member]')).toBeNull()
+    expect(dialog.querySelector('[data-thread-candidate]')).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: '移除' })).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: '加入草稿' })).toBeNull()
+
+    resolveSnapshot({ ok: false, error: { message: 'snapshot unavailable' } })
+    await waitFor(() => {
+      expect(b.view.getByRole('button', { name: /暂时无法读取成员信息/ })).toBeTruthy()
+      expect(within(dialog).getByRole('alert').textContent).toContain('snapshot unavailable')
+    })
+    expect(dialog.querySelector('[data-thread-member]')).toBeNull()
+    expect(dialog.querySelector('[data-thread-candidate]')).toBeNull()
+    expect(within(dialog).getByRole('button', { name: '重试' })).toBeTruthy()
+    await b.runtime.dispose()
+  })
+
+  it('marks a stale snapshot unknown after refresh failure and reports Host-undelivered mentions', async () => {
+    const b = await runtimeWithTeam({
+      mode: 'team', workspaceId: 'w1', initialChannels: true,
+      seededMessages: [{ body: 'Thread snapshot refresh', occurredAt: '2026-08-21T09:00:00.000Z' }],
+      seedThreadMembers: [{ memberId: 'member:builder', following: true }],
+    })
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
+    const managerButton = await b.view.findByRole('button', { name: /Thread 成员 · 1/ })
+    const composer = b.view.getByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
+    fireEvent.change(composer, { target: { value: '@builder' } })
+    expect(b.view.queryByText('成员状态暂不可用，无法确认 @ 是否送达；以 Host 发送回执为准。')).toBeNull()
+
+    b.threadObservations.mockImplementation(async () => ({ ok: false, error: { message: 'refresh failed' } }))
+    fireEvent.click(managerButton)
+    const dialog = await b.view.findByRole('dialog', { name: '管理 Thread 成员' })
+    expect(await within(dialog).findByRole('alert')).toBeTruthy()
+    fireEvent.click(within(dialog).getAllByRole('button', { name: '关闭' }).at(-1)!)
+    expect(composer.value).toBe('@builder')
+    expect(await b.view.findByText('成员状态暂不可用，无法确认 @ 是否送达；以 Host 发送回执为准。')).toBeTruthy()
+
+    const defaultReply = b.reply.getMockImplementation()!
+    b.reply.mockImplementationOnce(async request => {
+      const result = await defaultReply(request)
+      if (!result.ok || result.value.kind !== 'committed') return result
+      return { ...result, value: { ...result.value, undeliveredMentions: ['member:builder'] } } as never
+    })
+    fireEvent.click(b.view.getByRole('button', { name: '发送' }))
+    expect(await b.view.findByText('Host 已提交消息，但以下成员未收到 @：@builder。')).toBeTruthy()
+    expect(composer.value).toBe('')
+    await b.runtime.dispose()
+  })
+
+  it('withholds confirmation until a fresh Thread snapshot can classify the invitation', async () => {
+    const b = await runtimeWithTeam({
+      mode: 'team', workspaceId: 'w1', initialChannels: true,
+      seededMessages: [{ body: 'Thread confirmation snapshot', occurredAt: '2026-08-21T09:00:00.000Z' }],
+      seedThreadMembers: [{ memberId: 'member:builder', following: true }],
+    })
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
+    const manager = await b.view.findByRole('button', { name: /Thread 成员 · 1/ })
+    const composer = b.view.getByRole('textbox', { name: '消息内容' }) as HTMLTextAreaElement
+    const successfulSnapshot = b.threadObservations.getMockImplementation()!
+
+    b.threadObservations.mockImplementation(async () => ({ ok: false, error: { message: 'refresh failed' } }))
+    fireEvent.click(manager)
+    const dialog = await b.view.findByRole('dialog', { name: '管理 Thread 成员' })
+    await within(dialog).findByRole('alert')
+    fireEvent.click(within(dialog).getAllByRole('button', { name: '关闭' }).at(-1)!)
+
+    fireEvent.change(composer, { target: { value: '@offline' } })
+    const confirmationRequired = {
+      ok: true,
+      value: { kind: 'confirmation_required', confirmationToken: 'confirmation:invite-offline', recipients: ['member:offline'] },
+    } as never
+    b.reply.mockResolvedValueOnce(confirmationRequired)
+    fireEvent.click(b.view.getByRole('button', { name: '发送' }))
+    expect(await b.view.findByText('成员状态暂不可用，无法判断邀请后果；消息未发送。请重试获取成员状态后再确认。')).toBeTruthy()
+    expect(composer.value).toBe('@offline')
+    expect(b.view.queryByText('邀请新成员：@offline。')).toBeNull()
+    expect(b.view.queryByRole('button', { name: /确认发送/ })).toBeNull()
+    expect(b.reply.mock.calls[0]![0].confirmationToken).toBeUndefined()
+
+    b.threadObservations.mockImplementation(successfulSnapshot)
+    b.reply.mockResolvedValueOnce(confirmationRequired)
+    fireEvent.click(b.view.getByRole('button', { name: '发送' }))
+    expect(await b.view.findByText('邀请新成员：@offline。')).toBeTruthy()
+    expect(composer.value).toBe('@offline')
+    expect(b.reply.mock.calls[1]![0].confirmationToken).toBeUndefined()
+
+    fireEvent.click(b.view.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(b.reply).toHaveBeenCalledTimes(3))
+    expect(b.reply.mock.calls[2]![0].confirmationToken).toBe('confirmation:invite-offline')
+    expect(composer.value).toBe('')
+    await b.runtime.dispose()
+  })
+
+  it('manages the Host Thread-member snapshot and keeps candidate selection draft-only', async () => {
+    const b = await runtimeWithTeam({
+      mode: 'team', workspaceId: 'w1', initialChannels: true,
+      seededMessages: [{ body: 'Thread membership', occurredAt: '2026-08-21T09:00:00.000Z' }],
+      seedThreadMembers: [
+        { memberId: 'member:builder', following: true },
+        { memberId: 'member:worker', following: false },
+      ],
+      seedRemovedThreadMemberIds: ['member:offline'],
+      seedChannelMemberIds: ['member:failed'],
+      seedActiveClaimOwners: ['member:worker'],
+    })
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
+    expect(await b.view.findByRole('heading', { name: 'Task #1' })).toBeTruthy()
+
+    fireEvent.click(b.view.getByRole('button', { name: /Thread 成员 · 2/ }))
+    const dialog = await b.view.findByRole('dialog', { name: '管理 Thread 成员' })
+    const builderRow = dialog.querySelector('[data-thread-member="member:builder"]') as HTMLElement
+    const workerRow = dialog.querySelector('[data-thread-member="member:worker"]') as HTMLElement
+    expect(within(builderRow).getByText('当前关注 · @可达')).toBeTruthy()
+    expect(within(workerRow).getByText('已取消关注 · @仍可达')).toBeTruthy()
+    expect(within(workerRow).getByText(/完成 Claim 或先行释放/)).toBeTruthy()
+    expect(dialog.querySelector('[data-thread-candidate="member:offline"]')?.getAttribute('data-removed')).toBe('true')
+    expect(within(dialog).getByRole('heading', { name: '本 Channel 的候选成员' })).toBeTruthy()
+    expect(within(dialog).getByRole('heading', { name: '其他 Workspace 候选成员' })).toBeTruthy()
+
+    fireEvent.click(within(builderRow).getByRole('button', { name: '移除' }))
+    expect(await within(dialog).findByRole('heading', { name: '从 Thread 移除成员？' })).toBeTruthy()
+    expect(within(dialog).getByText(/不会撤销其 Workspace 参与资格/)).toBeTruthy()
+    expect(b.removeThreadMember).not.toHaveBeenCalled()
+    const cancel = within(dialog).getAllByRole('button', { name: '取消' }).find(button => button.textContent === '取消')
+    fireEvent.click(cancel!)
+    expect(dialog.querySelector('[data-thread-member="member:builder"]')).toBeTruthy()
+    expect(b.removeThreadMember).not.toHaveBeenCalled()
+
+    fireEvent.click(within(dialog.querySelector('[data-thread-member="member:builder"]') as HTMLElement).getByRole('button', { name: '移除' }))
+    fireEvent.click(await within(dialog).findByRole('button', { name: '确认移除' }))
+    await waitFor(() => expect(b.removeThreadMember).toHaveBeenCalledTimes(1))
+    expect(b.removeThreadMember).toHaveBeenCalledWith(expect.objectContaining({ workspaceId: 'w1', threadRef: 'thread:1', memberId: 'member:builder' }))
+    await waitFor(() => expect(dialog.querySelector('[data-thread-member="member:builder"]')).toBeNull())
+    expect(dialog.querySelector('[data-thread-member="member:worker"]')).toBeTruthy()
+
+    const channelCandidate = dialog.querySelector('[data-thread-candidate="member:failed"]') as HTMLElement
+    fireEvent.click(within(channelCandidate).getByRole('button', { name: '加入草稿' }))
+    expect(within(dialog).getByRole('status').textContent).toContain('写入消息草稿')
+    const close = within(dialog).getAllByRole('button', { name: '关闭' }).find(button => button.textContent === '关闭')
+    fireEvent.click(close!)
+    const draft = b.view.container.querySelector('textarea[aria-label="消息内容"]') as HTMLTextAreaElement
+    expect(draft.value).toBe('@failed ')
+    expect(b.view.getByText(/尚未加入：@failed/)).toBeTruthy()
+    expect(b.reply).not.toHaveBeenCalled()
+    await b.runtime.dispose()
+  })
+
+  it('surfaces a Host Claim block raised after the removal confirmation opened', async () => {
+    const b = await runtimeWithTeam({
+      mode: 'team', workspaceId: 'w1', initialChannels: true,
+      seededMessages: [{ body: 'Thread removal race', occurredAt: '2026-08-21T09:00:00.000Z' }],
+      seedThreadMembers: [{ memberId: 'member:builder', following: true }],
+    })
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
+    fireEvent.click(await b.view.findByRole('button', { name: /Thread 成员 · 1/ }))
+    const dialog = await b.view.findByRole('dialog', { name: '管理 Thread 成员' })
+    const builderRow = (): Element | null => dialog.querySelector('[data-thread-member="member:builder"]')
+
+    // The row offers removal because the snapshot carries no Claim; the Claim
+    // lands afterwards, which is exactly the window the Host must win.
+    fireEvent.click(within(builderRow() as HTMLElement).getByRole('button', { name: '移除' }))
+    expect(await within(dialog).findByRole('heading', { name: '从 Thread 移除成员？' })).toBeTruthy()
+    b.publishAgentReply()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '确认移除' }))
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert.textContent).toContain('活动 Task Claim')
+    // The block keeps the confirmation open so the reader can back out
+    // deliberately; the member is never optimistically dropped from the roster.
+    expect(within(dialog).getByRole('heading', { name: '从 Thread 移除成员？' })).toBeTruthy()
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消' }))
+    await waitFor(() => expect(builderRow()).not.toBeNull())
+    expect(b.removeThreadMember.mock.calls.every(([request]) => request.memberId === 'member:builder')).toBe(true)
+    await b.runtime.dispose()
+  })
+
   it("shows the Host's own unread on the Channel feed's Thread entries and drops it with the slice", async () => {
     const b = await runtimeWithTeam({
       mode: 'team', workspaceId: 'w1', initialChannels: true,
@@ -419,15 +615,13 @@ describe('Team conversation surfaces', () => {
       return within(row).getByRole('button', { name: '回复这条消息' })
     }
 
-    // Quoting an Agent is a delivery, and the composer states it exactly once:
-    // the banner names what is answered, the notify row names who hears about it.
+    // Quoting an Agent adds the author to the neutral mention-target row; the
+    // separate reachability status states whether the @ will actually deliver.
     fireEvent.click(await waitFor(() => quoteButton('agent reply')))
-    await waitFor(() => expect(b.view.getByText(/将通知/).textContent).toContain('@builder'))
+    await waitFor(() => expect(b.view.getByText(/提及对象/).textContent).toContain('@builder'))
 
-    // Quoting the reader's own Message is not: the Host refuses to deliver a
-    // Message to its own author, and the Human is never a delivery target at all.
-    // The row is the promise, so it has to say nothing — it used to name the
-    // reader back at themselves, spelled as the raw `member:human` ref.
+    // Quoting the reader's own Message adds no target: the Host never delivers
+    // to the Human, and the list must not name the reader back at themselves.
     fireEvent.click(await waitFor(() => quoteButton('human opener')))
     // Wait for the quote to land before reading the silence. The banner carries
     // the author and the gist only once the Host has answered the lookup, so
@@ -657,11 +851,11 @@ describe('Team conversation surfaces', () => {
 
     b.reply.mockResolvedValueOnce({
       ok: true,
-      value: { kind: 'confirmation_required', confirmationToken: 'confirmation:invite' },
+      value: { kind: 'confirmation_required', confirmationToken: 'confirmation:invite', recipients: ['member:builder'] },
     } as never)
     const send = () => fireEvent.click(b.view.getByRole('button', { name: '发送' }))
     send()
-    expect(await b.view.findByText('提及未关注成员需要确认，再次发送以继续')).toBeTruthy()
+    expect(await b.view.findByText('邀请新成员：@builder。')).toBeTruthy()
     send()
     await waitFor(() => expect(b.reply).toHaveBeenCalledTimes(2))
 
@@ -878,6 +1072,7 @@ describe('Team conversation surfaces', () => {
       mode: 'team', workspaceId: 'w1', initialChannels: true,
       seedTaskRef: taskRef, seedThreadRef: 'thread:0f0ad7ce-11d3-4c05-8a9e-6f2b1c9d7e72',
       seedFollowers: ['member:worker'],
+      seedThreadMembers: [{ memberId: 'member:worker', following: true }],
       seededMessages: [{ body: 'rank task', occurredAt: '2026-08-21T09:00:00.000Z' }],
     })
     // jsdom has no layout engine, so the scroll fix is observed through the
@@ -892,9 +1087,9 @@ describe('Team conversation surfaces', () => {
       const replyInput = await b.view.findByRole('textbox', { name: '消息内容' })
       fireEvent.change(replyInput, { target: { value: '@' } })
       const replyMenu = await b.view.findByRole('listbox')
-      // The seeded Channel has no membership rows, so the Thread composer sees
-      // the whole roster; the follower ranks above that roster order once the
-      // observation read from the first paint round lands.
+      // The Host's explicit Thread-member snapshot puts the following worker
+      // first; other Workspace candidates remain mentionable but do not become
+      // Thread participants from this menu.
       await waitFor(() => expect(within(replyMenu).getAllByRole('option').map(option => option.textContent)).toEqual([
         expect.stringContaining('@all'),
         expect.stringContaining('@worker'),

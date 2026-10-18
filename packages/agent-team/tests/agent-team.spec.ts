@@ -118,6 +118,12 @@ function storedPool(records: Array<[string, unknown]>, version: number = agentTe
   return pool
 }
 
+function storedOperations(pool: MemoryMediaPool): Array<[string, unknown]> {
+  const records = pool.media.get('agent_team')?.tables.get('operations')
+  if (records === undefined) throw new Error('Agent Team operation media was not written')
+  return [...records.entries()]
+}
+
 function committed<T extends { readonly kind: string }>(result: T): Extract<T, { readonly kind: 'committed' }> {
   if (result.kind !== 'committed') throw new Error(`expected committed result, received ${result.kind}`)
   return result as Extract<T, { readonly kind: 'committed' }>
@@ -1231,6 +1237,9 @@ describe('AgentTeam durable Thread Attention ledger', () => {
       ],
       // The observation history keeps both transitions; followers is the current state they lead to.
       followers: [AGENT_TEAM_HUMAN_MEMBER_ID],
+      // The Human is not in the Agent member list and no removal tombstone exists.
+      threadMembers: [],
+      removedMemberIds: [],
       // Both transitions fit the default window, so nothing older is hidden.
       hasMore: false,
     })
@@ -2835,6 +2844,194 @@ describe('body-authored mentions', () => {
       body: '@stranger, please look', baseRevision: sent.thread.revision, actor: agentTeamHumanActor(), confirmationToken: held.confirmationToken })).value)
     expect(invited.directMarkers).toEqual([expect.objectContaining({ memberId: stranger.member.memberId })])
     expect(ledger.attentionStatus(stranger.actor, { workspaceId: alpha, threadRef: sent.thread.threadRef }).attention).toBeDefined()
+  })
+
+  it('returns the complete reachable Thread member set independently of paged observations', async () => {
+    const test = await harness()
+    const { ledger, channelRef } = await channelOf(test)
+    const joined = await enroll(ledger, channelRef, 'joined')
+    const unfollowed = await enroll(ledger, channelRef, 'unfollowed')
+    const writer = await enroll(ledger, channelRef, 'writer')
+    const bystander = await enroll(ledger, channelRef, 'bystander')
+    const started = await start(ledger, channelRef, '@joined, please review')
+    const written = committed((await ledger.reply({ requestId: requestId('member-writes-without-joining'), workspaceId: alpha,
+      taskRef: started.task.taskRef, body: 'I can write without joining', baseRevision: started.thread.revision, actor: writer.actor })).value)
+    await ledger.readThread({ requestId: requestId('human-reads-writer-reply'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, actor: agentTeamHumanActor() })
+    const held = (await ledger.reply({ requestId: requestId('invite-unfollowed-held'), workspaceId: alpha, taskRef: started.task.taskRef,
+      body: '@unfollowed, please review', baseRevision: written.thread.revision, actor: agentTeamHumanActor() })).value
+    if (held.kind !== 'confirmation_required') throw new Error(`expected confirmation, received ${held.kind}`)
+    const invited = committed((await ledger.reply({ requestId: requestId('invite-unfollowed-confirmed'), workspaceId: alpha,
+      taskRef: started.task.taskRef, body: '@unfollowed, please review', baseRevision: written.thread.revision,
+      actor: agentTeamHumanActor(), confirmationToken: held.confirmationToken })).value)
+    await ledger.changeAttention({ requestId: requestId('unfollow-after-invite'), workspaceId: alpha, taskRef: started.task.taskRef,
+      action: 'unfollow', actor: unfollowed.actor })
+
+    const observations = ledger.threadObservations(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef, limit: 1 })
+    expect(observations.items).toHaveLength(1)
+    expect(observations.items[0]).toMatchObject({ memberId: unfollowed.member.memberId, action: 'unfollow' })
+    expect(observations.hasMore).toBe(true)
+    expect(observations.threadMembers).toEqual([
+      { memberId: joined.member.memberId, following: true },
+      { memberId: unfollowed.member.memberId, following: false },
+    ].sort((left, right) => left.memberId.localeCompare(right.memberId)))
+    expect(observations.threadMembers.map(member => member.memberId)).not.toContain(writer.member.memberId)
+    expect(observations.threadMembers.map(member => member.memberId)).not.toContain(bystander.member.memberId)
+    expect(observations.removedMemberIds).toEqual([])
+    expect(observations.followers).toContain(joined.member.memberId)
+    expect(observations.followers).not.toContain(unfollowed.member.memberId)
+    expect(invited.message.threadRef).toBe(started.thread.threadRef)
+  })
+
+  it('removes @ reachability and unread state without editing Thread history or Channel visibility', async () => {
+    const test = await harness()
+    const { ledger, channelRef } = await channelOf(test)
+    const peer = await enroll(ledger, channelRef, 'peer')
+    const started = await start(ledger, channelRef, '@peer, please review')
+    const before = ledger.threadHistory(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef })
+    expect(ledger.inbox(peer.actor, { workspaceId: alpha })).toMatchObject({ totalDirectCount: 1 })
+
+    const removed = await ledger.removeThreadMember({ requestId: requestId('remove-thread-peer'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, memberId: peer.member.memberId, actor: agentTeamHumanActor() })
+    expect(removed.committed).toBe(true)
+    expect(removed.value).toMatchObject({ kind: 'committed', changed: true, memberId: peer.member.memberId })
+    if (removed.value.kind !== 'committed') throw new Error('expected Thread member removal to commit')
+    const retriedRemoval = await ledger.removeThreadMember({ requestId: requestId('remove-thread-peer'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, memberId: peer.member.memberId, actor: agentTeamHumanActor() })
+    expect(retriedRemoval.committed).toBe(false)
+    expect(retriedRemoval.value).toMatchObject({ kind: 'committed', receipt: removed.value.receipt })
+    const after = ledger.threadHistory(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef })
+    expect(after.thread.revision).toBe(before.thread.revision)
+    expect(after.facts).toEqual(before.facts)
+    expect(ledger.inbox(peer.actor, { workspaceId: alpha })).toMatchObject({ totalUnreadCount: 0, totalDirectCount: 0 })
+    const observations = ledger.threadObservations(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef })
+    expect(observations.threadMembers).toEqual([])
+    expect(observations.removedMemberIds).toEqual([peer.member.memberId])
+    expect(observations.followers).not.toContain(peer.member.memberId)
+    expect(observations.items.at(-1)).toMatchObject({ memberId: peer.member.memberId, action: 'unfollow' })
+    expect(ledger.view({ workspaceId: alpha }, peer.member.memberId).channels.map(channel => channel.channelRef)).toContain(channelRef)
+    const replayed = replayLedger(test)
+    expect(replayed.threadObservations(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef }).removedMemberIds)
+      .toEqual([peer.member.memberId])
+    replayed.validate()
+  })
+
+  it('cold-opens a persisted Thread member removal operation', async () => {
+    const pool = new MemoryMediaPool()
+    const test = await harness(pool)
+    const { ledger, channelRef } = await channelOf(test)
+    const peer = await enroll(ledger, channelRef, 'cold-removal-peer')
+    const started = await start(ledger, channelRef, '@cold-removal-peer, review this')
+    await ledger.removeThreadMember({ requestId: requestId('cold-remove-thread-peer'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, memberId: peer.member.memberId, actor: agentTeamHumanActor() })
+
+    const records = storedOperations(pool)
+    expect(records.some(([, record]) => (record as AgentTeamOperation).kind === 'team/thread-member-removed')).toBe(true)
+    const reopened = await harness(storedPool(records))
+    expect(reopened.ctx.agentTeam.threadObservations({
+      workspaceId: alpha, threadRef: started.thread.threadRef,
+    }).removedMemberIds).toEqual([peer.member.memberId])
+    reopened.ctx.agentTeam.validateLedger()
+  })
+
+  it('cold-opens legacy Thread replies without optional delivery fields', async () => {
+    const pool = new MemoryMediaPool()
+    const test = await harness(pool)
+    const { ledger, channelRef } = await channelOf(test)
+    const started = await start(ledger, channelRef, 'legacy reply opener')
+    committed((await ledger.reply({ requestId: requestId('write-new-reply-for-legacy-fixture'), workspaceId: alpha,
+      taskRef: started.task.taskRef, body: 'legacy reply body', baseRevision: started.thread.revision,
+      actor: agentTeamHumanActor() })).value)
+
+    const records = storedOperations(pool)
+    const replyRecord = records.find(([, record]) => (record as AgentTeamOperation).kind === 'team/thread-replied')
+    expect(replyRecord).toBeDefined()
+    const [replyOperationId, rawReply] = replyRecord!
+    const replyOperation = rawReply as AgentTeamOperation
+    if (replyOperation.kind !== 'team/thread-replied') throw new Error('expected stored Thread reply')
+    expect(replyOperation.data.undeliveredMentions).toEqual([])
+    expect(replyOperation.data.reinvitedMemberIds).toEqual([])
+    const legacyData = { ...replyOperation.data }
+    delete legacyData.undeliveredMentions
+    delete legacyData.reinvitedMemberIds
+    const legacyReply = { ...replyOperation, data: legacyData }
+    const legacyRecords: Array<[string, unknown]> = records.map(([key, record]) =>
+      key === replyOperationId ? [key, legacyReply] : [key, record])
+
+    const reopened = await harness(storedPool(legacyRecords))
+    const history = reopened.ctx.agentTeam.threadHistory({
+      workspaceId: alpha, threadRef: started.thread.threadRef,
+    })
+    expect(history.facts.some(fact => fact.kind === 'message' && fact.message.body === 'legacy reply body')).toBe(true)
+    reopened.ctx.agentTeam.validateLedger()
+  })
+
+  it('blocks removal of an active Claim owner and records no-op removals as no change', async () => {
+    const test = await harness()
+    const { ledger, channelRef } = await channelOf(test)
+    const claimant = await enroll(ledger, channelRef, 'claimant')
+    const bystander = await enroll(ledger, channelRef, 'bystander')
+    const started = await start(ledger, channelRef, '@claimant, take this')
+    await ledger.readThread({ requestId: requestId('claimant-read'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, actor: claimant.actor })
+    const claim = committed((await ledger.changeClaim({ requestId: requestId('claim-before-removal'), workspaceId: alpha,
+      taskRef: started.task.taskRef, baseRevision: started.thread.revision, action: 'claim', direction: 'Implement the fix', actor: claimant.actor })).value)
+    const sequence = ledger.projectionSequence()
+
+    const blocked = await ledger.removeThreadMember({ requestId: requestId('blocked-claim-removal'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, memberId: claimant.member.memberId, actor: agentTeamHumanActor() })
+    expect(blocked.committed).toBe(false)
+    expect(blocked.value).toMatchObject({ kind: 'blocked_by_active_claim', changed: false, taskRef: claim.task.taskRef })
+    expect(ledger.projectionSequence()).toBe(sequence)
+    expect(ledger.threadHistory(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef }).claims)
+      .toContainEqual(expect.objectContaining({ owner: claimant.member.memberId, state: 'active' }))
+
+    const noChange = await ledger.removeThreadMember({ requestId: requestId('remove-never-joined'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, memberId: bystander.member.memberId, actor: agentTeamHumanActor() })
+    expect(noChange.committed).toBe(false)
+    expect(noChange.value).toMatchObject({ kind: 'no_change', changed: false, memberId: bystander.member.memberId })
+    expect(ledger.projectionSequence()).toBe(sequence)
+    expect(ledger.threadObservations(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef })
+      .threadMembers.map(member => member.memberId)).toContain(claimant.member.memberId)
+    ledger.validate()
+  })
+
+  it('keeps removed Agent mentions undelivered until a confirmed Human reply restores reachability', async () => {
+    const test = await harness()
+    const { ledger, channelRef } = await channelOf(test)
+    const peer = await enroll(ledger, channelRef, 'peer')
+    const author = await enroll(ledger, channelRef, 'author')
+    const started = await start(ledger, channelRef, '@peer, please join')
+    await ledger.removeThreadMember({ requestId: requestId('remove-before-agent-mention'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, memberId: peer.member.memberId, actor: agentTeamHumanActor() })
+
+    const agentReplyRequest = { requestId: requestId('agent-mentions-removed'), workspaceId: alpha, taskRef: started.task.taskRef,
+      body: '@peer, please check this', baseRevision: started.thread.revision, actor: author.actor }
+    const agentReply = committed((await ledger.reply(agentReplyRequest)).value)
+    expect(agentReply.undeliveredMentions).toEqual([peer.member.memberId])
+    expect(agentReply.directMarkers).toEqual([])
+    expect(ledger.threadObservations(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef }).removedMemberIds)
+      .toEqual([peer.member.memberId])
+
+    await ledger.readThread({ requestId: requestId('human-reads-agent-reply'), workspaceId: alpha,
+      threadRef: started.thread.threadRef, actor: agentTeamHumanActor() })
+    const held = (await ledger.reply({ requestId: requestId('human-reinvite-held'), workspaceId: alpha, taskRef: started.task.taskRef,
+      body: '@peer, please rejoin', baseRevision: agentReply.thread.revision, actor: agentTeamHumanActor() })).value
+    if (held.kind !== 'confirmation_required') throw new Error(`expected re-invitation confirmation, received ${held.kind}`)
+    const invited = committed((await ledger.reply({ requestId: requestId('human-reinvite-confirmed'), workspaceId: alpha,
+      taskRef: started.task.taskRef, body: '@peer, please rejoin', baseRevision: agentReply.thread.revision,
+      actor: agentTeamHumanActor(), confirmationToken: held.confirmationToken })).value)
+    expect(invited.directMarkers).toContainEqual(expect.objectContaining({ memberId: peer.member.memberId }))
+    expect(ledger.threadObservations(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef })).toMatchObject({
+      threadMembers: [{ memberId: peer.member.memberId, following: true }], removedMemberIds: [],
+    })
+
+    const retried = committed((await ledger.reply(agentReplyRequest)).value)
+    expect(retried.receipt).toEqual(agentReply.receipt)
+    expect(retried.undeliveredMentions).toEqual([peer.member.memberId])
+    expect(ledger.threadHistory(agentTeamHumanActor(), { workspaceId: alpha, threadRef: started.thread.threadRef }).facts)
+      .toHaveLength(3)
+    ledger.validate()
   })
 
   it('expands @all to the roster as of that write', async () => {

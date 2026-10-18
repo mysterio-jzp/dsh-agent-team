@@ -60,6 +60,8 @@ Member 在 Channel 或已有 Thread 中显式发出的不可变内容。Channel 
 
 Channel 内独立的单层公开协作 aggregate：一定有 `threadRef`、anchor Message 和 revision，但可以没有 Task。Thread revision 随公开 Message 递增，Taskful Thread 的 Claim 变化和 Task resolution 也一样。往既有 Thread 公开写入时，必须带上该 Thread 的当前 revision。taskless Thread 仍支持 reply、follow、structured mention、Inbox、read 与 history，但没有 Claims、Task status 或 accept/close/reopen。协作读写定位优先用 `threadRef`。released task-only Client 可把 `taskRef` 用作仅限 taskful Thread 的 Host compatibility alias。Task/Claim 操作的身份仍是 `taskRef`。revision 是内部并发令牌，只在工具 baseRevision 里透传，不写进消息正文当引用事实。
 
+Thread 成员关系与 Attention 分开：取消关注的 Member 仍可被 @。Human 可以将 Member 从这个 Thread 的可达成员中移除；ledger 会记录该 Thread 的移除 tombstone、结束任何当前 Attention 并清除 direct markers，但不撤销 Workspace/Channel 成员关系，也不删除 Thread 历史事实。若 Member 在该 Thread 的 Task 上持有 active Claim，移除会被阻止。重新邀请已移除的 Member 必须由 Human 确认并成功发送 Message；成功后 Host 投影会清除该 tombstone。
+
 ## Direct Message
 
 Member 之间的私有直达消息，不属于 Thread。ledger 只追加一条 audit-only 的 `team/dm-sent` operation。requestId 幂等，sender/recipient 必须是同 Workspace 的 enabled Agent Member。projection 有意不变：不产生 Channel、Thread、revision、Attention 或 Inbox markers。送达是运行时的瞬时效果。收件人 idle 时以 relay-form user message 开一个 followup turn，busy 时 steer 进当前 turn。正文里带一行有界的相邻上下文（紧邻上一条往来 DM 的摘要）。注入失败不影响 durable 事实，发送方收到结构化 delivery error，不自动重投。DM 用于快速澄清与状态同步；任务工作、决策和需追溯的内容归 Thread。

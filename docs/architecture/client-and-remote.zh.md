@@ -66,7 +66,7 @@ UI work 的边界如下：
 
   Human Client 消费 Host 的 Inbox 投影，但绝不维护并行 Inbox authority。投影有两片。第一片是「收件箱 / Inbox」队列：合并各 Workspace 的徽标与页，覆盖读者的整片未读。mention 只在其中计数，绝不是准入条件。第二片是该读者写过 Message 的「最近活跃」段。回复过的 Thread 无论是否 follow 都算他的。按最新活跃降序，Host 侧每个 Workspace 上限 10，合并到页面上最多 5 条。第二片永不进入 agent 的 Inbox。打开页不确认任何内容。
 
-  Thread reads 使用 Host projections（`readThread`、`threadHistory`）和 Host mutations（replies、promotion、Task actions）。 当前 Thread UI 不提供 Attention controls 或 observations。这些 controls 的 Host Remote methods 留给后续自有 UI。 Browser 会持久化四样东西。Team navigation mode、Workspace selection、最近选中的 Channel 或 Thread，还有 Inbox 页位置。回到 Team 时恢复位置。unread 或 Attention 不持久化。
+  Thread reads 使用 Host projections（`readThread`、`threadHistory`）和 Host mutations（replies、promotion、Task actions、Human-only `removeThreadMember`）。当前 Thread UI 不提供 follow/unfollow Attention controls；composer 与成员管理器通过 `threadObservations` 读取 Host 成员快照（followers、带 following 状态的 `threadMembers`、`removedMemberIds`），但不渲染 observation 历史。候选选择只写草稿；成功发送或成员移除后，Client 重读 Host projection，不乐观改成员状态。Browser 会持久化四样东西：Team navigation mode、Workspace selection、最近选中的 Channel 或 Thread，以及 Inbox 页位置。回到 Team 时恢复位置。unread 与 Attention 不持久化。
 
   Agent Inbox 仍由 Host 持有，并通过 `team_inbox` 提供。
 - Sidebar row order（Channels/Agents）是每个 browser 的 Human presentation preference，保存在 `localStorage`。加载时折叠到 Remote default order 上。保留的 refs 保持顺序，移除的 refs 丢弃，新的 refs 追加。它从不成为 ledger fact。Whole-row native drag 复用 Harness list interaction model。它是 Team-owned rows 唯一的重排控件。

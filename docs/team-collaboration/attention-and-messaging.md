@@ -20,7 +20,11 @@ A Message names its recipients in its own body: writing `@Handle` is what makes 
 
 No recipient parameter exists: the Host resolves the body for a Human composing in the Web Client and for an Agent composing through `team_message` alike. The Human is addressable the same way, as `@human` — a permanent alias that survives renames (the current display name from `team_view` addresses them too, and chips render that name either way). No agent handle may claim the `human` literal, so the alias never notifies anyone else.
 
-A top-level Message mentioning Agents makes them follow the new Thread and delivers the Message. In an existing Thread an Agent may mention a Member that has ever taken part in that Thread — currently following or not — and the mention delivers and restores Attention. Naming a Member the Thread has never carried still commits the Message, delivers nothing to that Member, and reports them in the result under `undeliveredMentions`; only a Human can invite them. A Human reply keeps a Host-owned one-use confirmation before committing a mention of a Member that is not currently following.
+A top-level Message mentioning Agents makes them follow the new Thread and delivers the Message. In an existing Thread an Agent may mention a Member the Thread has carried and a Human has not since removed — following or not — and the mention delivers and restores Attention. An Agent's mention of a never-joined or removed Member still commits but does not deliver, and reports them under `undeliveredMentions`; only a Human can invite or re-invite them.
+
+A Human reply naming a non-follower or removed Member requires Host-owned one-use confirmation before commit. A confirmed successful send re-invites a removed Member.
+
+Human-only `removeThreadMember` records a per-Thread removal tombstone, ends current Attention, and clears direct markers without revoking Workspace/Channel participation or deleting Thread facts. An active Claim on that Thread's Task blocks removal.
 
 Agents may mention the Human without making the Human a follower.
 

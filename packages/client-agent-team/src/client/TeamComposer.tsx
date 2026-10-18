@@ -6,6 +6,7 @@ import type { TeamConversationProps } from './slots.ts'
 import type { TeamDraftKey, TeamDraftStore } from './drafts.ts'
 import { TeamPresenceDot } from './TeamPresenceDot.tsx'
 import { mentionSurfaceOf, mentionTierIsParticipant } from './mention-presentation.ts'
+import { threadMentionState, threadMentionStateLabel } from './thread-member-status.ts'
 import { allMentionMembers, containsAllMention, containsMention, HUMAN_MEMBER_ID, mentionedMemberIds } from './team-formatters.ts'
 import css from './composer.module.css'
 import { formatByteSize } from './attachment-preview.ts'
@@ -55,16 +56,25 @@ function mentionCandidates(members: readonly AgentTeamClientMemberStatus[], quer
  * Human to confirm before the Member is pulled in.
  */
 function mentionTier(status: AgentTeamClientMemberStatus, followers: ReadonlySet<AgentTeamMemberId> | undefined,
-  channelPeers: ReadonlySet<AgentTeamMemberId> | undefined): MentionTier {
-  if (followers?.has(status.member.memberId) === true) return 0
-  if (channelPeers?.has(status.member.memberId) === true) return 1
+  channelPeers: ReadonlySet<AgentTeamMemberId> | undefined, threadMembers: ReadonlySet<AgentTeamMemberId> | undefined): MentionTier {
+  const memberId = status.member.memberId
+  const isThreadMember = threadMembers?.has(memberId) === true
+  if (followers?.has(memberId) === true && (threadMembers === undefined || isThreadMember)) return 0
+  if (isThreadMember || channelPeers?.has(memberId) === true) return 1
   return 2
 }
 
 function rankMentionCandidates(candidates: readonly AgentTeamClientMemberStatus[], followers: ReadonlySet<AgentTeamMemberId> | undefined,
-  channelPeers: ReadonlySet<AgentTeamMemberId> | undefined): readonly AgentTeamClientMemberStatus[] {
-  if ((followers === undefined || followers.size === 0) && (channelPeers === undefined || channelPeers.size === 0)) return candidates
-  return [...candidates].sort((left, right) => mentionTier(left, followers, channelPeers) - mentionTier(right, followers, channelPeers))
+  channelPeers: ReadonlySet<AgentTeamMemberId> | undefined, threadMembers: ReadonlySet<AgentTeamMemberId> | undefined): readonly AgentTeamClientMemberStatus[] {
+  if ((followers === undefined || followers.size === 0) && (channelPeers === undefined || channelPeers.size === 0)
+    && (threadMembers === undefined || threadMembers.size === 0)) return candidates
+  return [...candidates].sort((left, right) => {
+    const tierDifference = mentionTier(left, followers, channelPeers, threadMembers) - mentionTier(right, followers, channelPeers, threadMembers)
+    if (tierDifference !== 0) return tierDifference
+    const leftIsThreadMember = threadMembers?.has(left.member.memberId) === true
+    const rightIsThreadMember = threadMembers?.has(right.member.memberId) === true
+    return Number(rightIsThreadMember) - Number(leftIsThreadMember)
+  })
 }
 
 /** One object URL per draft file; revoked when the draft is removed. */
@@ -80,11 +90,17 @@ function draftPreviewUrl(file: File): string | undefined {
   return url
 }
 
-export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds, drafts, draftKey, pending, confirmation, error, onEdit, onSubmit, placeholder, pendingFiles, onFilesChange, replyTo, onCancelReply, asTask, onAsTaskChange, t }: {
+export function TeamComposer({ members, followerMemberIds, threadMemberIds, removedMemberIds, threadMemberSnapshotLoaded, channelPeerMemberIds, drafts, draftKey, pending, confirmation, error, onEdit, onSubmit, onInputRef, placeholder, pendingFiles, onFilesChange, replyTo, onCancelReply, asTask, onAsTaskChange, t }: {
   readonly members: readonly AgentTeamClientMemberStatus[]
-  /** Current Thread followers; the Thread surface passes them so they rank above other candidates. */
+  /** Host's current Thread followers; these rank ahead of other candidates. */
   readonly followerMemberIds?: ReadonlySet<AgentTeamMemberId>
-  /** Members taking part in the Channel but not following this Thread; they rank above the rest of the Workspace. */
+  /** Complete Host member snapshot; unfollowed members remain @-reachable. */
+  readonly threadMemberIds?: ReadonlySet<AgentTeamMemberId>
+  /** Thread-specific removal tombstones, separate from never-joined candidates. */
+  readonly removedMemberIds?: ReadonlySet<AgentTeamMemberId>
+  /** Whether this Thread's complete member snapshot has loaded successfully. */
+  readonly threadMemberSnapshotLoaded?: boolean
+  /** Members taking part in the Channel but not this Thread; they rank above the rest of the Workspace. */
   readonly channelPeerMemberIds?: ReadonlySet<AgentTeamMemberId>
   /**
    * The draft cache this composer subscribes to: owning the subscription here
@@ -99,6 +115,7 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
   /** The Human edited the draft: the hosting page drops its one-shot send state. */
   readonly onEdit?: () => void
   readonly onSubmit: () => void
+  readonly onInputRef?: (input: HTMLTextAreaElement | null) => void
   /** Conversation-specific prompt; the shared default fits Channel surfaces. */
   readonly placeholder?: string
   /** Upload-capable surfaces pass this to enable the "+" file picker; the reply path omits it. */
@@ -109,8 +126,8 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
    * answered and offers a way out, because a reply the reader cannot cancel is
    * a trap: the next Enter would quote something they had moved past.
    *
-   * `memberId` is carried so the author joins the ordinary "will notify" row
-   * below instead of the banner declaring the delivery a second time: quoting
+   * `memberId` is carried so the author joins the ordinary "mention-target" row
+   * below instead of the banner naming the same target again: quoting
    * is a mention, and one delivery reads once. It is absent when the parent did
    * not resolve, which cannot name an author — the Host still delivers.
    */
@@ -121,7 +138,7 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
   readonly onAsTaskChange?: (asTask: boolean) => void
   readonly t: TeamConversationProps['t']
 }) {
-  const inputRef = useRef<HTMLTextAreaElement>(null)
+  const inputRef = useRef({ current: null as HTMLTextAreaElement | null }).current
   const fileInputRef = useRef<HTMLInputElement>(null)
   const rootRef = useRef<HTMLFormElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -135,10 +152,10 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
   const [highlight, setHighlight] = useState(0)
   // @all is a composer-layer expansion of the same eligibility filter a
   // handle pick uses; the fixed row stays on top of the matching members.
-  const memberCandidates = mention === undefined ? [] : rankMentionCandidates(mentionCandidates(members, mention.query), followerMemberIds, channelPeerMemberIds)
+  const memberCandidates = mention === undefined ? [] : rankMentionCandidates(mentionCandidates(members, mention.query), followerMemberIds, channelPeerMemberIds, threadMemberIds)
   const options: readonly MentionOption[] = mention !== undefined && 'all'.startsWith(mention.query.toLocaleLowerCase())
-    ? [{ kind: 'all' }, ...memberCandidates.map(status => ({ kind: 'member' as const, status, tier: mentionTier(status, followerMemberIds, channelPeerMemberIds) }))]
-    : memberCandidates.map(status => ({ kind: 'member' as const, status, tier: mentionTier(status, followerMemberIds, channelPeerMemberIds) }))
+    ? [{ kind: 'all' }, ...memberCandidates.map(status => ({ kind: 'member' as const, status, tier: mentionTier(status, followerMemberIds, channelPeerMemberIds, threadMemberIds) }))]
+    : memberCandidates.map(status => ({ kind: 'member' as const, status, tier: mentionTier(status, followerMemberIds, channelPeerMemberIds, threadMemberIds) }))
   const menuOpen = mention !== undefined && options.length > 0
   const activeOption = options[highlight]
   const activeOptionKey = activeOption === undefined ? undefined : activeOption.kind === 'all' ? 'all' : activeOption.status.member.memberId
@@ -217,24 +234,34 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
     pruneRecipients(draft)
   }, [draft, recipients, members])
 
-  // The notify row reports what the Host will resolve from this draft, not just
-  // what the mention menu picked: an authored `@Handle` delivers exactly like a
-  // pick, and `@all` stands for the menu's expansion. A quote's author belongs
-  // here for the same reason — the Host merges them into the recipients — so
-  // answering someone reads as the one delivery it is.
+  // This row names the recipients resolved from the draft, not a promise that
+  // each one is currently reachable: authored handles, menu picks, @all's
+  // expansion, and a quoted author all contribute. Thread reachability is stated
+  // separately from the neutral target list.
   //
-  // The Human is the one author the Host never delivers to, so they are the one
-  // author this row must never name: they read the Thread directly and hold no
-  // session, which is why the Host drops a quoted Human — and with them a
-  // Message the reader quotes from themselves — out of the recipient set
-  // entirely. Promising it here would name a delivery that never happens, and
-  // this composer always writes as the Human, so quoting their own Message
-  // would promise it to the one person reading the row.
-  const notifiedIds = [...new Set<AgentTeamMemberId>([
+  // The Human is never a delivery target: the reader already sees the Thread,
+  // and a quote of their own Message must not promise delivery back to them.
+  const mentionTargetIds = [...new Set<AgentTeamMemberId>([
     ...recipients,
     ...mentionedMemberIds(draft, members),
     ...(replyTo?.memberId === undefined || replyTo.memberId === HUMAN_MEMBER_ID ? [] : [replyTo.memberId]),
-  ])].sort()
+  ])].filter(memberId => memberId !== HUMAN_MEMBER_ID).sort()
+  const reachabilityMessages = mentionSurface !== 'thread' || mentionTargetIds.length === 0 ? []
+    : threadMemberSnapshotLoaded !== true
+      ? [t('threadReachabilityUnknown')]
+      : (() => {
+        const currentMembers = threadMemberIds ?? new Set<AgentTeamMemberId>()
+        const removedMembers = removedMemberIds ?? new Set<AgentTeamMemberId>()
+        const idsOf = (membersToName: readonly AgentTeamMemberId[]): string => membersToName.map(memberId => `@${memberHandles.get(memberId) ?? memberId}`).join(', ')
+        const removed = mentionTargetIds.filter(memberId => removedMembers.has(memberId))
+        const unjoined = mentionTargetIds.filter(memberId => !currentMembers.has(memberId) && !removedMembers.has(memberId))
+        const unfollowed = mentionTargetIds.filter(memberId => currentMembers.has(memberId) && followerMemberIds?.has(memberId) !== true)
+        return [
+          ...(removed.length === 0 ? [] : [t('threadReachabilityReinvite', { ids: idsOf(removed) })]),
+          ...(unjoined.length === 0 ? [] : [t('threadReachabilityInvite', { ids: idsOf(unjoined) })]),
+          ...(unfollowed.length === 0 ? [] : [t('threadReachabilityRestore', { ids: idsOf(unfollowed) })]),
+        ]
+      })()
 
   const updateMention = (nextDraft: string, caret: number): void => {
     const match = findMention(nextDraft, caret)
@@ -352,6 +379,12 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
           {options.map((option, index) => {
             const optionId = option.kind === 'all' ? `${listId}-all` : `${listId}-${option.status.member.memberId}`
             const selected = index === highlight
+            const threadState = option.kind !== 'member' || mentionSurface !== 'thread' ? undefined
+              : threadMemberSnapshotLoaded !== true ? 'unknown'
+                : threadMentionState(option.status.member.memberId, threadMemberIds, followerMemberIds, removedMemberIds, channelPeerMemberIds)
+            const memberDescription = option.kind !== 'member' ? undefined
+              : threadState === undefined ? option.status.member.description
+                : threadState === 'unknown' ? t('threadMemberStateUnknown') : threadMentionStateLabel(threadState, t)
             return option.kind === 'all'
               ? <button
                   key="all"
@@ -383,16 +416,17 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
                   data-mention-tier={option.tier}
                   // Whether the pick lands inside the conversation being
                   // written into; the name drops a weight when it does not.
-                  data-mention-inside={String(mentionTierIsParticipant(option.tier, mentionSurface))}
+                  data-mention-inside={String(mentionTierIsParticipant(option.tier, mentionSurface, threadMemberIds?.has(option.status.member.memberId) === true))}
+                  {...(threadState === undefined ? {} : { 'data-mention-state': threadState })}
                 >
                   <TeamPresenceDot status={option.status} t={t} />
-                  <span className={css.mentionName}>@{option.status.member.handle}</span>
-                  <span className={css.mentionDescription}>{option.status.member.description}</span>
+                  <span className={css.mentionName}>@{option.status.member.handle.replace(/^@/, '')}</span>
+                  <span className={css.mentionDescription}>{memberDescription}</span>
                 </button>
           })}
         </div>}
         <textarea
-          ref={inputRef}
+          ref={input => { inputRef.current = input; onInputRef?.(input) }}
           aria-label={t('messageDraft')}
           aria-autocomplete="list"
           aria-controls={menuOpen ? listId : undefined}
@@ -410,7 +444,10 @@ export function TeamComposer({ members, followerMemberIds, channelPeerMemberIds,
           onCompositionEnd={() => { setTimeout(() => { composingRef.current = false }, 10) }}
         />
       </div>
-      {notifiedIds.length > 0 && <p className={css.notifyRow} data-team-notify>{t('composerNotify', { ids: notifiedIds.map(memberId => `@${memberHandles.get(memberId) ?? memberId}`).join(', ') })}</p>}
+      {mentionTargetIds.length > 0 && <p className={css.notifyRow} data-team-notify>{t(mentionSurface === 'thread' ? 'composerMentionTargets' : 'composerNotify', { ids: mentionTargetIds.map(memberId => `@${memberHandles.get(memberId) ?? memberId}`).join(', ') })}</p>}
+      {reachabilityMessages.length > 0 && <div className={css.reachabilityStatus} data-team-reachability-warning role="status" aria-live="polite">
+        {reachabilityMessages.map((message, index) => <p key={`${index}-${message}`}>{message}</p>)}
+      </div>}
       {onFilesChange !== undefined && pendingFiles !== undefined && pendingFiles.length > 0 && (
         <ul className={css.fileChips} aria-label={t('attachFiles')}>
           {pendingFiles.map((file, index) => {

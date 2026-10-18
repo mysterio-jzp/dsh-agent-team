@@ -57,6 +57,7 @@ const EXPECTED_REMOTE_METHODS = [
   'recoverMember',
   'removeHumanAvatar',
   'removeMemberAvatar',
+  'removeThreadMember',
   'reply',
   'replySettings',
   'resolveMessageRefs',

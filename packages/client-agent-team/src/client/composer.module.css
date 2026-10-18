@@ -144,11 +144,8 @@
   white-space: nowrap;
 }
 
-/* A candidate outside the conversation being written into stays pickable —
-   the Host addresses them too — so the distinction is weight, not absence.
-   The name drops to the secondary label alias while the row keeps its own
-   contrast. Weight alone carries it: the confirmation a Thread reply can
-   trigger is stated by the status line after the send, not on the row. */
+/* Candidates remain pickable, but the explicit Host membership state is part
+   of the row so a draft never implies delivery, invitation, or restored follow. */
 .mentionOption[data-mention-inside='false'] .mentionName {
   color: var(--dsw-alias-label-secondary);
 }
@@ -170,6 +167,14 @@
   color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-tertiary));
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.mentionOption[data-mention-state] .mentionDescription {
+  color: var(--dsw-alias-label-secondary);
+  line-height: 16px;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .toolbar {
@@ -378,7 +383,7 @@
 
 .confirmation {
   align-self: stretch;
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--dsw-alias-label-secondary);
   font-size: 12px;
   line-height: 18px;
   margin: 0;
@@ -387,7 +392,7 @@
 
 /* Quiet "who gets notified" line; sits between the draft and the send action. */
 .notifyRow {
-  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-tertiary));
+  color: var(--dsw-alias-label-secondary);
   font-size: 12px;
   line-height: 18px;
   margin: 0;
@@ -395,13 +400,30 @@
   padding: 0 16px;
 }
 
+.reachabilityStatus {
+  color: var(--dsw-alias-label-secondary);
+  display: grid;
+  font-size: 12px;
+  gap: 2px;
+  line-height: 18px;
+  margin: 0;
+  overflow-wrap: anywhere;
+  padding: 0 16px 2px;
+}
+
+.reachabilityStatus p { margin: 0; }
+
 .error {
   align-self: stretch;
-  color: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-secondary);
   font-size: 12px;
   line-height: 18px;
   margin: 0;
-  padding: 0 4px 2px;
+  /* The lead bar is the only non-text cue left once the words meet the small-text
+     contrast gate: it is a graphical object, judged at 3:1, and reuses the
+     existing error token instead of adding a component. */
+  border-left: 3px solid var(--dsw-alias-state-error-primary);
+  padding: 0 4px 2px 8px;
 }
 
 @media (max-width: 600px) {
@@ -414,8 +436,16 @@
     padding-block: 6px;
   }
 
-  .mentionDescription {
-    display: none;
+  .mentionDescription { display: none; }
+
+  .mentionOption[data-mention-state] {
+    row-gap: 1px;
+  }
+
+  .mentionOption[data-mention-state] .mentionDescription {
+    display: block;
+    font-size: 11px;
+    grid-column: 2;
   }
 }
 

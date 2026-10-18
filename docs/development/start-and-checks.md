@@ -71,6 +71,12 @@ Changes affecting browser bundles, Client modules, slots, Remote activation, bun
 npm run test:browser
 ```
 
+The browser lane installs the built Client bundle, so it measures `packages/client-agent-team/lib/`, not the sources: run `npm run build` after changing Client CSS or TSX, and again before re-measuring a screenshot, or the lane quietly reports numbers from the previous bundle. A single lane runs on its own with a name filter:
+
+```sh
+node scripts/run-browser-test.mjs -t "<test name fragment>"
+```
+
 Visible UI changes touching Team controls or surfaces additionally run the mechanical design-language audit (shipped-reference tripwires included):
 
 ```sh

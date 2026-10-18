@@ -59,6 +59,8 @@ import type {
   AgentTeamPutMemberAvatarResult,
   AgentTeamRemoveMemberAvatarRequest,
   AgentTeamRemoveMemberAvatarResult,
+  AgentTeamRemoveThreadMemberRequest,
+  AgentTeamRemoveThreadMemberResult,
   AgentTeamUpdateMemberRequest,
   AgentTeamView,
   AgentTeamViewRequest,
@@ -206,6 +208,8 @@ export type TeamConversationProps = PropsRuntime<'main'> & PropsLocale<'team'> &
   changeHumanTodo: (request: AgentTeamHumanTodoActionRequest) => Promise<RemoteResult<AgentTeamHumanTodoResult>>
   /** Human-only Thread Attention observations; the Thread composer ranks the returned followers first. */
   threadObservations: (request: AgentTeamThreadObservationsRequest) => Promise<RemoteResult<AgentTeamThreadObservations>>
+  /** Human-only durable removal from this Thread's @-reachable Agent set. */
+  removeThreadMember: (request: AgentTeamRemoveThreadMemberRequest) => Promise<RemoteResult<AgentTeamRemoveThreadMemberResult>>
   /** Agent-card session jump, shared by every slot; message member chips reuse it. */
   openMemberSession: (sessionId: AgentTeamClientMemberStatus['member']['sessionId'], reportFailure?: (message: string) => void) => void
 }

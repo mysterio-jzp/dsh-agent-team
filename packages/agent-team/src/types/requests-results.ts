@@ -312,6 +312,42 @@ export interface AgentTeamRemoveChannelMemberResult {
   readonly removedAttention: readonly AgentTeamThreadAttentionKey[]
 }
 
+/** Human intent to remove one existing Agent member from one Thread. */
+export interface AgentTeamRemoveThreadMemberRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly threadRef: AgentTeamThreadRef
+  readonly memberId: AgentTeamMemberId
+}
+
+export interface AgentTeamThreadMemberRemovalCommittedResult {
+  readonly kind: 'committed'
+  readonly changed: true
+  readonly receipt: AgentTeamOperationReceipt
+  readonly threadRef: AgentTeamThreadRef
+  readonly memberId: AgentTeamMemberId
+}
+
+export interface AgentTeamThreadMemberRemovalNoChangeResult {
+  readonly kind: 'no_change'
+  readonly changed: false
+  readonly threadRef: AgentTeamThreadRef
+  readonly memberId: AgentTeamMemberId
+}
+
+/** A live Task Claim prevents membership removal without releasing its owner. */
+export interface AgentTeamThreadMemberRemovalBlockedResult {
+  readonly kind: 'blocked_by_active_claim'
+  readonly changed: false
+  readonly threadRef: AgentTeamThreadRef
+  readonly memberId: AgentTeamMemberId
+  readonly taskRef: AgentTeamTaskRef
+}
+
+export type AgentTeamRemoveThreadMemberResult = AgentTeamThreadMemberRemovalCommittedResult
+  | AgentTeamThreadMemberRemovalNoChangeResult
+  | AgentTeamThreadMemberRemovalBlockedResult
+
 /** Human intent to join one Agent Member to one additional Workspace. */
 export interface AgentTeamJoinWorkspaceRequest {
   readonly requestId: AgentTeamRequestId
@@ -1081,12 +1117,22 @@ export interface AgentTeamThreadObservationsRequest {
   readonly limit?: number
 }
 
+export interface AgentTeamThreadMember {
+  readonly memberId: AgentTeamMemberId
+  /** Whether Host Attention currently follows this Thread. */
+  readonly following: boolean
+}
+
 export interface AgentTeamThreadObservations {
   /** The newest observations up to `limit` (default 50, at most 100); `hasMore` says whether older ones exist. */
   readonly items: readonly AgentTeamThreadAttentionObservation[]
   /** Members whose Attention currently follows the Thread — the state the replayed observations lead to. */
   readonly followers: readonly AgentTeamMemberId[]
-  /** Older observations than `items` exist. The follower set is always complete. */
+  /** The complete, non-paginated set currently eligible for Thread @ delivery. */
+  readonly threadMembers: readonly AgentTeamThreadMember[]
+  /** Complete removal tombstones; these candidates are not current Thread members. */
+  readonly removedMemberIds: readonly AgentTeamMemberId[]
+  /** Older observations than `items` exist. The follower and member sets are always complete. */
   readonly hasMore: boolean
 }
 

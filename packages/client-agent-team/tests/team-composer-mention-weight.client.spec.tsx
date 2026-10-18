@@ -49,8 +49,10 @@ function status(handle: string, memberId: string): AgentTeamClientMemberStatus {
 // One Member per tier: follows this Thread, takes part in the Channel only,
 // and the rest of the Workspace.
 const follower = status('@follower', 'member:follower')
+const unfollowed = status('@unfollowed', 'member:unfollowed')
 const channelPeer = status('@channelpeer', 'member:channelpeer')
 const stranger = status('@stranger', 'member:stranger')
+const removed = status('@removed', 'member:removed')
 
 function openMenu(ui: ReturnType<typeof render>, text: string): void {
   const textarea = ui.container.querySelector('textarea') as HTMLTextAreaElement
@@ -73,8 +75,12 @@ function rowOf(ui: ReturnType<typeof render>, handle: string): HTMLElement {
 
 function renderComposer(draftKey: string): ReturnType<typeof render> {
   const drafts = new TeamDraftStore()
-  return render(<TeamComposer members={[stranger, channelPeer, follower]}
+  const threadSurface = draftKey.startsWith('thread:')
+  return render(<TeamComposer members={[stranger, channelPeer, follower, unfollowed, removed]}
     followerMemberIds={new Set([follower.member.memberId])}
+    threadMemberIds={new Set([follower.member.memberId, unfollowed.member.memberId])}
+    removedMemberIds={new Set([removed.member.memberId])}
+    threadMemberSnapshotLoaded={threadSurface}
     channelPeerMemberIds={new Set([channelPeer.member.memberId])}
     drafts={drafts} draftKey={draftKey as never} pending={false} placeholder="" pendingFiles={[]} onSubmit={() => {}} t={t} />)
 }
@@ -94,8 +100,10 @@ describe('mention row weight', () => {
     // part in the Channel yet not in this Thread, so its name drops a weight
     // even though the Channel counts it as a participant.
     expect(rowOf(ui, 'follower').getAttribute('data-mention-inside')).toBe('true')
+    expect(rowOf(ui, 'unfollowed').getAttribute('data-mention-inside')).toBe('true')
     expect(rowOf(ui, 'channelpeer').getAttribute('data-mention-inside')).toBe('false')
     expect(rowOf(ui, 'stranger').getAttribute('data-mention-inside')).toBe('false')
+    expect(rowOf(ui, 'removed').getAttribute('data-mention-inside')).toBe('false')
   })
 
   it('keeps a Channel peer at full weight on a Channel send, where it is inside', () => {
@@ -109,18 +117,23 @@ describe('mention row weight', () => {
     expect(rowOf(ui, 'stranger').getAttribute('data-mention-inside')).toBe('false')
   })
 
-  it('states no consequence on a row, on either surface', () => {
-    // Weight is the whole of the row's distinction: the Host's confirmation is
-    // announced by the status line after the send, so no row carries words of
-    // its own. This is the decision, not an accident — the note that used to sit
-    // beside the description must not come back on any tier of either surface.
-    for (const draftKey of ['thread:thread:one', 'channel:channel:one']) {
-      const ui = renderComposer(draftKey)
-      openMenu(ui, '@')
-      for (const row of rows(ui)) {
-        expect(row.textContent).not.toContain(zh.mentionConfirmation)
-        expect(row.textContent).not.toContain('需确认')
-      }
-    }
+  it('states each Host membership outcome on Thread rows without conflating candidates', () => {
+    const ui = renderComposer('thread:thread:one')
+    openMenu(ui, '@')
+
+    expect(rowOf(ui, 'follower').textContent).toContain(zh.threadMentionFollowing)
+    expect(rowOf(ui, 'unfollowed').textContent).toContain(zh.threadMentionUnfollowed)
+    expect(rowOf(ui, 'channelpeer').textContent).toContain(zh.threadMentionChannelCandidate)
+    expect(rowOf(ui, 'stranger').textContent).toContain(zh.threadMentionWorkspaceCandidate)
+    expect(rowOf(ui, 'removed').textContent).toContain(zh.threadMentionRemoved)
+  })
+
+  it('does not project Thread membership onto a Channel mention menu', () => {
+    const ui = renderComposer('channel:channel:one')
+    openMenu(ui, '@')
+
+    expect(rowOf(ui, 'follower').getAttribute('data-mention-state')).toBeNull()
+    expect(rowOf(ui, 'removed').getAttribute('data-mention-state')).toBeNull()
+    expect(rowOf(ui, 'removed').textContent).not.toContain(zh.threadMentionRemoved)
   })
 })

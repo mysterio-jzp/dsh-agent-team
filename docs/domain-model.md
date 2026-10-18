@@ -60,6 +60,8 @@ Acceptance normally waits for every Claim to be done (`in_review`). The Human ma
 
 An independent, single-level public collaboration aggregate inside a Channel. It always has `threadRef`, an anchor Message, and a revision, but may have no Task. Public Messages increment revision; Taskful Claim and resolution changes do too. Existing-Thread writes require current revision. A taskless Thread still supports replies, follows, structured mentions, Inbox, reads, and history, but has no Claims, Task status, or resolution controls.
 
+Thread membership is separate from Attention: an unfollowed Member remains @-reachable. A Human may remove a Member from this Thread's reachable set; the ledger records a per-Thread removal tombstone, ends any current Attention, and clears direct markers without revoking Workspace/Channel participation or deleting Thread facts. An active Claim on the Thread's Task blocks removal. Re-inviting a removed Member requires a Human-confirmed successful Message send, which clears the projected tombstone.
+
 Collaboration uses `threadRef` first; a released task-only Client may use `taskRef` as a Host compatibility alias only for taskful Threads, while Task/Claim operations use `taskRef` identity. Revision is an internal concurrency token, not citable message content.
 
 ## Claim

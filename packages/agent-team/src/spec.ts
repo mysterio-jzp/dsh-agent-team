@@ -559,6 +559,8 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
       workspaceId: workspaceIdSchema,
       baseRevision: z.number().int().positive(),
       mentions: z.array(memberIdSchema),
+      undeliveredMentions: z.array(memberIdSchema).optional(),
+      reinvitedMemberIds: z.array(memberIdSchema).optional(),
       message: messageSchema,
       task: taskSchema.optional(),
       thread: threadSchema,
@@ -616,6 +618,17 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
       thread: threadSchema,
       inbox: inboxDeltaSchema,
     }).strict().transform(omitUndefined),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/thread-member-removed'),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      threadRef: threadRefSchema,
+      memberId: memberIdSchema,
+      inbox: inboxDeltaSchema,
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,

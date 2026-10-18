@@ -22,7 +22,11 @@ History paging 永远不确认新 work。Thread 打开期间到达的 updates �
 ## Mentions
 Message 在自己的正文里指定收件人。写出 `@Handle` 才算 mention。匹配按 Channel 内可寻址的名字，做大小写不敏感、Unicode 词边界、长名优先。因此 Client 渲染成 chip 的那个名字正是送达的那个名字。裸 handle 仍是普通散文，代码块或行内代码里的 handle 是引用而非呼叫。`@all` 触达 Channel 内每个 Member，在该次写入时展开成当时的 Member 集合并快照进 operation。不存在收件人参数。无论 Human 在 Web Client 撰写还是 Agent 通过 `team_message` 撰写，Host 都解析正文。Human 也以同样方式寻址，即 `@human`。这是跨改名永久有效的别名。`team_view` 中的当前显示名同样可寻址，chip 两种写法都渲染当前显示名。任何 agent handle 不得占用 `human` 字面，因此这个别名永远不会通知到别人。
 
-顶层 Message 可以直接 mention Agents。被提及的 Members 会开始 follow 新 Thread 并接收 Message。在既有 Thread 中，Agent 可以 mention 任何**曾经参与过**该 Thread 的 Member。无论当前是否仍在 follow，mention 会送达，并恢复这个 Member 的 Attention。mention 一个既有 Thread 从未承载过的 Member 时，Message 照常提交。Message 不向这个 Member 送达，结果在 `undeliveredMentions` 中报告。只有 Human 能邀请这个 Member。Human reply mention 一个当前未 follow 的 Member 时，仍先走 Host-owned one-use confirmation flow 再提交。Agent 可以 mention Human，但不会因此让 Human 成为 follower。
+顶层 Message 提及 Agent 时，会让他们 follow 新 Thread 并送达这条 Message。在既有 Thread 中，Agent 可以 mention Thread 曾承载、且之后未被 Human 移除的 Member；无论当前是否仍在 follow，mention 都会送达并恢复 Attention。Agent mention 从未加入或已移除的 Member 时，Message 仍会提交，但不向他们送达，并在 `undeliveredMentions` 中报告。只有 Human 能邀请或重新邀请。
+
+Human reply mention 未关注或已移除的 Member 时，提交前必须经过 Host-owned one-use confirmation；确认后成功发送会重新邀请已移除的 Member。Human-only `removeThreadMember` 会记录该 Thread 的移除 tombstone、结束当前 Attention 并清除 direct markers，但不撤销 Workspace/Channel 成员关系或删除 Thread 历史事实。若该 Member 在 Thread 的 Task 上持有 active Claim，移除会被阻止。
+
+Agent 可以 mention Human，但不会因此让 Human 成为 follower。
 
 回复是回答某一条既有 Message，因此它同时把那条 Message 的作者纳入收件人：引用一个 Member 与点名他一样会送达。作者在送达解析之前就进入收件人集合，所以邀请规则、direct marker、`undeliveredMentions` 报告全部沿用同一条路径 —— Agent 依然不能邀请这个 Thread 从未承载过的 Member；Human 永远不作为收件人，因为他们直接读 Thread。消息不会把自己加进自己的收件人，所以回复自己的消息不通知任何人。目标不存在、或属于另一个 Thread 的回复会被拒绝，而不是被记录成一条悬空引用。
 

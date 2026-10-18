@@ -71,6 +71,12 @@ git diff --check HEAD
 npm run test:browser
 ```
 
+浏览器车道装的是构建好的 Client bundle，量的是 `packages/client-agent-team/lib/` 而不是源码：改过 Client 的 CSS 或 TSX 后要先 `npm run build`，重拍截图前再构建一次，否则车道会安静地报上一份 bundle 的数字。单条车道按名称过滤单独跑：
+
+```sh
+node scripts/run-browser-test.mjs -t "<用例名片段>"
+```
+
 改动 Team 控件或界面的可见 UI 变更，额外运行机械的设计语言审计（含 shipped 参考 tripwire）：
 
 ```sh

@@ -11,6 +11,8 @@ import type {
   AgentTeamRequestId,
   AgentTeamTaskRef,
   AgentTeamThreadFact,
+  AgentTeamThreadMember,
+  AgentTeamThreadObservations,
   AgentTeamThreadReadFact,
   AgentTeamThreadRef,
   AgentTeamView,
@@ -21,6 +23,7 @@ import type { TeamConversationProps } from './slots.ts'
 import type { TeamDraftKey, TeamDraftStore } from './drafts.ts'
 import { TeamComposer } from './TeamComposer.tsx'
 import { diagnosticText, TeamPresenceDot } from './TeamPresenceDot.tsx'
+import { TeamThreadMembers } from './TeamThreadMembers.tsx'
 import { TeamMessage } from './TeamMessage.tsx'
 import { TeamRunDivider } from './TeamRunDivider.tsx'
 import { firstSentence, formatActivity, formatClaimState, formatRiskClass, formatTaskStatus, formatTaskTitle, mentionNameOf, mentionNamesOf, mentionedMemberIds, mentionsHuman, taskStatusDot, type MentionHandle } from './team-formatters.ts'
@@ -52,6 +55,7 @@ interface TeamThreadPageProps {
   readonly readThread: TeamConversationProps['readThread']
   readonly loadThreadHistory: TeamConversationProps['loadThreadHistory']
   readonly threadObservations: TeamConversationProps['threadObservations']
+  readonly removeThreadMember: TeamConversationProps['removeThreadMember']
   readonly subscribeChanges: TeamConversationProps['subscribeChanges']
   readonly loadMembers: TeamConversationProps['loadMembers']
   readonly drafts: TeamDraftStore
@@ -138,7 +142,7 @@ function firstUnreadMention(facts: readonly AgentTeamThreadReadFact[]): AgentTea
 export function TeamThreadPage(props: TeamThreadPageProps) {
   const {
     workspaceId, humanName, humanAvatarUrl, memberAvatars, channelRef, taskRef, threadRef, taskNumber, backToWorkspace, selectChannel, selectThread, resolveTaskRefs, resolveThreadRefs, openMemberSession, putAttachment,
-    loadChannels, readThread, loadThreadHistory, threadObservations,
+    loadChannels, readThread, loadThreadHistory, threadObservations, removeThreadMember,
     subscribeChanges, loadMembers, drafts, getAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, loadHumanTodos, changeHumanTodo, t,
   } = props
   const threadRequest = { threadRef, ...(taskRef === undefined ? {} : { taskRef }) }
@@ -161,9 +165,12 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // link between an existing message and the to-do, so the reply has to land
   // first and its ref is what answers.
   const [answeringTodo, setAnsweringTodo] = useState<AgentTeamHumanTodo>()
-  // Current Thread followers; the composer ranks them first because a mention
-  // to a follower delivers directly instead of entering the invite detour.
-  const [followerIds, setFollowerIds] = useState<ReadonlySet<AgentTeamMemberId>>(() => new Set())
+  const [threadMembers, setThreadMembers] = useState<readonly AgentTeamThreadMember[]>([])
+  const [removedMemberIds, setRemovedMemberIds] = useState<ReadonlySet<AgentTeamMemberId>>(() => new Set())
+  const [memberSnapshotLoaded, setMemberSnapshotLoaded] = useState(false)
+  const [memberSnapshotLoading, setMemberSnapshotLoading] = useState(true)
+  const [memberSnapshotError, setMemberSnapshotError] = useState<string>()
+  const composerInputRef = useRef({ current: null as HTMLTextAreaElement | null }).current
   const [currentFacts, setCurrentFacts] = useState<readonly AgentTeamThreadFact[]>([])
   const [olderFacts, setOlderFacts] = useState<readonly AgentTeamThreadFact[]>([])
   const [readFacts, setReadFacts] = useState<readonly AgentTeamThreadReadFact[]>([])
@@ -211,6 +218,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const readRequestIdRef = useRef<AgentTeamRequestId>(mintRequestId())
   const projectionRef = useRef<ReadProjection>()
   const mutationRequests = useRef(new Map<string, AgentTeamRequestId>())
+  const observationSequenceRef = useRef(0)
   const threadLastFact = currentFacts[currentFacts.length - 1]
   const timeline = useTimelineScroll(`${currentFacts.length}:${olderFacts.length}:${threadLastFact === undefined ? '' : factKey(threadLastFact)}`)
   // The hook returns a fresh object per render, but this callback is stable: the
@@ -308,6 +316,40 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     return round
   }
 
+  const refreshThreadObservations = async (): Promise<AgentTeamThreadObservations | undefined> => {
+    if (!mountedRef.current) return undefined
+    const sequence = ++observationSequenceRef.current
+    setMemberSnapshotLoading(true)
+    try {
+      const result = await threadObservations({ workspaceId, ...threadRequest })
+      if (!mountedRef.current || sequence !== observationSequenceRef.current) return undefined
+      if (!result.ok) {
+        setMemberSnapshotError(result.error.message)
+        if (confirmation !== undefined) {
+          setConfirmation(undefined)
+          setStatusMessage(t('threadConfirmationSnapshotUnavailable'))
+        }
+        return undefined
+      }
+      setThreadMembers(result.value.threadMembers)
+      setRemovedMemberIds(new Set(result.value.removedMemberIds))
+      setMemberSnapshotLoaded(true)
+      setMemberSnapshotError(undefined)
+      return result.value
+    } catch (cause) {
+      if (mountedRef.current && sequence === observationSequenceRef.current) {
+        setMemberSnapshotError(cause instanceof Error ? cause.message : String(cause))
+        if (confirmation !== undefined) {
+          setConfirmation(undefined)
+          setStatusMessage(t('threadConfirmationSnapshotUnavailable'))
+        }
+      }
+      return undefined
+    } finally {
+      if (mountedRef.current && sequence === observationSequenceRef.current) setMemberSnapshotLoading(false)
+    }
+  }
+
   // Presence and roster live in the workspace projection; they never need
   // the channel view that the supplemental fetch performs.
   const refreshMembers = async (): Promise<void> => {
@@ -358,16 +400,10 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     }
   }
 
-  // Follower ranking is an enhancement, not a page fact: a failed observation
-  // read leaves the roster order in place instead of surfacing an error.
+  // The Host's complete member projection feeds both mention reachability and
+  // management; a failed refresh invalidates it until a later read succeeds.
   const refreshFollowers = async (): Promise<void> => {
-    try {
-      const result = await threadObservations({ workspaceId, ...threadRequest })
-      if (!mountedRef.current || !result.ok) return
-      setFollowerIds(new Set(result.value.followers))
-    } catch {
-      // The next thread-scope wake retries; ranking falls back to roster order.
-    }
+    await refreshThreadObservations()
   }
 
   /**
@@ -482,7 +518,11 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     setProjection(undefined)
     setChannelView(undefined)
     setMembers([])
-    setFollowerIds(new Set())
+    setThreadMembers([])
+    setRemovedMemberIds(new Set())
+    setMemberSnapshotLoaded(false)
+    setMemberSnapshotLoading(true)
+    setMemberSnapshotError(undefined)
     setCurrentFacts([])
     currentFactsRef.current = []
     setOlderFacts([])
@@ -496,6 +536,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     setStatusMessage(undefined)
     const sequence = sequenceRef.current + 1
     sequenceRef.current = sequence
+    const observationSequence = ++observationSequenceRef.current
     setLoading(true)
     void (async () => {
       // One parallel round covers the whole first paint. The durable read no
@@ -507,6 +548,17 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         threadObservations({ workspaceId, ...threadRequest }).catch(() => undefined),
       ])
       if (!mountedRef.current || sequence !== sequenceRef.current) return
+      if (observationSequence === observationSequenceRef.current) {
+        if (observations?.ok === true) {
+          setThreadMembers(observations.value.threadMembers)
+          setRemovedMemberIds(new Set(observations.value.removedMemberIds))
+          setMemberSnapshotLoaded(true)
+          setMemberSnapshotError(undefined)
+        } else {
+          setMemberSnapshotError(observations?.ok === false ? observations.error.message : t('threadMembersLoadFailed'))
+        }
+        setMemberSnapshotLoading(false)
+      }
       if (!read.ok) {
         setError(read.error.message)
         setLoading(false)
@@ -537,7 +589,6 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         // pages from the oldest fact on screen under its own error surface.
         setHistoryHasMore(true)
       }
-      if (observations !== undefined && observations.ok) setFollowerIds(new Set(observations.value.followers))
       setError(undefined)
       setLoading(false)
       await drainUnread()
@@ -644,6 +695,10 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const answeredTodos = useAnsweredTodos(listedTodos)
   const effectiveChannelRef = task?.channelRef ?? channelRef
   const channelMemberIds = useMemo(() => new Set(channelView?.members.filter(item => item.channelRef === effectiveChannelRef).map(item => item.memberId) ?? []), [channelView, effectiveChannelRef])
+  const memberSnapshotUsable = memberSnapshotLoaded && memberSnapshotError === undefined
+  const threadMemberIds = useMemo(() => new Set(threadMembers.map(member => member.memberId)), [threadMembers])
+  const threadFollowingIds = useMemo(() => new Set(threadMembers.filter(member => member.following).map(member => member.memberId)), [threadMembers])
+  const activeClaimOwnerIds = useMemo(() => new Set(taskClaims.filter(claim => claim.state === 'active').map(claim => claim.owner)), [taskClaims])
   const channelMembers = members.filter(status => channelMemberIds.size === 0 || channelMemberIds.has(status.member.memberId))
   const mentionHandlesMap = useMemo(() => new Map(members.map(status => [status.member.memberId, status.member.handle.replace(/^@/, '')])), [members])
   const metadata = useMemo(() => readMeta(readFacts), [readFacts])
@@ -659,7 +714,17 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const memberName = (memberId: AgentTeamMemberId): string => {
     if (memberId === channelView?.humanMemberId) return humanName
     const status = members.find(candidate => candidate.member.memberId === memberId)
-    return status === undefined ? t('memberUnknown') : `@${status.member.handle}`
+    return status === undefined ? t('memberUnknown') : `@${status.member.handle.replace(/^@/, '')}`
+  }
+
+  const addCandidateToDraft = (status: AgentTeamClientMemberStatus): boolean => {
+    const memberId = status.member.memberId
+    const existingDraft = drafts.getSnapshot(draftKey).draft
+    if (mentionedMemberIds(existingDraft, members).includes(memberId)) return false
+    const token = `@${status.member.handle.replace(/^@/, '')}`
+    const separator = existingDraft === '' || /\s$/u.test(existingDraft) ? '' : ' '
+    drafts.writeDraft(draftKey, `${existingDraft}${separator}${token} `)
+    return true
   }
 
   const messageSender = (fact: AgentTeamThreadFact): AgentTeamMemberId | undefined =>
@@ -1028,10 +1093,12 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
       }
       if (result.value.kind === 'committed') {
         const committed = result.value as Extract<typeof result.value, { kind: 'committed' }>
-        // The optimistic row chips what the Host is about to report: a
-        // hand-typed `@Handle` delivers exactly like a picked recipient, and the
-        // committed facts replace this row as soon as they arrive.
-        const optimisticMentions = [...new Set([...recipients, ...mentionedMemberIds(draft, channelMembers)])].sort()
+        // The optimistic row mirrors only delivered recipients. Agent replies
+        // can commit a plain-text @ for a nonmember, but the Host explicitly
+        // reports those in undeliveredMentions and they must not look delivered.
+        const undelivered = new Set(committed.undeliveredMentions ?? [])
+        const optimisticMentions = [...new Set([...recipients, ...mentionedMemberIds(draft, channelMembers)])]
+          .filter(memberId => !undelivered.has(memberId)).sort()
         setCurrentFacts(current => {
           const merged = mergeFacts(current, [{ kind: 'message', sequence: committed.message.sequence, message: committed.message, mentions: optimisticMentions, occurredAt: committed.receipt.occurredAt }])
           currentFactsRef.current = merged
@@ -1044,15 +1111,46 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         uploadedAttachmentIds.current = new WeakMap()
         setReplyRequestId(undefined)
         setConfirmation(undefined)
-        setStatusMessage(undefined)
+        const undeliveredNames = (committed.undeliveredMentions ?? []).map(memberName)
+        setStatusMessage(undeliveredNames.length === 0 ? undefined : t('threadSendUndelivered', { ids: undeliveredNames.join(', ') }))
         // The reply that just landed is the answer to the to-do the reader
         // pressed "answer" on: the binding is a second, separate fact about an
         // existing message, so it is written after the message exists.
         await settleAnsweredTodo(committed.message.messageRef)
         await refreshSupplemental()
       } else if (result.value.kind === 'confirmation_required') {
+        let currentMembers = threadMembers
+        let removedMembers = removedMemberIds
+        let followingMembers = threadFollowingIds
+        if (!memberSnapshotUsable) {
+          const snapshot = await refreshThreadObservations()
+          if (snapshot === undefined) {
+            setConfirmation(undefined)
+            setStatusMessage(t('threadConfirmationSnapshotUnavailable'))
+            return
+          }
+          currentMembers = snapshot.threadMembers
+          removedMembers = new Set(snapshot.removedMemberIds)
+          followingMembers = new Set(snapshot.threadMembers.filter(member => member.following).map(member => member.memberId))
+        }
+        const targets = result.value.recipients.filter(memberId => memberId !== channelView?.humanMemberId)
+        const currentMemberIds = new Set(currentMembers.map(member => member.memberId))
+        const removed = targets.filter(memberId => removedMembers.has(memberId))
+        const invites = targets.filter(memberId => !currentMemberIds.has(memberId) && !removedMembers.has(memberId))
+        const restores = targets.filter(memberId => currentMemberIds.has(memberId) && !followingMembers.has(memberId))
+        const classified = new Set([...removed, ...invites, ...restores])
+        if (targets.length === 0 || targets.some(memberId => !classified.has(memberId))) {
+          setConfirmation(undefined)
+          setStatusMessage(t('threadConfirmationSnapshotUnavailable'))
+          return
+        }
+        const labels = [
+          ...(invites.length === 0 ? [] : [t('mentionConfirmationInvite', { ids: invites.map(memberName).join(', ') })]),
+          ...(removed.length === 0 ? [] : [t('mentionConfirmationReinvite', { ids: removed.map(memberName).join(', ') })]),
+          ...(restores.length === 0 ? [] : [t('mentionConfirmationRestore', { ids: restores.map(memberName).join(', ') })]),
+        ]
         setConfirmation(result.value.confirmationToken)
-        setStatusMessage(t('mentionConfirmation'))
+        setStatusMessage(labels.join(' '))
       } else if (result.value.kind === 'unread_required') {
         setError(t('unreadRequired', { count: result.value.unreadCount }))
         setConfirmation(undefined)
@@ -1095,6 +1193,22 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   })
   // Threads are always entered through a Channel page, so a Channel origin
   // returns to its timeline; a Thread restored without one returns further.
+  const memberManager = <TeamThreadMembers
+    members={members}
+    threadMembers={threadMembers}
+    removedMemberIds={removedMemberIds}
+    channelMemberIds={channelMemberIds}
+    activeClaimOwners={activeClaimOwnerIds}
+    snapshotLoaded={memberSnapshotUsable}
+    snapshotLoading={memberSnapshotLoading}
+    {...(memberSnapshotError === undefined ? {} : { snapshotError: memberSnapshotError })}
+    refreshSnapshot={async () => (await refreshThreadObservations()) !== undefined}
+    removeMember={memberId => removeThreadMember({ requestId: mintRequestId(), workspaceId, threadRef, memberId })}
+    addToDraft={addCandidateToDraft}
+    focusComposer={() => { composerInputRef.current?.focus({ preventScroll: true }) }}
+    memberAvatars={memberAvatars}
+    t={t}
+  />
   const backLabel = channelRef === undefined ? t('backToWorkspace') : t('backToChannel')
 
   return <main className={css.surface} data-team-thread={threadRef}>
@@ -1127,6 +1241,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
             ? <Button size="sm" variant="outline" disabled={pending} onClick={() => { void mutateTask('close') }}>{t('closeTask')}</Button>
             : <Button size="sm" variant="primary" disabled={pending} onClick={() => { void mutateTask('reopen') }}>{t('reopenTask')}</Button>}
         </div>}
+        <div className={css.headerActions}>{memberManager}</div>
       </header>
       {risks.length > 0 && <section className={threadCss.riskSection} aria-label={t('runtimeRisk')}>
         <h2>{t('runtimeRisk')}</h2>
@@ -1246,7 +1361,10 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         : <TeamComposer
       key={draftKey}
       members={members}
-      followerMemberIds={followerIds}
+      {...(memberSnapshotUsable ? { followerMemberIds: threadFollowingIds } : {})}
+      {...(memberSnapshotUsable ? { threadMemberIds } : {})}
+      {...(memberSnapshotUsable ? { removedMemberIds } : {})}
+      threadMemberSnapshotLoaded={memberSnapshotUsable}
       channelPeerMemberIds={channelMemberIds}
       drafts={drafts}
       draftKey={draftKey}
@@ -1255,15 +1373,16 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
       {...(error === undefined ? {} : { error })}
       onEdit={clearSendState}
       onSubmit={() => { void sendReply() }}
+      onInputRef={input => { composerInputRef.current = input }}
       placeholder={t('replyPlaceholder')}
       pendingFiles={pendingFiles}
       onFilesChange={updatePendingFiles}
       {...(replyTarget === undefined || !repliesOffered ? {} : {
         replyTo: (() => {
           const target = cachedResolvedMessageRef(replyTarget)
-          // The member id travels so the author joins the composer's ordinary
-          // "will notify" row; an unresolved parent cannot name one, and the
-          // Host still delivers without it.
+          // The member id travels so the author joins the composer's recipient
+          // list; an unresolved parent cannot name one, and the Host still
+          // delivers without it.
           return target === undefined
             ? { senderName: t('memberUnknown'), excerpt: '' }
             : { memberId: target.sender, senderName: memberName(target.sender), excerpt: target.excerpt }

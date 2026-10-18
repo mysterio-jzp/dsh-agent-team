@@ -77,6 +77,13 @@ The membership action is the row's only chrome — one `Button size="sm" variant
 
 Membership law follows the Host: joining needs `availability === 'active'` (the Host refuses any other availability), while leaving needs only the membership fact, so an already-joined Member who is temporarily down keeps a working 移除. The sidebar Agent list is the exception on spelling: it names Members as the directory does (`builder`), while rosters address them the way the composer does (`@builder`).
 
+## Thread member manager
+`TeamThreadMembers.tsx` is reached from the Thread header. Its Host-backed count and modal separate current @-reachable Members (with follow state) from Channel and Workspace candidates; removed ids have a distinct status rather than appearing never-joined. The trigger withholds its count until a successful snapshot and announces loading or unavailable status. The modal shows a readable loading/error state with retry and no membership rows or candidate actions until a snapshot is usable. Its scope notice states that follow controls ordinary updates, not @ reachability.
+
+A candidate action only adds the Member's handle to the Thread draft. The composer's separate pre-send warning distinguishes unknown, never-joined, removed, and unfollowed outcomes; selecting a candidate never changes membership. Only a confirmed successful Human send invites or re-invites a Member. Any failed later snapshot read invalidates an earlier success for reachability and preserves the draft. After commit, a non-empty Host `undeliveredMentions` receipt is shown in the composer status and excluded from optimistic delivery markers.
+
+Removing a current Member is a separate Human-only Host mutation behind explicit confirmation. The result refreshes the Host snapshot instead of optimistically removing the row. Members with an active Claim on the Thread's Task cannot be removed. The dialog restores focus to its trigger, or to the composer after a draft edit. An error sentence keeps the secondary text colour and carries a 3px error-coloured lead bar, so it holds 4.5:1 text and 3:1 shape in both themes.
+
 ## Team settings page
 Settings carries the Team's one surface: the `settings.section` entry `team-settings` (「团队」), offered in ordinary mode only, because Team mode's sidebar takeover puts the settings panel out of reach. The shell draws the nav rail and the content column, so the section draws its own 18px/600 heading and then rows in the shipped settings language — 16px/0 padding over a hairline separator, a 14px/22px title above a 12px/18px tertiary description, 12px between controls. It reuses the shipped `Button` and `Input` rather than restating them.
 

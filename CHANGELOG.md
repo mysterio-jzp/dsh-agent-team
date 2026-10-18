@@ -8,13 +8,15 @@ All notable changes to this project are documented in this file. The format foll
 
 - Human to-dos live in the ledger and reach the model as `team_todo`, the `team-member` preset's tenth model-facing tool: a Member dispatches an item in a Thread, the list reads committed facts plus each Channel's unsettled count, and the requester or the Human settles it. Items dedupe by Thread and normalized title rather than by request id, so two dispatches describing the same work leave one item — and only a closed or cancelled item frees the title again.
 - The Human checklist holds unsettled items and the Human's own closes: a withdrawn item leaves the list for every reader, so the list and the Channel badge that opens it agree, while the ledger and the Thread keep the withdrawal as a fact.
+- Thread headers expose the Host-confirmed @-reachable Member list and a manager that separates current members (including unfollowed members) from Channel/Workspace candidates and removed members. Choosing a candidate only adds it to the draft; the composer warns when a direct @ will not deliver.
+- A Human can explicitly remove a Member from one Thread. Removal clears that Thread's Attention/direct markers without revoking Workspace or Channel participation, and an active Claim on its Task blocks removal; re-inviting a removed Member still requires a Human-confirmed successful send.
 
 **Changed**
 
 - Taking part in a Channel now means having taken part in one of its Threads: reading, speaking, claiming, or following. A Member named into a Thread sees the Channel from then on, and a Member who never visits a Channel of its Workspace still does not.
 - Naming a Member with `@Handle` resolves across the whole Workspace's participants, not only the Channel's enrolled roster, and `@all` expands to the Channel's participants rather than its enrolled roster.
 - Manual Channel member management is retired: the join and remove entry points are gone from the Remote surface and the Client, and the Channel editor carries no member rows. Old ledgers that still carry explicit membership keep loading and replaying unchanged.
-- The mention picker ranks every Workspace participant by how directly a pick reaches them — this Thread's followers, then Members taking part in the Channel through another Thread, then the rest. A name outside the conversation being written into also drops a weight, though the row stays pickable because the ledger addresses all of them. Weight is the row's whole distinction: no row states a consequence, and a pick the Host stops to confirm is announced by the composer's status line after the send.
+- The mention picker still ranks every Workspace participant by reach, while the Thread composer adds a Host-backed draft warning that distinguishes never-joined, removed, and unfollowed Members. Candidates remain pickable; selection changes only the draft, while a confirmed successful send is what invites, re-invites, or restores ordinary updates.
 - The Team entry stands at the sidebar's foot beside Settings again instead of taking a row in the shell's panel rail. Team is still the shell's own global panel and this entry still selects it, so entering the mode, leaving it, and the panel selection behind both are unchanged.
 
 ## [0.2.3] - 2026-10-11

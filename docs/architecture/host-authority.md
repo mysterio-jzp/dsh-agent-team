@@ -2,7 +2,7 @@
 
 English | [中文](host-authority.zh.md)
 
-Team is one collaboration domain per DSH home. Its append-only operation ledger is durable authority for Member, Workspace, Channel, Message, independent Thread aggregates, optional Task overlays, Claim, Thread Attention, Inbox, Activity facts, Member work-domain bindings, and Channel directory configuration.
+Team is one collaboration domain per DSH home. Its append-only operation ledger is durable authority for Member, Workspace, Channel, Message, independent Thread aggregates and membership, optional Task overlays, Claim, Thread Attention, Inbox, Activity facts, Member work-domain bindings, and Channel directory configuration.
 
 When changing a Host capability, read package source/tests first and then the matching Harness contract. [`harness-navigation.md`](../harness-navigation.md) maps the route to `deepseek-harness/docs/subsystems/` and source packages.
 
@@ -11,6 +11,7 @@ When changing a Host capability, read package source/tests first and then the ma
 - Channel default directory sets and Member×Channel overrides are separate durable configuration operations. A first Thread binding snapshots its effective ordered set (Member override, then Channel default, then the Channel Workspace root); later configuration edits do not change that binding or its replacement Sessions. Configuration commits validate path shape, while the Host validates directory existence at activation.
 
 - A reply records the Message it answers as `replyToMessageRef` on the Message itself, and the Host resolves that ref against the ledger before committing: an unknown ref, or one belonging to another Thread, is refused rather than stored. The parent's author joins the recipients at commit, under the same invitation rule, direct markers, and `undeliveredMentions` reporting as a mention.
+- Thread membership is distinct from Attention. Human-only `removeThreadMember` appends a per-Thread removal tombstone, ends their Attention and clears direct markers without changing Workspace/Channel participation or deleting Thread facts. The Host returns a blocked result while that Member owns an active Claim on the Thread's Task. Human-only `threadObservations` returns observation history, current `followers`, `threadMembers` with `following` flags, and `removedMemberIds`; a confirmed successful Human send re-invites a removed Member and clears the projected tombstone.
 - The quoted picture — the parent's author and one line of its body — is a read-time derivation (`replyTo`), never a second stored copy. It therefore cannot disagree with the parent and still fills in when the parent sits outside the page being read. A ref that no longer resolves stays a bare ref. Quoting is not optional: the parameter is part of the reply contract, and a reply carrying a ref is accepted or refused on the ref alone.
 
 ## Lifecycle and notifications

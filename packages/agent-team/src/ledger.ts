@@ -93,6 +93,8 @@ import type {
   AgentTeamOperationReceipt,
   AgentTeamRemoveChannelMemberRequest,
   AgentTeamRemoveChannelMemberResult,
+  AgentTeamRemoveThreadMemberRequest,
+  AgentTeamRemoveThreadMemberResult,
   AgentTeamJoinWorkspaceRequest,
   AgentTeamJoinWorkspaceResult,
   AgentTeamLeaveWorkspaceRequest,
@@ -125,6 +127,7 @@ import type {
   AgentTeamThread,
   AgentTeamThreadAttention,
   AgentTeamThreadAttentionChangedOperation,
+  AgentTeamThreadMemberRemovedOperation,
   AgentTeamThreadAttentionKey,
   AgentTeamThreadAttentionRequest,
   AgentTeamThreadAttentionResult,
@@ -141,6 +144,7 @@ import type {
   AgentTeamThreadReadSnapshot,
   AgentTeamThreadObservations,
   AgentTeamThreadObservationsRequest,
+  AgentTeamThreadMember,
   AgentTeamThreadRef,
   AgentTeamWorkingDirectorySet,
   AgentTeamThreadPromotedOperation,
@@ -273,6 +277,10 @@ export interface AgentTeamAuthorizedJoinChannelRequest extends AgentTeamJoinChan
 }
 
 export interface AgentTeamAuthorizedRemoveChannelMemberRequest extends AgentTeamRemoveChannelMemberRequest {
+  readonly actor: AgentTeamHumanActor
+}
+
+export interface AgentTeamAuthorizedRemoveThreadMemberRequest extends AgentTeamRemoveThreadMemberRequest {
   readonly actor: AgentTeamHumanActor
 }
 
@@ -424,6 +432,8 @@ interface Confirmation {
   readonly recipients: readonly AgentTeamMemberId[]
   /** Whether each recipient was following when confirmation was issued. */
   readonly attention: readonly boolean[]
+  /** Whether each recipient was removed from this Thread when confirmation was issued. */
+  readonly removed: readonly boolean[]
   readonly memberStates: readonly AgentTeamAgentMember['state'][]
 }
 
@@ -469,6 +479,8 @@ interface Projection {
   readonly tasks: Map<AgentTeamTaskRef, AgentTeamTask>
   readonly threads: Map<AgentTeamThreadRef, AgentTeamThread>
   readonly attention: Map<string, AgentTeamThreadAttention>
+  /** Explicit removals override follow history without erasing Channel participation. */
+  readonly removedThreadMembers: Map<AgentTeamThreadRef, Set<AgentTeamMemberId>>
   readonly directMarkers: Map<string, AgentTeamDirectMarker>
   readonly activityMarkers: Map<string, AgentTeamActivityMarker>
   /** Derived read indexes; rebuilt by replay, never a second durable authority. */
@@ -528,7 +540,7 @@ interface AgentTeamAttentionObservation {
 function emptyProjection(): Projection {
   return { byRequest: new Map(), byOperation: new Map(), ordered: [], channels: new Map(), members: new Map(), participations: new Map(), memberships: new Map(),
     channelWorkingDirectories: new Map(), channelMemberWorkingDirectories: new Map(),
-    claims: new Map(), tasks: new Map(), threads: new Map(), attention: new Map(), directMarkers: new Map(), activityMarkers: new Map(),
+    claims: new Map(), tasks: new Map(), threads: new Map(), attention: new Map(), removedThreadMembers: new Map(), directMarkers: new Map(), activityMarkers: new Map(),
     orderedFacts: [], claimsByTask: new Map(), humanTodos: new Map(), humanTodosByThread: new Map(), factsByThread: new Map(), channelRefByThread: new Map(), mentionsByMessage: new Map(), messageCountByThread: new Map(),
     messagesByRef: new Map(),
     attentionByThread: new Map(), previousSessions: new Map(), rolloverSeeds: new Map(), memberScopes: new Map(),
@@ -1378,22 +1390,20 @@ export class AgentTeamLedger {
       const existing = this.state.byRequest.get(request.requestId)
       if (existing !== undefined) {
         this.assertSameReply(existing, request, recipients)
-        return this.resolved(this.replyResult(existing, this.undeliverableRecipients(actor, thread.threadRef, recipients)))
+        return this.resolved(this.replyResult(existing))
       }
       this.assertMentionTargets(channel, recipients)
       const deferred = this.deferredThreadWrite(actor.memberId, task, thread, request.baseRevision)
       if (deferred !== undefined) return this.resolved(deferred)
       if (task?.resolution === 'closed') throw new Error(`Task '${task.taskRef}' is closed; reopen it before replying`)
-      // An Agent cannot invite into an existing Thread, so a body mention the
-      // Thread has never carried is dropped and reported back rather than
-      // failing the send. The Human keeps the confirmation step, which is what
-      // actually grants the invitation.
+      // An Agent cannot invite into an existing Thread, so a mention outside
+      // the current reachable set is committed as text but not as delivery.
+      // The Human may invite a new or removed Member only through confirmation.
       const undelivered = this.undeliverableRecipients(actor, thread.threadRef, recipients)
       const delivered = undelivered.length === 0 ? recipients : recipients.filter(memberId => !undelivered.includes(memberId))
-      const unfollowedAgents = delivered.filter(memberId => this.state.members.has(memberId) && !this.isFollowing(thread.threadRef, memberId))
-      // A Member that once took part in this Thread is delivered to directly:
-      // re-joining a Thread it already belongs to is not an invitation.
-      if (unfollowedAgents.length > 0 && actor.kind === 'human' && request.confirmationToken === undefined) {
+      const confirmationRecipients = delivered.filter(memberId => this.state.members.has(memberId)
+        && (!this.isFollowing(thread.threadRef, memberId) || this.isRemovedThreadMember(this.state, thread.threadRef, memberId)))
+      if (confirmationRecipients.length > 0 && actor.kind === 'human' && request.confirmationToken === undefined) {
         return this.resolved(this.issueConfirmation(request.actor, request.workspaceId, channelRef, body, delivered, task, thread))
       }
       if (request.confirmationToken !== undefined) {
@@ -1411,16 +1421,21 @@ export class AgentTeamLedger {
         topLevel: false, sequence, occurredAt: base.occurredAt,
       })
       const nextThread: AgentTeamThread = Object.freeze({ ...thread, revision: sequence })
-      const started = unfollowedAgents.map(memberId => this.startAttention(memberId, thread.threadRef, sequence))
+      const started = delivered.filter(memberId => this.state.members.has(memberId) && !this.isFollowing(thread.threadRef, memberId))
+        .map(memberId => this.startAttention(memberId, thread.threadRef, sequence))
       const inbox = this.messageInboxDelta(message, request.actor.memberId, delivered, started)
+      const reinvitedMemberIds = actor.kind === 'human'
+        ? delivered.filter(memberId => this.isRemovedThreadMember(this.state, thread.threadRef, memberId))
+        : []
       const operation: AgentTeamThreadRepliedOperation = Object.freeze({
         ...base, kind: 'team/thread-replied',
         data: Object.freeze({ workspaceId: request.workspaceId, baseRevision: request.baseRevision,
-          mentions: delivered, message, ...(task === undefined ? {} : { task }), thread: nextThread, inbox }),
+          mentions: delivered, undeliveredMentions: undelivered, reinvitedMemberIds,
+          message, ...(task === undefined ? {} : { task }), thread: nextThread, inbox }),
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
-      return this.committed(this.replyResult(operation, undelivered))
+      return this.committed(this.replyResult(operation))
     })
   }
 
@@ -1840,6 +1855,42 @@ export class AgentTeamLedger {
     })
   }
 
+  /** Human-only durable removal from one Thread's @-reachable member set. */
+  removeThreadMember(request: AgentTeamAuthorizedRemoveThreadMemberRequest): Promise<AgentTeamLedgerResult<AgentTeamRemoveThreadMemberResult>> {
+    return this.enqueue(async () => {
+      this.assertHumanActor(request.actor)
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameThreadMemberRemoval(existing, request)
+        return this.resolved(this.threadMemberRemovalResult(existing))
+      }
+      const { task, thread, channelRef } = this.threadContextForActor(request.actor, request.workspaceId, request)
+      if (request.memberId === AGENT_TEAM_HUMAN_MEMBER_ID) throw new Error('Human cannot be removed from a Thread')
+      const member = this.requireMember(request.memberId)
+      if (!this.validMentionTarget(this.state, channelRef, member.memberId)) {
+        throw new Error(`Agent Member '${member.memberId}' is not reachable in Workspace '${request.workspaceId}'`)
+      }
+      if (!this.isThreadMemberFrom(this.state, thread.threadRef, member.memberId)) {
+        return this.resolved(Object.freeze({ kind: 'no_change', changed: false, threadRef: thread.threadRef, memberId: member.memberId }))
+      }
+      if (task !== undefined && this.hasActiveClaim(member.memberId, task.taskRef)) {
+        return this.resolved(Object.freeze({ kind: 'blocked_by_active_claim', changed: false,
+          threadRef: thread.threadRef, memberId: member.memberId, taskRef: task.taskRef }))
+      }
+      const attention = this.isFollowing(thread.threadRef, member.memberId)
+        ? [{ memberId: member.memberId, threadRef: thread.threadRef }]
+        : []
+      const inbox = this.inboxDelta([], attention, [], this.directMarkersFor(member.memberId, thread.threadRef))
+      const operation: AgentTeamThreadMemberRemovedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/thread-member-removed',
+        data: Object.freeze({ workspaceId: request.workspaceId, threadRef: thread.threadRef, memberId: member.memberId, inbox }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.threadMemberRemovalResult(operation))
+    })
+  }
+
   /**
    * Append one Member-to-Member direct message as an audit-only operation.
    * A DM is pure delivery: no Channel, Thread, revision, attention, or
@@ -2152,8 +2203,22 @@ export class AgentTeamLedger {
     const observations = log.slice(-limit)
       .map(event => Object.freeze({ sequence: event.sequence, threadRef, ...(task === undefined ? {} : { taskRef: task.taskRef }),
         memberId: event.memberId, action: event.action }))
+    const channelRef = this.channelRefForThreadFrom(this.state, threadRef)
+    if (channelRef === undefined) throw new Error(`Thread '${threadRef}' has no Channel`)
+    const candidates = new Set<AgentTeamMemberId>([
+      ...this.state.attentionByThread.get(threadRef) ?? [],
+      ...log.map(event => event.memberId),
+    ])
+    const threadMembers: AgentTeamThreadMember[] = [...candidates]
+      .filter(memberId => memberId !== AGENT_TEAM_HUMAN_MEMBER_ID
+        && this.isThreadMemberFrom(this.state, threadRef, memberId)
+        && this.validMentionTarget(this.state, channelRef, memberId))
+      .sort()
+      .map(memberId => Object.freeze({ memberId, following: this.isFollowingFrom(this.state, threadRef, memberId) }))
+    const removedMemberIds = [...this.state.removedThreadMembers.get(threadRef) ?? []].sort()
     return Object.freeze({ items: Object.freeze(observations), hasMore: log.length > observations.length,
-      followers: Object.freeze([...this.state.attentionByThread.get(threadRef) ?? []]) })
+      followers: Object.freeze([...this.state.attentionByThread.get(threadRef) ?? []]),
+      threadMembers: Object.freeze(threadMembers), removedMemberIds: Object.freeze(removedMemberIds) })
   }
 
   /** Every operation carrying an inbox delta drives the Inbox projection; the payload shape decides, not a per-kind list. */
@@ -2607,6 +2672,8 @@ export class AgentTeamLedger {
         ]
       case 'team/thread-attention-changed':
         return [{ kind: 'thread', threadRef: operation.data.thread.threadRef }]
+      case 'team/thread-member-removed':
+        return [{ kind: 'thread', threadRef: operation.data.threadRef }]
       case 'team/thread-read':
         // A read advances only the reader's private watermark; no projection
         // visible to other participants changes, so nobody is woken.
@@ -2653,6 +2720,8 @@ export class AgentTeamLedger {
       case 'team/task-changed':
       case 'team/thread-attention-changed':
         return [operation.data.thread.threadRef]
+      case 'team/thread-member-removed':
+        return [operation.data.threadRef]
       case 'team/human-todo-changed':
         return [operation.data.todo.threadRef]
       case 'team/channel-member-removed':
@@ -2939,6 +3008,28 @@ export class AgentTeamLedger {
       this.validateReleaseCleanup(operation.data, projection, prior.memberId, threadRefs, operation.sequence, refs)
       return
     }
+    if (operation.kind === 'team/thread-member-removed') {
+      assertHuman()
+      const { workspaceId, threadRef, memberId, inbox } = operation.data
+      const thread = projection.threads.get(threadRef)
+      const channelRef = thread === undefined ? undefined : this.channelRefForThreadFrom(projection, threadRef)
+      const member = projection.members.get(memberId)
+      const task = thread?.taskRef === undefined ? undefined : projection.tasks.get(thread.taskRef)
+      if (thread === undefined || channelRef === undefined || projection.channels.get(channelRef)?.workspaceId !== workspaceId
+        || memberId === AGENT_TEAM_HUMAN_MEMBER_ID || member === undefined
+        || !this.validMentionTarget(projection, channelRef, memberId)
+        || !this.isThreadMemberFrom(projection, threadRef, memberId)
+        || (task !== undefined && this.hasActiveClaimFrom(projection, memberId, task.taskRef))) {
+        throw new Error('invalid Thread member removal')
+      }
+      const removedAttention = this.isFollowingFrom(projection, threadRef, memberId)
+        ? [{ memberId, threadRef }]
+        : []
+      const expected = this.inboxDelta([], removedAttention, [], this.directMarkersForFrom(projection, memberId, threadRef))
+      if (!isDeepStrictEqual(inbox, expected)) throw new Error('invalid Thread member removal projection')
+      this.validateInboxDelta(inbox, projection, refs)
+      return
+    }
     if (operation.kind === 'team/thread-attention-changed') {
       const actor = operation.actor.kind === 'member' ? assertMember() : (assertHuman(), undefined)
       if (operation.data.memberId !== operation.actor.memberId) throw new Error('Attention operation has wrong actor')
@@ -3044,6 +3135,9 @@ export class AgentTeamLedger {
       }
       this.addRef(refs, message.messageRef)
       this.validateMentions(operation.data.mentions, message, projection)
+      if (operation.kind === 'team/thread-replied') {
+        this.validateMentions(operation.data.undeliveredMentions ?? [], message, projection)
+      }
       this.validateInboxDelta(operation.data.inbox, projection, refs, [thread.threadRef], [message])
       this.validateMessageInbox(operation, projection)
       return
@@ -3362,12 +3456,26 @@ export class AgentTeamLedger {
 
   private validateMessageInbox(operation: AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation, projection: Projection): void {
     const { message, mentions } = operation.data
+    const undelivered = operation.kind === 'team/thread-replied' ? operation.data.undeliveredMentions ?? [] : []
+    const reinvited = operation.kind === 'team/thread-replied' ? operation.data.reinvitedMemberIds ?? [] : []
+    const allMentions = [...mentions, ...undelivered]
     const mentionedAgents = mentions.filter(memberId => projection.members.has(memberId))
-    // Top-level mentions are open to every actor; only a Member reply may not
-    // pull an unfollowed Member into an existing Thread.
-    if (operation.actor.kind === 'member' && operation.kind === 'team/thread-replied'
-      && mentionedAgents.some(memberId => !this.everParticipatedFrom(projection, message.threadRef, memberId))) {
-      throw new Error('invalid Agent mention projection')
+    if (operation.kind === 'team/thread-replied') {
+      if (new Set(allMentions).size !== allMentions.length) throw new Error('overlapping delivered and undelivered mentions')
+      if (operation.actor.kind === 'member') {
+        const expectedUndelivered = allMentions.filter(memberId => projection.members.has(memberId)
+          && !this.isThreadMemberFrom(projection, message.threadRef, memberId))
+        if (!this.sameList(undelivered, expectedUndelivered) || reinvited.length !== 0) {
+          throw new Error('invalid Agent mention projection')
+        }
+      } else {
+        const expectedReinvited = mentions.filter(memberId => this.isRemovedThreadMember(projection, message.threadRef, memberId))
+        if (undelivered.length !== 0 || !this.sameList(reinvited, expectedReinvited)) {
+          throw new Error('invalid Human Thread member invitation')
+        }
+      }
+    } else if (reinvited.length !== 0) {
+      throw new Error('invalid top-level Thread member invitation')
     }
     const started = operation.kind === 'team/message-sent'
       ? [this.startAttention(message.sender, message.threadRef, message.sequence),
@@ -3573,6 +3681,13 @@ export class AgentTeamLedger {
       // Only message-sent mints a Task ordinal; thread-replied may echo the
       // Task without renumbering it, like the operation scan it replaces.
       if (operation.kind === 'team/message-sent' && operation.data.task !== undefined) this.recordTaskNumber(target, operation.data.task)
+      if (operation.kind === 'team/thread-replied') {
+        for (const memberId of operation.data.reinvitedMemberIds ?? []) {
+          const removed = target.removedThreadMembers.get(message.threadRef)
+          removed?.delete(memberId)
+          if (removed?.size === 0) target.removedThreadMembers.delete(message.threadRef)
+        }
+      }
       this.recordAttentionObservations(target, operation, operation.data.inbox)
       this.applyInboxDelta(target, operation.data.inbox)
       return
@@ -3597,6 +3712,14 @@ export class AgentTeamLedger {
       this.appendActivityFact(target, operation.data.activity, operation.occurredAt)
       target.tasks.set(operation.data.task.taskRef, operation.data.task)
       target.threads.set(operation.data.thread.threadRef, operation.data.thread)
+      this.recordAttentionObservations(target, operation, operation.data.inbox)
+      this.applyInboxDelta(target, operation.data.inbox)
+      return
+    }
+    if (operation.kind === 'team/thread-member-removed') {
+      const removed = target.removedThreadMembers.get(operation.data.threadRef) ?? new Set<AgentTeamMemberId>()
+      removed.add(operation.data.memberId)
+      target.removedThreadMembers.set(operation.data.threadRef, removed)
       this.recordAttentionObservations(target, operation, operation.data.inbox)
       this.applyInboxDelta(target, operation.data.inbox)
       return
@@ -4172,9 +4295,11 @@ export class AgentTeamLedger {
     this.confirmations.set(confirmationToken, Object.freeze({ actor: actor.memberId, workspaceId, channelRef,
       ...(task === undefined ? {} : { taskRef: task.taskRef }), ...(thread === undefined ? {} : { threadRef: thread.threadRef }),
       body, recipients, attention: recipients.map(memberId => thread !== undefined && this.isFollowing(thread.threadRef, memberId)),
+      removed: recipients.map(memberId => thread !== undefined && this.isRemovedThreadMember(this.state, thread.threadRef, memberId)),
       memberStates: recipients.map(memberId => this.state.members.get(memberId)?.state ?? 'enabled') }))
     return Object.freeze({ kind: 'confirmation_required', confirmationToken, workspaceId, channelRef,
-      recipients: Object.freeze(recipients.filter(memberId => this.state.members.has(memberId) && (thread === undefined || !this.isFollowing(thread.threadRef, memberId)))),
+      recipients: Object.freeze(recipients.filter(memberId => this.state.members.has(memberId)
+        && (thread === undefined || !this.isFollowing(thread.threadRef, memberId) || this.isRemovedThreadMember(this.state, thread.threadRef, memberId)))),
       ...(task === undefined ? {} : { taskRef: task.taskRef }), ...(thread === undefined ? {} : { threadRef: thread.threadRef, revision: thread.revision }) })
   }
 
@@ -4191,11 +4316,13 @@ export class AgentTeamLedger {
     const confirmation = this.confirmations.get(token)
     this.confirmations.delete(token)
     const attention = recipients.map(memberId => thread !== undefined && this.isFollowing(thread.threadRef, memberId))
+    const removed = recipients.map(memberId => thread !== undefined && this.isRemovedThreadMember(this.state, thread.threadRef, memberId))
     const states = recipients.map(memberId => this.state.members.get(memberId)?.state ?? 'enabled')
     if (confirmation === undefined || confirmation.actor !== actor.memberId || confirmation.workspaceId !== workspaceId
       || confirmation.channelRef !== channelRef || confirmation.taskRef !== task?.taskRef || confirmation.threadRef !== thread?.threadRef
       || confirmation.body !== body || !this.sameList(confirmation.recipients, recipients)
-      || !this.sameList(confirmation.attention, attention) || !this.sameList(confirmation.memberStates, states)) {
+      || !this.sameList(confirmation.attention, attention) || !this.sameList(confirmation.removed, removed)
+      || !this.sameList(confirmation.memberStates, states)) {
       throw new Error('confirmation token is invalid or expired')
     }
   }
@@ -4312,7 +4439,8 @@ export class AgentTeamLedger {
   }
 
   /** Commit projections shared by the Message-sent and Thread-replied results. */
-  private committedMessageResult(operation: AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation, undelivered: readonly AgentTeamMemberId[] = []) {
+  private committedMessageResult(operation: AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation) {
+    const undelivered = operation.kind === 'team/thread-replied' ? operation.data.undeliveredMentions ?? [] : []
     return { kind: 'committed' as const, receipt: this.receipt(operation), message: operation.data.message,
       ...(operation.data.task === undefined ? {} : { task: operation.data.task }), thread: operation.data.thread, attention: operation.data.inbox.attention.set,
       directMarkers: operation.data.inbox.directMarkers.added,
@@ -4778,20 +4906,18 @@ export class AgentTeamLedger {
     return Object.freeze([...merged].sort())
   }
 
-  /**
-   * Whether one Member has ever held Attention on one Thread. Committed Inbox
-   * deltas append a follow/unfollow observation, and the live index covers the
-   * Thread-creating Message whose initial Attention is never observed — so the
-   * two together answer "was this Member ever part of this Thread" without
-   * adding a second durable authority.
-   */
-  private everParticipated(threadRef: AgentTeamThreadRef, memberId: AgentTeamMemberId): boolean {
-    return this.everParticipatedFrom(this.state, threadRef, memberId)
-  }
-
   private everParticipatedFrom(projection: Projection, threadRef: AgentTeamThreadRef, memberId: AgentTeamMemberId): boolean {
     if (this.isFollowingFrom(projection, threadRef, memberId)) return true
     return (projection.observationsByThread.get(threadRef) ?? []).some(observation => observation.memberId === memberId)
+  }
+
+  private isRemovedThreadMember(projection: Projection, threadRef: AgentTeamThreadRef, memberId: AgentTeamMemberId): boolean {
+    return projection.removedThreadMembers.get(threadRef)?.has(memberId) === true
+  }
+
+  /** Follow history establishes membership unless a Human has removed that Member from this Thread. */
+  private isThreadMemberFrom(projection: Projection, threadRef: AgentTeamThreadRef, memberId: AgentTeamMemberId): boolean {
+    return !this.isRemovedThreadMember(projection, threadRef, memberId) && this.everParticipatedFrom(projection, threadRef, memberId)
   }
 
   /**
@@ -4807,7 +4933,7 @@ export class AgentTeamLedger {
     recipients: readonly AgentTeamMemberId[],
   ): readonly AgentTeamMemberId[] {
     if (actor.kind !== 'member') return Object.freeze([])
-    return Object.freeze(recipients.filter(memberId => this.state.members.has(memberId) && !this.everParticipated(threadRef, memberId)))
+    return Object.freeze(recipients.filter(memberId => this.state.members.has(memberId) && !this.isThreadMemberFrom(this.state, threadRef, memberId)))
   }
 
   private normalizeDirection(direction: string): string {
@@ -5032,7 +5158,7 @@ export class AgentTeamLedger {
       || operation.data.message.replyToMessageRef !== request.replyToMessageRef
       || !this.sameList(operation.data.message.attachments?.map(attachment => attachment.attachmentId) ?? [],
         request.resolvedAttachments?.map(attachment => attachment.attachmentId) ?? [])
-      || !this.sameList(operation.data.mentions, recipients)) this.throwRequestCollision(request.requestId)
+      || !this.sameList([...operation.data.mentions, ...(operation.data.undeliveredMentions ?? [])].sort(), recipients)) this.throwRequestCollision(request.requestId)
   }
 
   private assertSamePromotion(operation: AgentTeamOperation, request: AgentTeamAuthorizedPromoteThreadRequest): asserts operation is AgentTeamThreadPromotedOperation {
@@ -5110,6 +5236,12 @@ export class AgentTeamLedger {
       || (request.taskRef !== undefined && operation.data.task?.taskRef !== request.taskRef)
       || (request.threadRef === undefined && request.taskRef === undefined)
       || operation.data.action !== request.action) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSameThreadMemberRemoval(operation: AgentTeamOperation, request: AgentTeamAuthorizedRemoveThreadMemberRequest): asserts operation is AgentTeamThreadMemberRemovedOperation {
+    if (operation.kind !== 'team/thread-member-removed' || !this.sameActor(operation.actor, request.actor)
+      || operation.data.workspaceId !== request.workspaceId || operation.data.threadRef !== request.threadRef
+      || operation.data.memberId !== request.memberId) this.throwRequestCollision(request.requestId)
   }
 
   private assertSameThreadRead(operation: AgentTeamOperation, request: AgentTeamAuthorizedThreadReadRequest): asserts operation is AgentTeamThreadReadOperation {
@@ -5349,8 +5481,8 @@ export class AgentTeamLedger {
     return Object.freeze(this.committedMessageResult(operation))
   }
 
-  private replyResult(operation: AgentTeamThreadRepliedOperation, undelivered: readonly AgentTeamMemberId[] = []): Extract<AgentTeamReplyResult, { kind: 'committed' }> {
-    return Object.freeze(this.committedMessageResult(operation, undelivered))
+  private replyResult(operation: AgentTeamThreadRepliedOperation): Extract<AgentTeamReplyResult, { kind: 'committed' }> {
+    return Object.freeze(this.committedMessageResult(operation))
   }
 
   private claimResult(operation: AgentTeamClaimChangedOperation): Extract<AgentTeamClaimResult, { kind: 'committed' }> {
@@ -5389,6 +5521,11 @@ export class AgentTeamLedger {
   private attentionResult(operation: AgentTeamThreadAttentionChangedOperation): AgentTeamThreadAttentionResult {
     return Object.freeze({ receipt: this.receipt(operation), ...(operation.data.task === undefined ? {} : { task: operation.data.task }), thread: operation.data.thread,
       ...(operation.data.inbox.attention.set[0] === undefined ? {} : { attention: operation.data.inbox.attention.set[0] }) })
+  }
+
+  private threadMemberRemovalResult(operation: AgentTeamThreadMemberRemovedOperation): Extract<AgentTeamRemoveThreadMemberResult, { kind: 'committed' }> {
+    return Object.freeze({ kind: 'committed', changed: true, receipt: this.receipt(operation),
+      threadRef: operation.data.threadRef, memberId: operation.data.memberId })
   }
 
   private promotionResult(operation: AgentTeamThreadPromotedOperation): Extract<AgentTeamPromoteThreadResult, { kind: 'committed' }> {

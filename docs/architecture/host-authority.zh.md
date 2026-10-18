@@ -2,7 +2,7 @@
 
 [English](host-authority.md) | 中文
 
-Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是 Member、Workspace、Channel、Message、独立 Thread aggregate、可选 Task overlay、Claim、Thread Attention、Inbox、Activity facts、Member 工作域绑定与 Channel 目录配置的 durable authority。
+Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是 Member、Workspace、Channel、Message、独立 Thread aggregate 与成员关系、可选 Task overlay、Claim、Thread Attention、Inbox、Activity facts、Member 工作域绑定与 Channel 目录配置的 durable authority。
 
 修改 Host capability 时，先阅读 package source/tests，再阅读匹配的 Harness capability contract。导航表见 [`harness-navigation.zh.md`](../harness-navigation.zh.md)。导航表把 Host 改动映射到 `deepseek-harness/docs/subsystems/` 和 source packages。
 
@@ -10,6 +10,7 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - mutation 进入 Host authority，并提交一条 durable operation。
 - Channel 默认目录集与 Member×Channel 覆盖是独立、可重放的配置 operations。首次 Thread 绑定快照有效有序目录集（Member 覆盖、Channel 默认、Channel 所属 Workspace 根依次优先）；后续配置编辑不改变该绑定或它的 Session 代际。配置提交校验路径形状，Host 在 activation 时校验目录是否存在。
 - 回复把被回答的 Message 记为自身 Message 上的 `replyToMessageRef`，Host 在提交前用 ledger 解析这个 ref：未知的 ref、或属于别的 Thread 的 ref 一律拒绝，不会被存下。父消息作者在提交时加入收件人，邀请规则、direct markers 与 `undeliveredMentions` 报告与 mention 完全一致。被引用的画面 —— 父消息作者与其正文一行 —— 是读取期派生（`replyTo`），绝不是第二份存储副本。因此它不可能与父消息不一致，父消息不在本次读取这一页里时也照样填得上。ref 不再可解析时只留裸 ref。引用不是可选项：这个参数属于回复契约的一部分，携带 ref 的回复只按 ref 本身被接受或拒绝。
+- Thread 成员关系与 Attention 分开。Human-only `removeThreadMember` 会追加该 Thread 的移除 tombstone，结束该 Member 当前 Attention 并清除 direct markers，但不改变 Workspace/Channel 成员关系，也不删除 Thread 历史事实。若该 Member 持有该 Thread Task 的 active Claim，Host 会返回 blocked 结果。Human-only `threadObservations` 返回 observation history、当前 `followers`、带 `following` 标记的 `threadMembers`，以及 `removedMemberIds`；Human 确认并成功发送后可重新邀请已移除的 Member，Host 投影随之清除 tombstone。
 - Projections、Inbox results、tools、commands、Remote responses 和 UI 都从已提交的 operations 派生。
 - Client code 不得解释 ledger records，也不得创建 parallel authority。
 

@@ -1,0 +1,194 @@
+.trigger {
+  align-items: center;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm, 8px);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  font: inherit;
+  font-size: 12px;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.trigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.trigger:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.triggerAction {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+}
+
+.modal {
+  max-height: min(74vh, 660px);
+  overflow-y: auto;
+}
+
+.content {
+  display: grid;
+  gap: 10px;
+  outline: none;
+}
+
+.intro,
+.confirmCopy,
+.scopeNotice,
+.state,
+.empty,
+.notice,
+.error {
+  font-size: 12px;
+  line-height: 18px;
+  margin: 0;
+}
+
+.intro { color: var(--dsw-alias-label-secondary); }
+
+.scopeNotice {
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-radius: var(--dsw-radius-sm, 8px);
+  color: var(--dsw-alias-label-secondary);
+  padding: 9px 10px;
+}
+
+.group {
+  display: grid;
+  gap: 4px;
+}
+
+.group + .group {
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  margin-top: 2px;
+  padding-top: 10px;
+}
+
+.groupHeading {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.groupHeading h3 {
+  color: var(--dsw-alias-label-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  margin: 0;
+}
+
+.groupHeading span,
+.state,
+.empty {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.row {
+  align-items: center;
+  border-radius: var(--dsw-radius-sm, 8px);
+  display: grid;
+  gap: 2px 8px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  min-width: 0;
+  padding: 6px 4px;
+}
+
+.row:hover { background: var(--dsw-alias-interactive-bg-hover); }
+
+.identity,
+.missingIdentity {
+  min-width: 0;
+}
+
+.missingIdentity {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.presencePlaceholder {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 50%;
+  height: 24px;
+  width: 24px;
+}
+
+.rowTail {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  grid-column: 2;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.reachable,
+.unfollowed,
+.candidate,
+.removed,
+.claimHint {
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.reachable,
+.unfollowed,
+.candidate,
+.removed,
+.claimHint { color: var(--dsw-alias-label-secondary); }
+.claimHint { flex: 1 1 180px; }
+
+.notice,
+.error {
+  border-radius: var(--dsw-radius-sm, 8px);
+  padding: 8px 10px;
+}
+
+.notice {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.error {
+  align-items: center;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 24%, transparent);
+  /* The lead bar carries the error signal as a graphical object (3:1), because
+     the words themselves now hold the small-text contrast gate. */
+  border-left: 3px solid var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-secondary);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.confirmCopy { color: var(--dsw-alias-label-primary); }
+
+@media (max-width: 600px) {
+  /* 160px of clearance left a 390-wide roster 20px short of its own content, so
+     a two-line state sentence ended below the fold; 96px still keeps the box
+     inside the viewport while letting the sentences finish without scrolling. */
+  .modal { max-height: calc(100vh - 96px); }
+  .content { gap: 9px; }
+  .row { padding-inline: 0; }
+  .rowTail { align-items: flex-start; }
+  .reachable,
+  .unfollowed,
+  .candidate,
+  .removed,
+  .claimHint { flex: 1 1 150px; }
+}

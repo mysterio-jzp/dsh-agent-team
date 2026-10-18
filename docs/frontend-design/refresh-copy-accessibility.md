@@ -17,6 +17,12 @@ Section headers, expand/collapse buttons, menus, listbox/options, and the 「作
 
 Unread and run dividers have `role="separator"`; visible UI changes require desktop 1440×960, 390×844, and keyboard browser checks.
 
+Small state sentences — reachability, follow state, candidate and removed relations, Claim hints, confirmation and error copy — must clear 4.5:1 against their composited background in both light and dark themes.
+
+Read the ratio from the assembled page (the computed `color` over the composited colours of its ancestor backgrounds), never from the token name: a token that resolves differently per theme is exactly what a source estimate cannot see. `npm run test:browser` samples both arms and screenshots the member dialog and the composer states.
+
+Error sentences therefore keep `--dsw-alias-label-secondary` rather than an error red, and the error state carries its own non-text cue: a 3px `--dsw-alias-state-error-primary` lead bar, judged at 3:1 as a graphical object. An error must still read as an error when the sentence is skipped.
+
 ## Verification and evolution
 Visible UI, Client bundle, slot, or Remote activation changes require:
 

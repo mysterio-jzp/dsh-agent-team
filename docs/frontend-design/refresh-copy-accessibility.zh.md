@@ -23,6 +23,8 @@
 - Thread 入口的「开门」控件是一枚原生 button，label 同时携带 Thread 与它的未读数。旁边画出的胶囊 `aria-hidden`，头像叠放是单个带标签的 `role="img"`，且刻意留在按钮之外以保住它自己的可访问名。
 - 消息时间线区域使用专用 `timelineLabel`（"消息时间线"），不误用频道/参与者标签；Thread 内部事实分组段不带重复的区域标签。
 - 未读分界线 `role="separator"` 仅作信息展示（不再驱动滚动定位）；run 内回合分隔线同样 `role="separator"`，可访问名称即其标注的时刻。
+- 小组状态句（可达性、关注态、候选/已移除关系、Claim 提示、确认与错误文案）在浅色与深色两套主题下都必须对合成背景达到 4.5:1。比值要取自装配后的页面（computed `color` 对逐层合成后的祖先背景色），不能按 token 名推算：token 随主题解析，正是源码估值看不见的部分。`npm run test:browser` 会各取一臂并截图成员弹层与 Composer 状态。
+- 因此错误句保持 `--dsw-alias-label-secondary` 而不是错误红，错误态另带自己的非文字线索：3px `--dsw-alias-state-error-primary` 左竖线，按图形判据取 3:1。跳过句子不读时，错误仍须看得出是错误。
 - 新增可见 UI 必须通过 `npm run test:browser` 的桌面 1440×960、窄屏 390×844 和键盘检查（见 `development/README.md`）。
 
 ## 验证与演进流程

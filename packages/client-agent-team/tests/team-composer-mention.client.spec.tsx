@@ -42,9 +42,9 @@ function status(handle: string, memberId: string): AgentTeamClientMemberStatus {
   }
 }
 
-const inside = status('@insider', 'member:insider')
-const outsider = status('@outsider', 'member:outsider')
-const follower = status('@follower', 'member:follower')
+const inside = status('insider', 'member:insider')
+const outsider = status('outsider', 'member:outsider')
+const follower = status('follower', 'member:follower')
 
 function openMenu(ui: ReturnType<typeof render>, text: string): void {
   const textarea = ui.container.querySelector('textarea') as HTMLTextAreaElement
@@ -97,6 +97,26 @@ describe('TeamComposer mention menu', () => {
     // attribute, so styling cannot disagree with the sort order.
     const tiers = [...ui.container.querySelectorAll('[role="option"][data-mention-tier]')].map(row => row.getAttribute('data-mention-tier'))
     expect(tiers).toEqual(['0', '1', '2'])
+  })
+
+  it('keeps the draft status explicit for following, unfollowed, new, and removed Thread targets', () => {
+    const removed = status('removed', 'member:removed')
+    const drafts = new TeamDraftStore()
+    const draftKey = 'thread:thread:reachability' as never
+    drafts.writeDraft(draftKey, '@insider @follower @outsider @removed')
+    const ui = render(<TeamComposer members={[inside, outsider, follower, removed]}
+      followerMemberIds={new Set([inside.member.memberId])}
+      threadMemberIds={new Set([inside.member.memberId, follower.member.memberId])}
+      removedMemberIds={new Set([removed.member.memberId])}
+      threadMemberSnapshotLoaded
+      channelPeerMemberIds={new Set([inside.member.memberId])}
+      drafts={drafts} draftKey={draftKey} pending={false} placeholder="" pendingFiles={[]} onSubmit={() => {}} t={t} />)
+
+    const warning = ui.container.querySelector('[data-team-reachability-warning]')
+    expect(warning?.textContent).toContain('尚未加入：@outsider')
+    expect(warning?.textContent).toContain('已移除：@removed')
+    expect(warning?.textContent).toContain('已取消关注：@follower')
+    expect(warning?.textContent).not.toContain('@insider')
   })
 
   it('keeps @all scoped to the Channel even when the picker offers the wider roster', () => {

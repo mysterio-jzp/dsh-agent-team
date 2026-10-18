@@ -3,7 +3,7 @@ import type { AgentTeamChangesRequest } from '@contexera/dsh-agent-team/types'
 import { afterEach, expect, vi } from 'vitest'
 import { useState } from 'react'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import type { AgentTeamAddMemberRequest, AgentTeamClientMember, AgentTeamCreateChannelRequest, AgentTeamMemberDiagnostic, AgentTeamReplyRequest, AgentTeamSendMessageRequest, AgentTeamTask, AgentTeamUpdateMemberRequest } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamAddMemberRequest, AgentTeamClientMember, AgentTeamCreateChannelRequest, AgentTeamMemberId, AgentTeamMemberDiagnostic, AgentTeamReplyRequest, AgentTeamRemoveThreadMemberRequest, AgentTeamSendMessageRequest, AgentTeamTask, AgentTeamThreadMember, AgentTeamThreadObservations, AgentTeamUpdateMemberRequest } from '@contexera/dsh-agent-team/types'
 import { COMMON_NS, LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { en as commonEn, zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/index.ts'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
@@ -91,7 +91,7 @@ interface SeededMessage {
   readonly mentions?: readonly string[]
 }
 
-export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: string; workspaceId?: string; initialChannels?: boolean; remainingUnreadCounts?: readonly number[]; seededMessages?: readonly SeededMessage[]; seedTaskRef?: string; seedThreadRef?: string; seedTaskStatus?: AgentTeamTask['status']; seedFollowers?: readonly string[]; humanProfile?: HumanProfileSeed; humanProfileFailure?: string; environment?: EnvironmentSeed; environmentFailure?: string; memberAvatarRefs?: Readonly<Record<string, string>>; memberAvatarBytes?: Readonly<Record<string, string>> }) {
+export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: string; workspaceId?: string; initialChannels?: boolean; remainingUnreadCounts?: readonly number[]; seededMessages?: readonly SeededMessage[]; seedTaskRef?: string; seedThreadRef?: string; seedTaskStatus?: AgentTeamTask['status']; seedFollowers?: readonly string[]; seedThreadMembers?: readonly { readonly memberId: string; readonly following: boolean }[]; seedRemovedThreadMemberIds?: readonly string[]; seedChannelMemberIds?: readonly string[]; seedActiveClaimOwners?: readonly string[]; humanProfile?: HumanProfileSeed; humanProfileFailure?: string; environment?: EnvironmentSeed; environmentFailure?: string; memberAvatarRefs?: Readonly<Record<string, string>>; memberAvatarBytes?: Readonly<Record<string, string>> }) {
   if (options?.mode !== undefined) {
     localStorage.setItem('dsh.agent-team.navigation', JSON.stringify({ mode: options.mode, ...(options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId }) }))
   }
@@ -214,7 +214,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   let channels: Array<Record<string, unknown>> = options?.initialChannels === true
     ? [{ channelRef: 'channel:engineering', workspaceId: 'w1', name: 'engineering', description: 'Engineering work', createdAtSequence: 1 }]
     : []
-  let memberships: Array<Record<string, unknown>> = []
+  let memberships: Array<Record<string, unknown>> = (options?.seedChannelMemberIds ?? []).map(memberId => ({ channelRef: 'channel:engineering', memberId }))
   const seedTaskRef = options?.seedTaskRef ?? 'task:1'
   const seedThreadRef = options?.seedThreadRef ?? 'thread:1'
   let viewItems: Array<Record<string, unknown>> = (options?.seededMessages ?? []).map((seed, index) => ({
@@ -231,7 +231,9 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
     // Message's own: the feed reads that equality as "no follow-up yet".
     lastActivityAt: seed.occurredAt,
   }))
-  let viewClaims: Array<Record<string, unknown>> = []
+  let viewClaims: Array<Record<string, unknown>> = (options?.seedActiveClaimOwners ?? []).map((owner, index) => ({
+    claimRef: `claim:seed-${index}`, taskRef: seedTaskRef, threadRef: seedThreadRef, owner, direction: `Seed active claim ${index + 1}`, state: 'active',
+  }))
   let viewActivities: Array<Record<string, unknown>> = []
   const viewChannels = vi.fn(async (request: { threadRef?: string; topLevelOnly?: boolean }) => ({ ok: true, value: {
     humanMemberId: 'member:human', channels, members: memberships,
@@ -428,11 +430,28 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   let threadHistoryFailure: string | undefined
   // The Human author follows every seeded Thread; tests override the set to
   // drive the mention-candidate ranking.
-  const threadFollowers = [...(options?.seedFollowers ?? ['member:human'])]
-  const threadObservations = vi.fn(async ({ taskRef, threadRef }: { taskRef?: string; threadRef?: string }) => {
+  const threadFollowers: AgentTeamMemberId[] = [...(options?.seedFollowers ?? ['member:human'])].map(memberId => memberId as AgentTeamMemberId)
+  let threadMembers: AgentTeamThreadMember[] = (options?.seedThreadMembers ?? []).map(member => ({ memberId: member.memberId as AgentTeamMemberId, following: member.following }))
+  const removedThreadMemberIds = new Set<AgentTeamMemberId>((options?.seedRemovedThreadMemberIds ?? []).map(memberId => memberId as AgentTeamMemberId))
+  type ThreadObservationsResult = { readonly ok: true; readonly value: AgentTeamThreadObservations }
+    | { readonly ok: false; readonly error: { readonly message: string } }
+  const threadObservations = vi.fn(async ({ taskRef, threadRef }: { taskRef?: string; threadRef?: string }): Promise<ThreadObservationsResult> => {
     void taskRef
     void threadRef
-    return { ok: true as const, value: { items: [], followers: threadFollowers } }
+    return { ok: true as const, value: { items: [], hasMore: false, followers: threadFollowers, threadMembers: [...threadMembers], removedMemberIds: [...removedThreadMemberIds] } }
+  })
+  const removeThreadMember = vi.fn(async (request: AgentTeamRemoveThreadMemberRequest) => {
+    if (viewClaims.some(claim => claim.owner === request.memberId && claim.state === 'active')) {
+      return { ok: true as const, value: { kind: 'blocked_by_active_claim' as const, changed: false as const, threadRef: request.threadRef, memberId: request.memberId, taskRef: seedTaskRef as never } }
+    }
+    if (!threadMembers.some(member => member.memberId === request.memberId)) {
+      return { ok: true as const, value: { kind: 'no_change' as const, changed: false as const, threadRef: request.threadRef, memberId: request.memberId } }
+    }
+    threadMembers = threadMembers.filter(member => member.memberId !== request.memberId)
+    removedThreadMemberIds.add(request.memberId)
+    const followerIndex = threadFollowers.indexOf(request.memberId)
+    if (followerIndex >= 0) threadFollowers.splice(followerIndex, 1)
+    return { ok: true as const, value: { kind: 'committed' as const, changed: true as const, receipt: {}, threadRef: request.threadRef, memberId: request.memberId } }
   })
   const resolveTaskRefs = vi.fn(async (request: { workspaceId: string; taskRefs: readonly string[] }) => {
     const numbers = new Map(viewItems.flatMap((item, index) => {
@@ -708,7 +727,7 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   // refuses by contract.
   runtime.remote.provideNamespaces({
     session: { modelCatalog },
-    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, humanTodos, changeHumanTodo, readThread, threadHistory: loadThreadHistory, threadObservations, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar, putMemberAvatar, getMemberAvatar, removeMemberAvatar },
+    agentTeam: { members, joinWorkspace, leaveWorkspace, addMember, view: viewChannels, inbox, humanTodos, changeHumanTodo, readThread, threadHistory: loadThreadHistory, threadObservations, removeThreadMember, putAttachment, getAttachment, createChannel, updateChannel, archiveChannel, updateMember, recoverMember, clearMemberContext, archiveMember, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, changes, environment, humanProfile, setHumanProfile, putHumanAvatar, getHumanAvatar, removeHumanAvatar, putMemberAvatar, getMemberAvatar, removeMemberAvatar },
   })
   Object.assign(runtime.remote, {
     $stream: <T,>(options: ConstructorParameters<typeof RemoteStream<T>>[1]) => new RemoteStream(connection, options),
@@ -751,5 +770,5 @@ export async function runtimeWithTeam(options?: { mode?: 'team'; mainPanelId?: s
   const team = await runtime.mount({ inject: [...inject], apply })
   const view = runtime.renderRoot()
   const failThreadHistory = (message?: string): void => { threadHistoryFailure = message }
-  return { runtime, team, view, panelInfo: runtime.panelInfo, selectPanel, disposeWorkspace, disposeSettings, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, putMemberAvatar, getMemberAvatar, removeMemberAvatar, seedMemberAvatar, failMemberAvatarWrite, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, publishAgentReply, publishPresence, publishWorkspaceUpdate, publishGlobalUpdate, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, changes, inbox, seedInbox, humanTodos, changeHumanTodo, seedHumanTodos, openSession, failThreadHistory }
+  return { runtime, team, view, panelInfo: runtime.panelInfo, selectPanel, disposeWorkspace, disposeSettings, members, humanProfile, setHumanProfile, getHumanAvatar, putHumanAvatar, removeHumanAvatar, seedHumanProfile, putMemberAvatar, getMemberAvatar, removeMemberAvatar, seedMemberAvatar, failMemberAvatarWrite, failHumanProfile, failHumanProfileWrite, environment, seedEnvironment, failEnvironment, joinWorkspace, leaveWorkspace, addMember, status, viewChannels, createChannel, updateChannel, archiveChannel, putAttachment, getAttachment, updateMember, recoverMember, clearMemberContext, archiveMember, modelCatalog, sendMessage, reply, changeTask, promoteThread, resolveTaskRefs, resolveMessageRefs, publishAgentReply, publishPresence, publishWorkspaceUpdate, publishGlobalUpdate, seedChannel, publishChannelUpdate, failChanges, recoverChanges, readThread, loadThreadHistory, threadObservations, removeThreadMember, changes, inbox, seedInbox, humanTodos, changeHumanTodo, seedHumanTodos, openSession, failThreadHistory }
 }

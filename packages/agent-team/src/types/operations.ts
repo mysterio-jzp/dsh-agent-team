@@ -349,6 +349,10 @@ export interface AgentTeamThreadRepliedOperation extends AgentTeamOperationBase 
     readonly workspaceId: WorkspaceId
     readonly baseRevision: number
     readonly mentions: readonly AgentTeamMemberId[]
+    /** Agent reply targets omitted from delivery; persisted so retries preserve the original result. */
+    readonly undeliveredMentions?: readonly AgentTeamMemberId[]
+    /** Removed Members the Human explicitly re-invited through this confirmed reply. */
+    readonly reinvitedMemberIds?: readonly AgentTeamMemberId[]
     readonly message: AgentTeamMessage
     readonly task?: AgentTeamTask
     readonly thread: AgentTeamThread
@@ -436,6 +440,17 @@ export interface AgentTeamThreadAttentionChangedOperation extends AgentTeamOpera
     readonly memberId: AgentTeamMemberId
     readonly task?: AgentTeamTask
     readonly thread: AgentTeamThread
+    readonly inbox: AgentTeamInboxDelta
+  }
+}
+
+/** Durable Human removal of one member from one Thread's @-reachable set. */
+export interface AgentTeamThreadMemberRemovedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/thread-member-removed'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly threadRef: AgentTeamThreadRef
+    readonly memberId: AgentTeamMemberId
     readonly inbox: AgentTeamInboxDelta
   }
 }
@@ -554,6 +569,7 @@ export type AgentTeamOperation =
   | AgentTeamHumanTodoChangedOperation
   | AgentTeamTaskChangedOperation
   | AgentTeamThreadAttentionChangedOperation
+  | AgentTeamThreadMemberRemovedOperation
   | AgentTeamThreadReadOperation
   | AgentTeamMemberRemovedOperation
   | AgentTeamDmSentOperation

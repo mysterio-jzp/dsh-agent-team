@@ -49,6 +49,8 @@ The Human Client consumes the Host's Inbox projection, never keeps a parallel In
 
 It also carries a second 「最近活跃」 slice that an Agent's Inbox never does — the Threads that reader has written a Message in, so a Thread they replied to is theirs whether or not they follow it. That slice is newest activity first, each Workspace's own slice bounded to ten while the merged page shows at most five.
 
+The Thread composer and member manager consume the Host's `threadObservations` snapshot: current followers, Thread members with follow state, and removed-member ids. Candidate selection changes only the draft; invitations and re-invitations require a confirmed successful Human send. `removeThreadMember` is an explicit Human-only mutation, and the Client refreshes Host projections after its result rather than removing a row optimistically.
+
 Team navigation mode, Workspace selection, the last Channel/Thread, and the Inbox page position are browser-persisted; unread and Attention are Host-owned.
 
 The Team sidebar keeps Channels/Agents ordering as a browser-only `localStorage` preference, merged over Remote defaults.

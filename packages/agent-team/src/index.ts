@@ -140,6 +140,8 @@ import type {
   AgentTeamRequestId,
   AgentTeamRemoveMemberRequest,
   AgentTeamRemoveMemberResult,
+  AgentTeamRemoveThreadMemberRequest,
+  AgentTeamRemoveThreadMemberResult,
   AgentTeamReplyRequest,
   AgentTeamReplySettings,
   AgentTeamMessage,
@@ -2423,6 +2425,15 @@ export default class AgentTeam extends TypertRemoteService {
     const actor = this.humanCall(request.workspaceId)
     const result = await this.requireLedger().changeAttention({ ...request, actor })
     if (result.committed) this.emitCommitted(result.value.receipt)
+    return result.value
+  }
+
+  /** Human-only Thread membership removal; this never revokes Workspace or history access. */
+  @Remote('removeThreadMember')
+  async removeThreadMember(request: AgentTeamRemoveThreadMemberRequest): Promise<AgentTeamRemoveThreadMemberResult> {
+    const actor = this.humanCall(request.workspaceId)
+    const result = await this.requireLedger().removeThreadMember({ ...request, actor })
+    if (result.committed && result.value.kind === 'committed') this.emitCommitted(result.value.receipt)
     return result.value
   }
 

@@ -122,6 +122,73 @@ async function resolveAliasColor(page: Page, alias: string): Promise<string> {
   }, alias)
 }
 
+type ContrastSample = {
+  readonly selector: string
+  readonly text: string
+  readonly foreground: string
+  readonly background: string
+  readonly ratio: number
+  /** The error lead bar's own ratio against the same composited background, when the element carries one. */
+  readonly bar: number | null
+}
+
+/** Resolve WCAG contrast from the browser's computed foreground and composited ancestor backgrounds. */
+async function readTextContrast(page: Page, selectors: readonly string[]): Promise<readonly ContrastSample[]> {
+  return page.evaluate((targets) => {
+    type Color = { readonly r: number; readonly g: number; readonly b: number; readonly a: number }
+    const parse = (value: string): Color => {
+      const match = value.match(/rgba?\(([^)]+)\)/)
+      if (match === null) throw new Error(`unsupported computed color: ${value}`)
+      const [r, g, b, a = '1'] = match[1]!.split(',').map(part => part.trim())
+      return { r: Number(r), g: Number(g), b: Number(b), a: Number(a) }
+    }
+    const composite = (foreground: Color, background: readonly number[]): readonly [number, number, number] => [
+      foreground.r * foreground.a + background[0]! * (1 - foreground.a),
+      foreground.g * foreground.a + background[1]! * (1 - foreground.a),
+      foreground.b * foreground.a + background[2]! * (1 - foreground.a),
+    ]
+    const luminance = (channels: readonly number[]): number => {
+      const linear = channels.map(channel => {
+        const value = channel / 255
+        return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+      })
+      return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!
+    }
+    const backgroundOf = (element: Element): readonly [number, number, number] => {
+      const layers: Color[] = []
+      for (let node: Element | null = element; node !== null; node = node.parentElement) {
+        layers.push(parse(getComputedStyle(node).backgroundColor))
+      }
+      let background: readonly [number, number, number] = [255, 255, 255]
+      for (const layer of layers.reverse()) background = composite(layer, background)
+      return background
+    }
+    return targets.flatMap(selector => [...document.querySelectorAll(selector)].map(element => {
+      const style = getComputedStyle(element)
+      const background = backgroundOf(element)
+      const contrastOf = (color: Color, against: readonly number[]): number => {
+        const colorLuminance = luminance([color.r, color.g, color.b])
+        const againstLuminance = luminance(against)
+        return (Math.max(colorLuminance, againstLuminance) + 0.05) / (Math.min(colorLuminance, againstLuminance) + 0.05)
+      }
+      const foreground = parse(style.color)
+      // The lead bar is a graphical object, so it is judged at 3:1 rather than
+      // the 4.5:1 its words now hold: same element, two different gates.
+      const barColor = parse(style.borderLeftColor)
+      const bar = Number.parseFloat(style.borderLeftWidth) >= 2 && barColor.a > 0.5 ? contrastOf(barColor, background) : null
+      const format = (color: readonly number[]): string => `rgb(${color.map(channel => Math.round(channel)).join(', ')})`
+      return {
+        selector,
+        text: element.textContent?.trim() ?? '',
+        foreground: style.color,
+        background: format(background),
+        ratio: contrastOf(foreground, background),
+        bar,
+      }
+    }))
+  }, selectors)
+}
+
 /**
  * Left edges of one entry's state cluster, the entry line it leads, and the
  * reading column holding both it and the body above it. All three meet when the
@@ -1130,16 +1197,33 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.getByRole('button', { name: /Task #1/ }).click()
   const invitationComposer = page.getByRole('textbox', { name: '消息内容' })
   await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('消息内容')
+  const threadMembersButton = page.getByRole('button', { name: /Thread 成员/ })
+  await threadMembersButton.waitFor()
+  await threadMembersButton.click()
+  const threadMembersDialog = page.getByRole('dialog', { name: '管理 Thread 成员' })
+  await threadMembersDialog.waitFor()
+  await threadMembersDialog.getByRole('heading', { name: '当前 Thread 成员' }).waitFor()
+  await threadMembersDialog.getByText('当前关注 · @可达').waitFor()
+  expect(await page.evaluate(() => document.activeElement?.closest('[role="dialog"]') !== null)).toBe(true)
+  await settleAnimations(page)
+  await page.screenshot({ path: join(UI04_SHOTS, 'thread-members-desktop.png') })
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+  await settleAnimations(page)
+  await page.screenshot({ path: join(UI04_SHOTS, 'thread-members-narrow.png') })
+  await page.setViewportSize({ width: 1440, height: 960 })
+  await settleAnimations(page)
+  await threadMembersDialog.getByRole('button', { name: '关闭' }).last().click()
+  await expect.poll(() => threadMembersButton.evaluate(element => element === document.activeElement)).toBe(true)
+  await invitationComposer.focus()
   // Both calls are authored with '@': a bare name is prose the Host would not
   // deliver to, so only the chipified handle threads the invitee in.
   await invitationComposer.fill('@')
-  // The one Thread face in this journey a non-follower appears on: reviewer does
-  // not follow Task #1's Thread, so its row is the outside one here. Weight is
-  // the whole of that distinction — no row states a consequence in words on any
-  // tier of either surface — so this measures the colour each name really
-  // resolves to and proves the two groups differ, at both widths. Read the
-  // unfiltered menu: a query narrows the roster to the rows it matches, and a
-  // single row can never show that two groups behave differently.
+  // The reviewer is being invited to this Thread for the first time, so the
+  // Host-backed draft warning will state that its @ will not deliver yet. This
+  // check is only about option scope/colour and proves both groups differ at
+  // both widths. Read the unfiltered menu: a query narrows the roster to rows it
+  // matches, and a single row cannot show that two groups behave differently.
   const invitationMenu = page.getByRole('listbox', { name: '提及成员建议' })
   await invitationMenu.waitFor()
   const invitationRowState = (element: Element) => [...element.querySelectorAll<HTMLElement>('[role="option"][data-mention-tier]')]
@@ -1167,13 +1251,13 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
     expect(row.text).not.toContain('需确认')
   }
   await page.screenshot({ path: join(UI04_SHOTS, 'thread-mention-weight.png'), fullPage: true })
-  // The description is what the narrow branch drops; the weight must not go with
-  // it, since it is the row's only remaining distinction. Measure used values,
-  // because the element never answers a container query about its own visibility.
+  // The narrow branch keeps Thread reachability descriptions while preserving
+  // the row's weight as the primary distinction. Measure used values after the
+  // viewport change, not the row's own response to a container query.
   await page.setViewportSize({ width: 390, height: 844 })
   await settleLayout(page)
   const invitationNarrow = await invitationMenu.evaluate(invitationRowState)
-  expect(invitationNarrow.every(row => row.descriptionDisplay === 'none')).toBe(true)
+  expect(invitationNarrow.every(row => row.descriptionDisplay === 'block')).toBe(true)
   expect(invitationNarrow.some(row => row.tier === '0')).toBe(true)
   expect(invitationNarrow.some(row => row.tier !== '0')).toBe(true)
   for (const row of invitationNarrow) {
@@ -1186,8 +1270,9 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await invitationMenu.waitFor()
   await page.getByRole('option', { name: /@reviewer/ }).click()
   await invitationComposer.fill(`${await invitationComposer.inputValue()}加入这个已有 Thread 并回复 Human @reviewer `)
+  await page.getByText(/尚未加入：@reviewer/).waitFor()
   await invitationComposer.press('Enter')
-  await page.getByRole('status').filter({ hasText: '再次发送' }).waitFor()
+  await page.getByRole('status').filter({ hasText: '邀请新成员：@reviewer' }).waitFor()
   await expect.poll(() => page.evaluate(() => document.activeElement?.getAttribute('aria-label'))).toBe('消息内容')
   await invitationComposer.press('Enter')
   await page.locator('[data-team-thread] article').filter({ hasText: '请 @reviewer 加入这个已有 Thread 并回复 Human @reviewer' }).waitFor()
@@ -3027,6 +3112,293 @@ it('opens a taskless thread from its ref chip in real Web', async () => {
   await page.screenshot({ path: join(UI02_SHOTS, 'thread-ref-chip-opened-narrow.png'), fullPage: true })
   expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
 }, 180_000)
+
+/**
+ * Every small state sentence this Task introduced, in the two themes the Host
+ * resolves from `prefers-color-scheme`. The gate is read off the assembled page
+ * — computed foreground over the composited ancestor backgrounds — not off the
+ * token the stylesheet names, and each arm keeps its own screenshots so the
+ * numbers can be re-checked by eye. Order is the journey's: the roster is read
+ * before any invitation (both kinds of candidate), then the invitation warning
+ * and its confirmation, then a member who was invited and therefore no longer
+ * follows, then a removal, then the Claim block that turns the removal into an
+ * error. The composer error sentence is the one state this lane cannot reach:
+ * only a racing Host refusal renders it, so it keeps a source-derived note in
+ * the Thread instead of an invented screenshot.
+ */
+it('keeps Thread member and composer state text readable in both themes', async () => {
+  await installLocalBundle()
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'contrast-workspace')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  for (const [handle, description] of [['writer', '写文档'], ['reviewer', '检查'], ['editor', '编辑'], ['observer', '旁观']] as const) {
+    await page.getByRole('button', { name: '添加 Agent' }).click()
+    const createDialog = page.getByRole('dialog', { name: '添加 Agent' })
+    await createDialog.getByLabel('名称').fill(handle)
+    await createDialog.getByLabel('说明').fill(description)
+    await createDialog.getByRole('button', { name: '创建 Agent' }).click()
+    await page.getByText(handle, { exact: true }).waitFor({ timeout: 20_000 })
+  }
+
+  const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
+  // Same fixture seam the main journey applies, and for the same reason: the
+  // scaffold's fixture-less adapter reports route capacity on a field the
+  // canonical route shape never reads, so a wake would price as unknown and the
+  // pressure policy would fail closed. The durable `request/context` record a
+  // real first request appends is staged instead; nothing asserted here changes.
+  {
+    // The session behind each roster row starts asynchronously, so the route is
+    // staged only once every Member is resolvable: a wake that reaches a session
+    // without a priced route fails the pressure policy closed.
+    for (const handle of ['writer', 'reviewer', 'editor', 'observer']) {
+      await expect.poll(() => {
+        const status = scaffold!.ctx.agentTeam.members({ workspaceId })
+          .find((entry: { member: { handle: string } }) => entry.member.handle === handle)!
+        return scaffold!.ctx.agents.get(status.member.sessionId) !== undefined
+      }, { timeout: 30_000 }).toBe(true)
+    }
+    const selection = scaffold.ctx.agentDefaultModel.currentSelection()
+    for (const status of scaffold.ctx.agentTeam.members({ workspaceId })) {
+      scaffold.ctx.agents.get(status.member.sessionId)?.session.append('request/context', {
+        provider: selection.provider,
+        model: selection.model,
+        contextWindow: 128_000,
+      })
+    }
+  }
+  const humanMemberId = scaffold.ctx.agentTeam.status().humanMemberId
+  const agentOf = (handle: string) => {
+    const entry = scaffold!.ctx.agentTeam.members({ workspaceId })
+      .find((status: { member: { handle: string } }) => status.member.handle === handle)!
+    return scaffold!.ctx.agents.get(entry.member.sessionId)
+  }
+  // A Claim is a Thread write, so the claimant drains its own unread first; the
+  // read is also where the revision the write is based on comes from.
+  const claim = async (handle: string, taskRef: string, label: string) => {
+    const agent = agentOf(handle)
+    const read = await scaffold!.ctx.agentTeam.readThreadForAgent(agent, {
+      requestId: `contrast-${label}-read` as never, workspaceId, taskRef,
+    })
+    const claimed = await scaffold!.ctx.agentTeam.changeClaimForAgent(agent, {
+      requestId: `contrast-${label}-claim` as never, workspaceId, taskRef,
+      action: 'claim', direction: `可读性校验 ${label}`, baseRevision: read.thread.revision,
+    })
+    if (claimed.kind !== 'committed') throw new Error(`Claim rejected: ${claimed.kind}`)
+  }
+  // Invitations start Attention, so the unfollowed row comes from the Member's
+  // own drop — the Host operation the Client deliberately does not offer.
+  const unfollow = async (handle: string, label: string, threadRef: string) => {
+    const changed = await scaffold!.ctx.agentTeam.changeAttentionForAgent(agentOf(handle), {
+      requestId: `contrast-${label}-unfollow` as never, workspaceId, threadRef, action: 'unfollow',
+    })
+    if (changed.attention !== undefined) throw new Error(`unfollow left Attention in place: ${changed.attention.threadRef}`)
+  }
+
+  const READABLE_STATES = [
+    ['following', '[data-thread-reachability="following"]'],
+    ['unfollowed', '[data-thread-reachability="unfollowed"]'],
+    ['never-joined', '[data-thread-reachability="never-joined"]'],
+    ['removed', '[data-thread-reachability="removed"]'],
+    ['claim hint', '[class*="claimHint"]'],
+    ['reachability warning', '[data-team-composer] [data-team-reachability-warning]'],
+    ['mention targets', '[data-team-composer] [data-team-notify]'],
+    ['confirmation', '[data-team-composer] [class*="confirmation"]'],
+    ['dialog error', '[role="dialog"] [class*="error"]'],
+  ] as const
+
+  const stateColours: string[] = []
+  const run = async (scheme: 'light' | 'dark') => {
+    await page.emulateMedia({ colorScheme: scheme })
+    await settleAnimations(page)
+    const channelName = `readability-${scheme}`
+    await page.getByRole('button', { name: '新建频道' }).click()
+    const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+    await channelDialog.getByLabel('名称').fill(channelName)
+    await channelDialog.getByLabel('说明').fill('浅深主题读数')
+    await channelDialog.getByRole('button', { name: '创建频道' }).click()
+    const channelRef = (scaffold!.ctx.agentTeam.view({ workspaceId }).channels as readonly { readonly channelRef: string; readonly name: string }[])
+      .find(channel => channel.name === channelName)!.channelRef
+    // The owner is seeded through Host facts so the roster has a real follower;
+    // the other three stay candidates until the reader invites them.
+    const sent = await scaffold!.ctx.agentTeam.sendMessageForAgent(agentOf('writer'), {
+      requestId: `contrast-${scheme}-root` as never, workspaceId, channelRef,
+      asTask: true, body: '可读性校验根消息', recipients: [humanMemberId],
+    })
+    if (sent.kind !== 'committed') throw new Error(`seed rejected: ${sent.kind}`)
+    const taskRef = sent.task!.taskRef
+    await page.getByRole('button', { name: `# ${channelName}`, exact: true }).click()
+    await page.getByRole('heading', { name: `# ${channelName}`, exact: true }).waitFor()
+    await page.getByRole('button', { name: /打开 Task #/ }).first().click()
+    await page.locator('[data-team-thread]').waitFor()
+    const composer = page.getByRole('textbox', { name: '消息内容' })
+    const memberTrigger = page.getByRole('button', { name: /Thread 成员/ })
+    await memberTrigger.waitFor()
+    // The manager's own modal renames itself to the removal question when it
+    // asks for confirmation, so the locator follows the one open dialog instead
+    // of pinning either title.
+    const manager = page.getByRole('dialog').last()
+    // The dialog's own compositing is the modal card, so an open dialog is the
+    // right context for its sentences and the composer is read with it closed.
+    const sample = async (...selectors: readonly string[]) => {
+      const readings = await readTextContrast(page, selectors)
+      for (const selector of selectors) expect(readings.some(reading => reading.selector === selector), `${scheme} ${selector} not rendered`).toBe(true)
+      for (const reading of readings) {
+        console.log(`[contrast:${scheme}] ${reading.selector} ${reading.ratio.toFixed(2)}:1 ${reading.foreground} on ${reading.background}${reading.bar === null ? '' : ` bar ${reading.bar.toFixed(2)}:1`}`)
+        expect(reading.ratio, `${scheme} ${reading.selector} ${reading.text}`).toBeGreaterThanOrEqual(4.5)
+        if (reading.selector.includes('error')) {
+          expect(reading.bar, `${scheme} error lead bar`).not.toBeNull()
+          expect(reading.bar!).toBeGreaterThanOrEqual(3)
+        }
+      }
+      return readings
+    }
+    const openManager = async () => {
+      await memberTrigger.click()
+      await manager.getByRole('heading', { name: '当前 Thread 成员' }).waitFor()
+      // The modal paints before its Host snapshot lands: sample the rows, not
+      // the loading state.
+      await manager.locator('[data-thread-member], [data-thread-candidate]').first().waitFor()
+    }
+    const closeManager = async () => {
+      await manager.getByRole('button', { name: '关闭' }).last().click()
+      await expect.poll(() => manager.count()).toBe(0)
+    }
+    const sendWithConfirmation = async () => {
+      await page.getByRole('button', { name: '发送', exact: true }).click()
+      const confirmation = page.locator('[data-team-composer] [class*="confirmation"]')
+      await confirmation.waitFor()
+      await page.getByRole('button', { name: '发送', exact: true }).click()
+      await expect.poll(() => confirmation.count(), { timeout: 20_000 }).toBe(0)
+    }
+
+    await openManager()
+    const firstReadings = await sample('[data-thread-reachability="following"]', '[data-thread-reachability="never-joined"]')
+    stateColours.push(firstReadings[0]!.foreground)
+    await closeManager()
+    // The Thread face states what an @ will do before anything is sent: the
+    // reviewer is new here, so the warning, the target list and the confirmation
+    // sentence coexist on one screen.
+    await composer.click()
+    await composer.fill('@reviewer 请复核')
+    const warning = page.locator('[data-team-composer] [data-team-reachability-warning]')
+    await warning.waitFor()
+    await expect.poll(() => warning.textContent()).toContain('尚未加入')
+    await page.getByRole('button', { name: '发送', exact: true }).click()
+    const confirmation = page.locator('[data-team-composer] [class*="confirmation"]')
+    await confirmation.waitFor()
+    await expect.poll(() => confirmation.textContent()).toContain('邀请新成员')
+    const composerReadings = await sample(
+      '[data-team-composer] [data-team-reachability-warning]',
+      '[data-team-composer] [data-team-notify]',
+      '[data-team-composer] [class*="confirmation"]',
+    )
+    // Composer `.error` only renders when the Host refuses a send mid-flight,
+    // which this lane cannot stage without a race, so there is no live element
+    // to read. The rule declares no background of its own — `.error` sets only
+    // color, size, margin and the lead bar — so its ratio is the same
+    // `label-secondary` token against the composer card's composited background,
+    // which is exactly what the warning row on that card just measured.
+    const errorSurface = composerReadings.find(reading => reading.selector === '[data-team-composer] [data-team-reachability-warning]')!
+    console.log(`[contrast:${scheme}] composer .error surface ${errorSurface.ratio.toFixed(2)}:1 ${errorSurface.foreground} on ${errorSurface.background} (no own background, no live element)`)
+    expect(errorSurface.ratio, `${scheme} composer .error surface`).toBeGreaterThanOrEqual(4.5)
+    await settleAnimations(page)
+    await page.locator('[data-team-composer]').screenshot({ path: join(UI04_SHOTS, `thread-composer-states-${scheme}.png`) })
+    await page.getByRole('button', { name: '发送', exact: true }).click()
+    await expect.poll(() => warning.count(), { timeout: 20_000 }).toBe(0)
+    await unfollow('reviewer', `${scheme}-reviewer`, sent.thread.threadRef)
+    await openManager()
+    await sample('[data-thread-reachability="unfollowed"]')
+    await closeManager()
+    await composer.fill('@editor 请编辑')
+    await sendWithConfirmation()
+    await openManager()
+    const editorRow = manager.locator('[data-thread-member]').filter({ hasText: 'editor' }).first()
+    await editorRow.getByRole('button', { name: '移除' }).click()
+    await manager.getByRole('heading', { name: '从 Thread 移除成员？' }).waitFor()
+    await manager.getByRole('button', { name: '确认移除' }).click()
+    await expect.poll(() => manager.locator('[data-thread-candidate][data-removed="true"]').count()).toBe(1)
+    await sample('[data-thread-reachability="removed"]', '[data-thread-reachability="never-joined"]')
+    await closeManager()
+    await claim('writer', taskRef, `${scheme}-owner`)
+    await openManager()
+    await sample('[class*="claimHint"]')
+    await settleAnimations(page)
+    // The dialog is the evidence: an element screenshot isolates the sentences
+    // from the page's Member-runtime banner, which this fixture-less lane shows
+    // because no Member Session here has a live model.
+    await manager.screenshot({ path: join(UI04_SHOTS, `thread-members-states-${scheme}.png`) })
+    // The block is a race the roster must survive: the confirmation opens on a
+    // member with no Claim, the Claim lands, and the Host refuses the removal.
+    const reviewerRow = manager.locator('[data-thread-member]').filter({ hasText: 'reviewer' }).first()
+    await reviewerRow.getByRole('button', { name: '移除' }).click()
+    await manager.getByRole('button', { name: '确认移除' }).waitFor()
+    await claim('reviewer', taskRef, `${scheme}-race`)
+    await manager.getByRole('button', { name: '确认移除' }).click()
+    const alert = manager.locator('[class*="error"]')
+    await alert.waitFor()
+    await expect.poll(() => alert.textContent()).toContain('Claim')
+    await settleAnimations(page)
+    await manager.screenshot({ path: join(UI04_SHOTS, `thread-members-error-${scheme}.png`) })
+    const [errorReading] = await sample('[role="dialog"] [class*="error"]')
+    expect(await errorReading!.text.length).toBeGreaterThan(0)
+    await manager.getByRole('button', { name: '取消' }).click()
+    await expect.poll(() => manager.locator('[data-thread-member]').filter({ hasText: 'reviewer' }).count()).toBe(1)
+    await closeManager()
+    // The same gate holds at 390 CSS px in both themes, not only at desktop
+    // width: reopen the roster narrow, prove the page does not overflow, and
+    // snapshot the sentences the desktop arm just measured.
+    await page.setViewportSize({ width: 390, height: 844 })
+    await settleAnimations(page)
+    await openManager()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth), `${scheme} narrow overflow`).toBeLessThanOrEqual(390)
+    // A page-level width check cannot see the roster box's own overflow: the box
+    // scrolls, so content taller than it silently clips the last sentence instead
+    // of widening the page. Both the box and the final state line have to fit.
+    const narrowFit = await page.evaluate(() => {
+      const dialog = document.querySelector('[role="dialog"]')
+      const box = dialog === null ? null : [...dialog.querySelectorAll('*')]
+        .map(element => element as HTMLElement)
+        .find(element => getComputedStyle(element).overflowY === 'auto' && element.scrollHeight > 0) ?? null
+      const sentence = box === null ? null : [...box.querySelectorAll('*')].find(element => element.textContent?.includes('不会直接送达')) ?? null
+      if (box === null || sentence === null) return { fitted: false, reason: 'roster box or last state sentence missing' }
+      const range = document.createRange()
+      range.selectNodeContents(sentence)
+      const lines = [...range.getClientRects()]
+      const boxRect = box.getBoundingClientRect()
+      const lastBottom = Math.round(lines.at(-1)?.bottom ?? 0)
+      return {
+        // The judge is the sentence's last line, not `scrollHeight`: a roster
+        // that legitimately grows past one screen would fail the latter for
+        // every fixture, while a clipped sentence is what the reader loses.
+        fitted: lines.length > 0 && lines.every(line => line.bottom <= boxRect.bottom + 1),
+        reason: '',
+        scrollHeight: box.scrollHeight,
+        clientHeight: box.clientHeight,
+        lastLineBottom: lastBottom,
+        boxBottom: Math.round(boxRect.bottom),
+      }
+    })
+    console.log(`[narrow:${scheme}] ${JSON.stringify(narrowFit)}`)
+    expect(narrowFit.fitted, `${scheme} narrow roster fit ${JSON.stringify(narrowFit)}`).toBe(true)
+    await settleAnimations(page)
+    await manager.screenshot({ path: join(UI04_SHOTS, `thread-members-narrow-${scheme}.png`) })
+    await page.screenshot({ path: join(UI04_SHOTS, `thread-narrow-${scheme}.png`) })
+    await closeManager()
+    await page.setViewportSize({ width: 1440, height: 960 })
+    await settleAnimations(page)
+  }
+
+  await run('light')
+  await run('dark')
+  // The two arms really are two themes: the same state row resolved to a
+  // different colour, so the dark measurements were taken on dark tokens.
+  expect(new Set(stateColours).size).toBe(2)
+  expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
+}, 300_000)
 
 /** One real 1×1 RGBA PNG: the avatar store validates the payload as an image and
  * the page must decode it, so a placeholder byte string would prove nothing. The

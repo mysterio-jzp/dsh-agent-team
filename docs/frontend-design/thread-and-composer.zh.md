@@ -13,15 +13,17 @@
 
 ## Composer 与 @mention
 - textarea 自增高（上限 336px），Channel / Thread composer 出现时自动聚焦且不滚动时间线。Enter 发送、Shift+Enter 换行。IME composition 期间 Enter 不触发发送。发送期间输入框保持聚焦但只读，避免重复提交。发送按钮点击不抢走焦点，发送完成后可直接继续输入。未关注 Member 的首次发送返回确认提醒时，保留草稿与收件人。输入框自动恢复焦点，第二次 Enter 可直接确认发送。composer 卡片沿用 DSH 默认静态表面描边（`border: 0` + l2 elevation 发丝线 + `--dsw-elevation-soft`）。`focus-within` 不改它的颜色。
-- mention 弹层向上展开，`role="listbox"`。textarea 以 `aria-controls/aria-activedescendant/aria-expanded` 关联弹层。↑↓ 循环、Tab/Enter 接受候选、Escape 关闭。外点关闭复用 `useDismissOnOutsidePointer`。高度钳制复用 `useAnchoredMaxHeight`（cap 320px）。高亮行始终通过 `scrollIntoView`（`block: 'nearest'`）保持在弹层可视区内，Member 多时键盘选中的候选不会被折叠隐藏。Thread 面通过 Human-only 的 `threadObservations` 读取当前关注者集合。读取时机是首屏并行一轮，加每次 thread 域 wake。
-- 候选集是整个 Workspace 的参与者，与 Host 的点名口径一致，并按「点中后多直接地送达」排序：本 Thread 的关注者 → 通过别的 Thread 参与本 Channel 的 Member → Workspace 其余。所有档位都可选——账本对它们都能寻址，排序只是提示不是筛选。只有 `@all` 保持更窄的 Channel 口径，因为 Host 就是这么展开它的。接受候选后光标落点精确到插入文本之后；删除提及文本会同步收缩 recipients。
-- 一行只带一个事实：「浓淡」，落在 `data-mention-inside` 上，回答该 Member 是否在这个正在写的会话里。为 false 时名字降到 secondary label 档，行本身的对比度不变。浓淡就是这一行的全部区分——行写清这位 Member 是谁，不声明这次点名会做什么。
-- 两个表面对同一档位的判断相反。Thread 面的边界是「关注本 Thread」，所以通过别的 Thread 参与本 Channel 的 Member 在它之外；Channel 顶层发送则把任何 Channel 参与者都算作在里面。逐行写出后果在两个表面上都没有增加信息：Thread 面上它标记的正是浓淡已经标记的那些行；Channel 顶层发送没有确认步骤，而每个收件人都会加入它新建的 Thread——这对每一行都成立，逐行写出来只在写着的那一行是噪音、在不写的那一行制造假的差异。
-- 这份沉默不藏起任何东西：Host 会停下来确认的那次点名，由 composer 在发送后弹出的状态行（`mentionConfirmation`）说明。行负责说清谁在这个会话里，确认由发送后的状态行陈述。浓淡是这一行唯一的区分载体，因此必须扛住宽度变化：窄于 600px 时身边的 description 被丢弃，浓淡留下。
+- mention 弹层向上展开，`role="listbox"`。textarea 以 `aria-controls/aria-activedescendant/aria-expanded` 关联弹层。↑↓ 循环、Tab/Enter 接受候选、Escape 关闭。外点关闭复用 `useDismissOnOutsidePointer`。高度钳制复用 `useAnchoredMaxHeight`（cap 320px）。高亮行始终通过 `scrollIntoView`（`block: 'nearest'`）保持在弹层可视区内。Thread 面通过 Human-only 的 `threadObservations` 读取 Host 成员快照（首屏并行读取，加每次 thread 域 wake）：当前关注者、带 follow 状态的 Thread Member，以及已移除成员 tombstone。
+- 候选集是整个 Workspace 的参与者，并按可达程度排序：本 Thread 的关注者 → 本 Thread 其他成员与 Channel 参与者 → Workspace 其余。所有档位都可选，排序不是筛选；`@all` 仍只展开为 Channel 成员。接受候选后光标落点精确到插入文本之后；删除提及文本会同步收缩 recipients。
+- `data-mention-inside` 表示写入范围内的参与关系：Thread 上，当前关注者和其他当前 Thread Member 都算在内；Channel 上，Channel participant 算在内。为 false 时名字降到 secondary label 档，行本身的对比度不变。它是范围提示，不承诺点名一定送达。
+- Thread 草稿另有一条 Host 可达性警告。快照不可用时明确显示状态未知；快照可用时分别说明从未加入（直接 @ 不会送达，Human 确认并成功发送才会邀请）、已移除（直接 @ 不会送达，Human 确认并成功发送才会重新邀请）、已取消关注（@ 仍可达，确认后恢复普通提醒）。点选候选只修改草稿，不改变成员关系。Channel 顶层发送无需邀请确认，收件人都会加入新建的 Thread。
+- 后续快照读取失败会使先前快照也失效；警告改为状态暂不可用并保留草稿。Host 提交回执含 `undeliveredMentions` 时，状态行列出未送达对象，乐观 mention 标记也会排除他们。
+- 颜色承载行的范围区分，因此必须扛住宽度变化：窄于 600px 时身边的 description 被丢弃，区分仍留下。
 - 表面语言：mention 弹层画的是共享的半透明菜单 token。按 shipped 毛玻璃配方补 `--dsw-menu-backdrop-filter` 与 elevation 描边/阴影，而不是当实底用。0.1.7 把这个 token 改成半透明却没改名。实底弹层会真实地读不清，而存在性检查全绿。配方本身见「设计语言对齐」表。
 - 模式 chip（「作为任务」）：任何宽度都保留可见文字标签。窄于 560px 时改为缩工具组间距（`@container (max-width: 560px)`），而不是藏字。`aria-label`、`title`、`aria-pressed` 照旧承载模式语义。
 - Member Session 输入面即 shipped composer 本身，不做任何修改。Team 不注册任何 Member Session 的 composer 表面：无接管、无 trigger sources、无 dock 提示条。键盘合同、命令与引用菜单、附件与普通会话完全一致。
-- 收件人提示行：通知集合非空时在草稿与工具栏之间渲染 quiet 提示行（`.notifyRow`，`composerNotify` 文案 + `{ids}` 句柄列表）。发送前即可看到"将通知谁"。集合是菜单选中的 recipients 与正文手打 `@Handle` 的并集。`mentionedMemberIds` 从草稿派生，与 Host 同一套大小写不敏感、Unicode 词边界的规则。`@all` 按菜单的展开口径列出全部可投递 Member。空集合不占位。派生集合只用于显示，不进发送 payload。Channel 之外的名字在正文里只是散文，作为显式 recipients 会被拒绝。
+- 收件人提示行：通知集合非空时在草稿与工具栏之间渲染 quiet 提示行（`.notifyRow`，`{ids}` 句柄列表）。发送前即可看到"将通知谁"。集合是菜单选中的 recipients 与正文手打 `@Handle` 的并集。`mentionedMemberIds` 从草稿派生，与 Host 同一套大小写不敏感、Unicode 词边界的规则。`@all` 按菜单的展开口径列出全部可投递 Member。空集合不占位。派生集合只用于显示，不进发送 payload。Channel 之外的名字在正文里只是散文，作为显式 recipients 会被拒绝。
+- 提示行的措辞按表面分开：Thread 面用 `composerMentionTargets`「提及对象：{ids}」，因为未确认的 `@` 可能仍需 Human 确认、也可能当下送不到；Channel 面保留 `composerNotify`「将通知：{ids}」，因为那条发送会让每个收件人加入它新建的 Thread。措辞由表面决定，不由行的身份决定。
 - 读者自己的 handle 是唯一一个必须「不读也能找到」的 mention chip，所以它是唯一离开 business 族的 chip。`[data-mention-human]` 用 success 档着色（error 与 warn 两族分别意味着失败与警示）。正文里写的是读者改名前的 handle 时，该 chip 同样被标记 —— 标记跟着身份走，不跟着拼写走。
 - 草稿缓存：draft/recipients 不在页面局部。它们按 `channel:<channelRef>` / `thread:<threadRef>` 键存放。每 Client 上下文存一份 `TeamDraftStore`（`drafts.ts`）。它用单一 localStorage 键 `dsh.agent-team.drafts.v1`，写穿持久化，按 savedAt 淘汰最旧 ~50 条。切换视图或刷新后草稿与收件人原样恢复。发送提交成功即清除对应键，失败保留。Composer 挂载收敛会剔除不再匹配文本/已失效的收件人。Channel 的「作为任务」意图不进入草稿缓存：默认关闭，成功提交后再次复位关闭。
 - taskless Thread 的「转为任务」是 Human-only durable mutation，不做乐观 overlay。成功后重新读取 Thread 与补充 Channel/Member 投影；unread/stale fence 时保留 Host 返回错误并重新读取相关事实。
