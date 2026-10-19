@@ -10,6 +10,14 @@ export interface TimelineScroll {
   /** Scroll the timeline to the latest fact immediately. */
   scrollToBottom: () => void
   /**
+   * Re-establish the position the reader left with after the scrolling box was
+   * unmounted and mounted again (the Thread view switching away and back). A
+   * fresh box starts at `scrollTop` 0 — the earliest fact — so a reader who was
+   * following the tail is put back on it, and a reader who had scrolled up to
+   * history keeps that position untouched.
+   */
+  returnToTimeline: () => void
+  /**
    * Bring one descendant row to the middle of the timeline. `smooth` asks for an
    * animated move; the opening jump wants an instant one.
    */
@@ -106,6 +114,18 @@ export function useTimelineScroll(contentKey: string): TimelineScroll {
     centerInContainer(element, node)
   }, [])
 
+  // Follow state outlives the box: the panel holding it unmounts on a view
+  // switch while this hook stays mounted, so the policy — not the element —
+  // remembers where the reader was.
+  const returnToTimeline = useCallback(() => {
+    const element = ref.current
+    if (element === null) return
+    // A fresh box has no height history to compare against; take the mounted
+    // height as the baseline so the follow below behaves as on any other commit.
+    heightRef.current = element.scrollHeight
+    if (pinnedRef.current) element.scrollTop = element.scrollHeight
+  }, [])
+
   useEffect(() => {
     const element = ref.current
     if (element === null) return
@@ -121,5 +141,5 @@ export function useTimelineScroll(contentKey: string): TimelineScroll {
     }
   }, [contentKey])
 
-  return { ref, onScroll, isPinned: () => pinnedRef.current, scrollToBottom, centerOn }
+  return { ref, onScroll, isPinned: () => pinnedRef.current, scrollToBottom, centerOn, returnToTimeline }
 }

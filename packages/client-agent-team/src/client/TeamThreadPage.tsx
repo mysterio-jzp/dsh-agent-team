@@ -651,6 +651,16 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     if (timeline.isPinned()) setNewFactsCount(0)
   }
 
+  // Leaving the Thread view unmounts the scrolling timeline; coming back mounts
+  // a fresh box at its default `scrollTop` 0, the earliest fact, so a discussion
+  // reopened from the checklist would land at the top instead of where the
+  // reader was. The follow policy is re-established once the box exists — after
+  // the commit that mounts it, before the browser paints it.
+  const { returnToTimeline } = timeline
+  useLayoutEffect(() => {
+    if (view === 'thread') returnToTimeline()
+  }, [view, returnToTimeline])
+
   // The selected tab is the tab stop, so Left/Right move both focus and
   // selection together the way the platform's tablist does.
   const activeTabRef = useRef<HTMLButtonElement>(null)
