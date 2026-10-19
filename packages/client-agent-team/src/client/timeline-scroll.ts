@@ -2,6 +2,28 @@ import { useCallback, useEffect, useRef } from 'react'
 
 const BOTTOM_MARGIN_PX = 48
 
+/**
+ * Whether the box sits within the follow margin of its bottom. The bottom margin
+ * is how a reader at the tail absorbs growth that lands under them; anything
+ * further away is a position they chose. It must stay an explicit offset, never
+ * a fraction of the viewport: a shorter box would otherwise treat ordinary
+ * growth as "the reader scrolled up" and pin a following conversation in place.
+ */
+function withinFollowMargin(element: HTMLElement | null): boolean {
+  return element !== null && element.scrollHeight - element.scrollTop - element.clientHeight < BOTTOM_MARGIN_PX
+}
+
+/**
+ * How far down its own scrollable range one box sits, from 0 at the earliest
+ * fact to 1 at the latest. Ratios rather than pixels because the box that comes
+ * back is not the box the reader left: the panel is remounted, so its height and
+ * its content may both differ, and a pixel offset would land somewhere else.
+ */
+function scrollFraction(element: HTMLElement): number {
+  const range = element.scrollHeight - element.clientHeight
+  return range <= 0 ? 0 : element.scrollTop / range
+}
+
 export interface TimelineScroll {
   readonly ref: React.RefObject<HTMLElement>
   onScroll: () => void
@@ -87,16 +109,32 @@ export function useTimelineScroll(contentKey: string): TimelineScroll {
   const ref = useRef<HTMLElement>(null)
   const pinnedRef = useRef(true)
   const heightRef = useRef(0)
+  // Where the reader's view started, as a fraction of the box's scrollable
+  // range. `scrollTop` itself is meaningless once the box is gone: the panel
+  // unmounts on a view switch and a fresh box would reopen at 0, the oldest
+  // fact. The fraction survives that round trip and is restored below.
+  const offsetRef = useRef(0)
+  // A box the reader has not scrolled yet opens everywhere at `scrollTop` 0,
+  // which says nothing about where they want to be — it is the browser's
+  // default, not a choice. Only a real scroll (or an explicit jump) records a
+  // position; until then the policy's own follow state speaks for them.
+  const scrolledRef = useRef(false)
 
   const onScroll = useCallback(() => {
     const element = ref.current
     if (element === null) return
-    pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < BOTTOM_MARGIN_PX
+    pinnedRef.current = withinFollowMargin(element)
+    // Growth landing under a reader at the tail scrolls them without their
+    // input; that is still the browser speaking, not them.
+    if (!pinnedRef.current) scrolledRef.current = true
+    offsetRef.current = scrollFraction(element)
   }, [])
 
   const scrollToBottom = useCallback(() => {
     const element = ref.current
     pinnedRef.current = true
+    offsetRef.current = 1
+    scrolledRef.current = false
     if (element !== null) element.scrollTop = element.scrollHeight
   }, [])
 
@@ -123,7 +161,21 @@ export function useTimelineScroll(contentKey: string): TimelineScroll {
     // A fresh box has no height history to compare against; take the mounted
     // height as the baseline so the follow below behaves as on any other commit.
     heightRef.current = element.scrollHeight
-    if (pinnedRef.current) element.scrollTop = element.scrollHeight
+    // Measured, not assumed: a history read that commits before this call
+    // changes the rendered facts without moving `pinnedRef`, reaching the box
+    // through this same effect while the panel is still unmounted. The live
+    // margin is the only thing that can tell a growing tail from a reader who
+    // chose to stand further up.
+    pinnedRef.current = withinFollowMargin(element) || !scrolledRef.current
+    if (pinnedRef.current) {
+      offsetRef.current = 1
+      element.scrollTop = element.scrollHeight
+      return
+    }
+    // A reader standing in history gets their place back, not the box's default
+    // of 0 — the earliest fact, and the reason this exists at all.
+    const top = offsetRef.current * Math.max(0, element.scrollHeight - element.clientHeight)
+    element.scrollTop = top
   }, [])
 
   useEffect(() => {

@@ -40,7 +40,7 @@ describe('timeline return to the Thread view', () => {
     expect(result.current.isPinned()).toBe(true)
   })
 
-  it('leaves a reader who left at an older fact where their own scroll put them', () => {
+  it('leaves a reader who left at an older fact at the same place down the discussion', () => {
     // The reader scrolled up to read history before switching views. Returning
     // must not undo their position by yanking the box to the bottom.
     let top = 0
@@ -66,7 +66,48 @@ describe('timeline return to the Thread view', () => {
 
     result.current.returnToTimeline()
 
-    expect(written).toEqual([])
+    // 200px into a 1600px range is an eighth of the way down; the returning box
+    // has the same range here, so the reader lands back on their own fact
+    // instead of the box's default 0, which would be the earliest one.
+    expect(written).toEqual([200])
     expect(top).toBe(200)
+    expect(result.current.isPinned()).toBe(false)
+  })
+
+  it('keeps following a tail that grew while the reader was away in the checklist', () => {
+    // The other half of the same mechanism: a Thread read committed while the
+    // panel was unmounted renders new facts, so the box comes back further from
+    // its bottom than the reader left it. That is growth under a reader who was
+    // following, not a reader who chose to stand up in history — returning must
+    // still land on the latest fact.
+    let top = 0
+    Object.defineProperty(Element.prototype, 'scrollTop', {
+      configurable: true,
+      get(this: Element): number { return this instanceof HTMLElement && this.dataset.reader === 'true' ? top : 0 },
+      set(this: Element, value: number): void {
+        written.push(value)
+        if (this instanceof HTMLElement && this.dataset.reader === 'true') top = value
+      },
+    })
+    const { result } = renderHook(() => useTimelineScroll('same-content'))
+    const before = timelineBox()
+    before.dataset.reader = 'true'
+    ;(result.current.ref as { current: HTMLElement | null }).current = before
+    // Following the tail before leaving: 1600 is the limit of a 400px-tall box
+    // over 2000px of content.
+    top = 1600
+    result.current.onScroll()
+    // The panel unmounts; the next read lands four more facts, so the content
+    // the reader returns to is 600px longer than the one they left.
+    ;(result.current.ref as { current: HTMLElement | null }).current = null
+    const after = timelineBox()
+    Object.defineProperty(after, 'scrollHeight', { configurable: true, get: () => 2600 })
+    after.dataset.reader = 'true'
+    ;(result.current.ref as { current: HTMLElement | null }).current = after
+
+    result.current.returnToTimeline()
+
+    expect(written).toEqual([2600])
+    expect(result.current.isPinned()).toBe(true)
   })
 })
