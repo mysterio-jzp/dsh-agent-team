@@ -219,6 +219,11 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const projectionRef = useRef<ReadProjection>()
   const mutationRequests = useRef(new Map<string, AgentTeamRequestId>())
   const observationSequenceRef = useRef(0)
+  // Which Thread this page currently holds. The mount effect below re-runs when
+  // a handler it closes over changes identity; this is what tells that refresh
+  // apart from a genuine switch to another Thread.
+  const threadKey = `${workspaceId}:${threadRef}`
+  const loadedRef = useRef<string>()
   const threadLastFact = currentFacts[currentFacts.length - 1]
   const timeline = useTimelineScroll(`${currentFacts.length}:${olderFacts.length}:${threadLastFact === undefined ? '' : factKey(threadLastFact)}`)
   // The hook returns a fresh object per render, but this callback is stable: the
@@ -521,26 +526,36 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     // The previous mount's supplemental round must not answer for this one.
     supplementalRef.current = undefined
     supplementalPendingRef.current = false
-    projectionRef.current = undefined
-    setProjection(undefined)
-    setChannelView(undefined)
-    setMembers([])
-    setThreadMembers([])
-    setRemovedMemberIds(new Set())
-    setMemberSnapshotLoaded(false)
-    setMemberSnapshotLoading(true)
-    setMemberSnapshotError(undefined)
-    setCurrentFacts([])
-    currentFactsRef.current = []
-    setOlderFacts([])
-    setReadFacts([])
-    setHistoryCursor(undefined)
-    setHistoryHasMore(false)
-    setAutoReadExhausted(false)
-    setNewFactsCount(0)
-    setPendingJump(undefined)
-    setError(undefined)
-    setStatusMessage(undefined)
+    // The reset is scoped to a genuine switch. This effect re-runs whenever a
+    // handler or a context value it closes over changes identity, so an
+    // unguarded reset here blanks the page — content, reading place, expanded
+    // messages — on an ordinary refresh that produced nothing new. The first
+    // read still replaces everything it returns; what the guard removes is the
+    // empty frame in between.
+    const switching = loadedRef.current !== threadKey
+    loadedRef.current = threadKey
+    if (switching) {
+      projectionRef.current = undefined
+      setProjection(undefined)
+      setChannelView(undefined)
+      setMembers([])
+      setThreadMembers([])
+      setRemovedMemberIds(new Set())
+      setMemberSnapshotLoaded(false)
+      setMemberSnapshotLoading(true)
+      setMemberSnapshotError(undefined)
+      setCurrentFacts([])
+      currentFactsRef.current = []
+      setOlderFacts([])
+      setReadFacts([])
+      setHistoryCursor(undefined)
+      setHistoryHasMore(false)
+      setAutoReadExhausted(false)
+      setNewFactsCount(0)
+      setPendingJump(undefined)
+      setError(undefined)
+      setStatusMessage(undefined)
+    }
     const sequence = sequenceRef.current + 1
     sequenceRef.current = sequence
     const observationSequence = ++observationSequenceRef.current
@@ -580,8 +595,13 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
       // again. With nothing unread and addressed to them, the Thread still opens
       // at its latest fact.
       const addressed = firstUnreadMention(read.value.facts)
-      if (addressed === undefined) timeline.scrollToBottom()
-      else setPendingJump(addressed)
+      // A re-run is a refresh of an already-painted Thread: the reader keeps the
+      // place they are reading, so neither the opening jump nor the redirect to
+      // an unread mention fires a second time.
+      if (switching) {
+        if (addressed === undefined) timeline.scrollToBottom()
+        else setPendingJump(addressed)
+      }
       if (history !== undefined && history.ok) {
         setCurrentFacts(current => {
           const merged = mergeFacts(current, history.value.facts)

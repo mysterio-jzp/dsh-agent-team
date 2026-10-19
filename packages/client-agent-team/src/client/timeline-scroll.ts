@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 
 const BOTTOM_MARGIN_PX = 48
 
@@ -36,7 +36,7 @@ export interface TimelineScroll {
    * unmounted and mounted again (the Thread view switching away and back). A
    * fresh box starts at `scrollTop` 0 — the earliest fact — so a reader who was
    * following the tail is put back on it, and a reader who had scrolled up to
-   * history keeps that position untouched.
+   * history gets the same place down the discussion back.
    */
   returnToTimeline: () => void
   /**
@@ -192,6 +192,51 @@ export function useTimelineScroll(contentKey: string): TimelineScroll {
       element.scrollTop += element.scrollHeight - previousHeight
     }
   }, [contentKey])
+
+  // Content that grows or shrinks INSIDE this box above the reader's position
+  // would otherwise slide the fact they are reading. The browser has no notion
+  // of "keep this row still", so the reader's offset is moved by exactly what
+  // was inserted or removed above them.
+  //
+  // Only this box's own content counts. The runtime-risk banner is a sibling of
+  // the scrolling section, in the surface header — when it appears or leaves, it
+  // moves the box itself and leaves `scrollHeight` untouched, so nothing here
+  // can or should see it. Do not "fix" that by adding to `scrollTop`: the loss
+  // happens above the box.
+  //
+  // A reader parked at the tail is left alone: what they want is the newest
+  // fact, wherever that lands.
+  const compare = useCallback((delta: number): void => {
+    const element = ref.current
+    if (element === null || pinnedRef.current || delta === 0) return
+    element.scrollTop += delta
+    // The compensation is the page moving the row, not the reader; the place
+    // they are looking at is the one they already chose, so the recorded
+    // position follows the corrected box rather than the browser's default.
+    offsetRef.current = scrollFraction(element)
+  }, [])
+
+  const measureGrowth = useCallback((): void => {
+    const element = ref.current
+    if (element === null) return
+    const height = element.scrollHeight
+    const previous = heightRef.current
+    heightRef.current = height
+    // A box measured for the first time has no growth to report: its height is
+    // the baseline the next measurement compares against.
+    if (previous === 0) return
+    compare(height - previous)
+  }, [compare])
+
+  // Every render measures the box again, except the render that changed the
+  // rendered facts: that growth belongs to the follow policy above (it scrolls
+  // to the tail or keeps prepended history stable by itself).
+  const contentRef = useRef(contentKey)
+  useLayoutEffect(() => {
+    const contentChanged = contentRef.current !== contentKey
+    contentRef.current = contentKey
+    if (!contentChanged) measureGrowth()
+  })
 
   return { ref, onScroll, isPinned: () => pinnedRef.current, scrollToBottom, centerOn, returnToTimeline }
 }

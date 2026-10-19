@@ -3248,6 +3248,347 @@ it('keeps Human to-do answer targets out of subsequent ordinary messages in real
  * only a racing Host refusal renders it, so it keeps a source-derived note in
  * the Thread instead of an invented screenshot.
  */
+/**
+ * The runtime-risk banner above a Thread, measured rather than eyeballed.
+ *
+ * Two separate failures were reported together: the page appearing to start
+ * over when an Agent errors, and the fact being read sliding away. They are
+ * counted apart here, because a position fix cannot answer a remount and a
+ * remount cannot be argued away by smooth scrolling.
+ *
+ * Each reading names the physical quantity it asserts, so a green run is
+ * auditable:
+ * - `mounts`   integer count of times the conversation block was inserted into
+ *              the document, via a MutationObserver on the Thread surface. Zero
+ *              new insertions across the error means no remount.
+ * - `emptyFrames`  integer count of animation frames during which no
+ *              conversation row was in the document. One or more means the
+ *              page was painted blank — the "闪".
+ * - `offset`   signed CSS pixels on the screenshot axis (client coordinates):
+ *              the top edge of the row under the reader minus the box's own top
+ *              edge. Basis is captured immediately before the change and every
+ *              later reading is compared against it.
+ */
+it('keeps the fact under the reader still and never remounts the conversation across a runtime error', async () => {
+  await installLocalBundle(false)
+  const shots = join(BROWSER_ARTIFACTS, 'runtime-risk')
+  await mkdir(shots, { recursive: true })
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'risk-workspace')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '添加 Agent' }).click()
+  const agentDialog = page.getByRole('dialog', { name: '添加 Agent' })
+  await agentDialog.getByLabel('名称').fill('riskagent')
+  await agentDialog.getByLabel('说明').fill('承担运行风险')
+  await agentDialog.getByRole('button', { name: '创建 Agent' }).click()
+  await page.getByText('riskagent', { exact: true }).waitFor()
+  const host = scaffold.ctx.agentTeam
+  const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
+  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'riskagent')!.member
+  await expect.poll(() => scaffold!.ctx.agents.get(member.sessionId) !== undefined).toBe(true)
+  const agent = scaffold.ctx.agents.get(member.sessionId)!
+  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
+  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('risk-repro')
+  await channelDialog.getByLabel('说明').fill('运行风险横幅')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  const channelRef = host.view({ workspaceId }).channels.find((channel: { name: string }) => channel.name === 'risk-repro')!.channelRef
+  // A Task Thread with an active Claim: the banner lists exactly this shape.
+  const root = await host.sendMessageForAgent(agent, {
+    requestId: 'risk-browser-root' as never, workspaceId, channelRef, asTask: true,
+    body: 'RISK-ROOT-MARKER 这个 Task 会被一个出错 Agent 认领', recipients: [host.status().humanMemberId], channelRef,
+  })
+  if (root.kind !== 'committed') throw new Error(`seed rejected: ${root.kind}`)
+  const threadRef = root.thread.threadRef
+  const taskRef = root.thread.taskRef!
+  const claimRevision = host.view({ workspaceId }).threads.find((thread: { threadRef: string }) => thread.threadRef === threadRef)!.revision
+  const claim = await host.changeClaimForAgent(agent, {
+    requestId: 'risk-browser-claim' as never, workspaceId, taskRef, action: 'claim',
+    baseRevision: claimRevision,
+    direction: '让这个 Task 的 Claim 在报错时变成运行风险横幅',
+  })
+  if (claim.kind !== 'committed') throw new Error(`claim refused: ${claim.kind}`)
+  // Enough facts that the discussion actually scrolls: a short Thread pins to
+  // the tail and the question cannot be asked at all.
+  for (let index = 0; index < 14; index += 1) {
+    // A reply is a write on a revision of its own: each one starts from the
+    // revision the previous commit produced, and a durable write refuses a
+    // reader who has not caught up.
+    const current = host.view({ workspaceId }).threads.find((thread: { threadRef: string }) => thread.threadRef === threadRef)!
+    const sent = await host.replyForAgent(agent, {
+      requestId: `risk-browser-filler-${index}` as never, workspaceId, threadRef,
+      baseRevision: current.revision,
+      body: `FILLER-${String(index).padStart(2, '0')} 用于撑出可滚动的高度，让读者能停在中间。`, recipients: [],
+    })
+    if (sent.kind !== 'committed') throw new Error(`filler ${index} rejected: ${sent.kind}`)
+  }
+  await page.getByRole('button', { name: /^# risk-repro/ }).click()
+  await page.getByRole('button', { name: /打开 Task #/ }).first().click()
+  await page.locator('[data-team-thread]').waitFor()
+  await expect.poll(() => page.locator('[data-team-thread] article').filter({ hasText: 'FILLER-13' }).count(), { timeout: 20_000 }).toBe(1)
+  // Install the two readings in the page before anything changes.
+  await page.evaluate(() => {
+    const surface = document.querySelector('[data-team-thread]')!
+    const state = { mounts: 0, emptyFrames: 0 }
+    new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof Element && node.matches('article, [data-team-timeline]')) state.mounts += 1
+      }
+    }).observe(surface, { childList: true, subtree: true })
+    const tick = (): void => {
+      if (!surface.querySelector('article')) state.emptyFrames += 1
+      ;(window as unknown as { __riskFrames: number }).__riskFrames = requestAnimationFrame(tick)
+    }
+    ;(window as unknown as { __riskState: typeof state }).__riskState = state
+    ;(window as unknown as { __riskFrames: number }).__riskFrames = requestAnimationFrame(tick)
+  })
+  // The reader scrolls up into the conversation and settles on one row — the
+  // row whose place must not move.
+  const box = page.locator('[data-team-thread] [role="tabpanel"]').first()
+  await box.evaluate(box => { box.scrollTop = Math.floor((box.scrollHeight - box.clientHeight) / 2) })
+  await settleLayout(page)
+  // Where the banner sits decides which quantity can move: inside the scrolling
+  // box it adds to `scrollHeight` and this measurement is the whole story;
+  // outside it, the reader's loss happens above the box and no `scrollTop`
+  // change can see it. Recorded as a reading, not assumed either way.
+  const bannerInsideBox = await page.evaluate(() => {
+    const surface = document.querySelector('[data-team-thread]')!
+    const box = surface.querySelector('[role="tabpanel"]')!
+    const risks = surface.querySelector('section[aria-label="当前运行风险"]')
+    return risks !== null && box.contains(risks)
+  })
+  console.info('[risk-probe] bannerInsideBox', bannerInsideBox)
+  // The row the reader is on is named once, by its own ref, and every later
+  // reading resolves that same row: re-picking "some visible row" each time
+  // would compare two different rows and prove nothing.
+  const anchor = await page.evaluate(() => {
+    const surface = document.querySelector('[data-team-thread]')!
+    const box = surface.querySelector('[role="tabpanel"]')!
+    const boxRect = box.getBoundingClientRect()
+    const row = [...box.querySelectorAll('article')].find(entry => {
+      const rect = entry.getBoundingClientRect()
+      return rect.top >= boxRect.top + 40 && rect.bottom <= boxRect.bottom - 40
+    })
+    return row?.getAttribute('data-message-ref') ?? ''
+  })
+  expect(anchor).not.toBe('')
+  const offsetOfAnchor = async (): Promise<number> => page.evaluate(ref => {
+    const surface = document.querySelector('[data-team-thread]')!
+    const box = surface.querySelector('[role="tabpanel"]')!
+    const row = surface.querySelector(`article[data-message-ref="${ref}"]`)
+    if (row === null) throw new Error(`the row under the reader left the document: ${ref}`)
+    return Math.round(row.getBoundingClientRect().top - box.getBoundingClientRect().top)
+  }, anchor)
+  const before = await offsetOfAnchor()
+  const readingsBefore = await page.evaluate(() => ({ ...(window as unknown as { __riskState: { mounts: number; emptyFrames: number } }).__riskState }))
+  // The Agent errors. This is the Host's own event, so everything downstream —
+  // presence, the Client subscription, the banner — runs its production path.
+  scaffold.ctx.emit('agent/error', { agent, turn: 1, step: 1, error: new Error('RISK-MARKER upstream refused the request: 503') })
+  // The banner is a Client-side projection of presence: give it a beat, and keep
+  // the evidence when it does not come so the failure is diagnosable.
+  const banner = page.getByRole('heading', { name: '当前运行风险' })
+  try {
+    await banner.waitFor({ timeout: 20_000 })
+  } catch (failure) {
+    const presence = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'riskagent')
+    console.info('[risk-probe] presence', JSON.stringify(presence?.presence), 'diagnostic', JSON.stringify(presence?.diagnostic))
+    console.info('[risk-probe] claims', JSON.stringify(host.listClaimsForAgent(agent, { workspaceId, taskRef })))
+    await page.screenshot({ path: join(shots, 'banner-missing.png'), fullPage: true })
+    throw failure
+  }
+  await settleLayout(page)
+  const duringError = await offsetOfAnchor()
+  const readingsDuring = await page.evaluate(() => ({ ...(window as unknown as { __riskState: { mounts: number; emptyFrames: number } }).__riskState }))
+  await page.screenshot({ path: join(shots, 'banner-appeared-desktop.png'), fullPage: true })
+  // The Agent runs again: the Host clears the runtime failure and the banner goes.
+  scaffold.ctx.emit('agent/status', { agent, status: 'running' })
+  await page.getByRole('heading', { name: '当前运行风险' }).waitFor({ state: 'detached', timeout: 20_000 })
+  await settleLayout(page)
+  const afterError = await offsetOfAnchor()
+  const readingsAfter = await page.evaluate(() => ({ ...(window as unknown as { __riskState: { mounts: number; emptyFrames: number } }).__riskState }))
+  await page.evaluate(() => cancelAnimationFrame((window as unknown as { __riskFrames: number }).__riskFrames))
+  await page.screenshot({ path: join(shots, 'banner-cleared-desktop.png'), fullPage: true })
+  // mounts: integer, count of conversation rows/begins inserted into the surface.
+  expect(readingsDuring.mounts - readingsBefore.mounts).toBe(0)
+  expect(readingsAfter.mounts - readingsBefore.mounts).toBe(0)
+  // emptyFrames: integer, count of frames painted with no conversation row.
+  expect(readingsDuring.emptyFrames - readingsBefore.emptyFrames).toBe(0)
+  expect(readingsAfter.emptyFrames - readingsBefore.emptyFrames).toBe(0)
+  // offset: CSS pixels, the anchor row's top relative to the box's own top.
+  expect(duringError).toBe(before)
+  expect(afterError).toBe(before)
+  expect(await page.locator('[data-team-thread] [role="alert"]').count()).toBe(0)
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme })
+    await settleLayout(page)
+    await page.screenshot({ path: join(shots, `${scheme}-desktop.png`), fullPage: true })
+    await page.setViewportSize({ width: 390, height: 844 })
+    await settleLayout(page)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+    await page.screenshot({ path: join(shots, `${scheme}-narrow.png`), fullPage: true })
+    await page.setViewportSize({ width: 1440, height: 960 })
+    await settleLayout(page)
+  }
+  expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
+}, 180_000)
+
+/**
+ * The other trigger behind the same report: leaving the discussion for the
+ * Human to-do board and coming back. The reader stands in the middle of the
+ * history, not at the tail, and the row they were reading must still be where
+ * they left it when the discussion returns.
+ *
+ * Same three physical quantities as the runtime-risk reading, so the two are
+ * directly comparable:
+ * - `mounts`   integer, conversation rows inserted into the document (MutationObserver).
+ * - `emptyFrames`  integer, animation frames painted with no conversation row.
+ * - `offset`   signed CSS pixels on the screen axis: the anchor row's top minus
+ *              the scrolling box's top. Basis is the reading taken before the
+ *              switch away. A return that lands on the oldest history shows a
+ *              large positive offset (the row pushed far down and out of view).
+ */
+it('keeps the reading place when the discussion returns from the Human to-do board', async () => {
+  await installLocalBundle(false)
+  const shots = join(BROWSER_ARTIFACTS, 'view-roundtrip')
+  await mkdir(shots, { recursive: true })
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'roundtrip-workspace')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '添加 Agent' }).click()
+  const agentDialog = page.getByRole('dialog', { name: '添加 Agent' })
+  await agentDialog.getByLabel('名称').fill('roundtripagent')
+  await agentDialog.getByLabel('说明').fill('撑出历史')
+  await agentDialog.getByRole('button', { name: '创建 Agent' }).click()
+  await page.getByText('roundtripagent', { exact: true }).waitFor()
+  const host = scaffold.ctx.agentTeam
+  const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
+  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'roundtripagent')!.member
+  await expect.poll(() => scaffold!.ctx.agents.get(member.sessionId) !== undefined).toBe(true)
+  const agent = scaffold.ctx.agents.get(member.sessionId)!
+  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
+  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('roundtrip-repro')
+  await channelDialog.getByLabel('说明').fill('切页签往返')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  const channelRef = host.view({ workspaceId }).channels.find((channel: { name: string }) => channel.name === 'roundtrip-repro')!.channelRef
+  const root = await host.sendMessageForAgent(agent, {
+    requestId: 'roundtrip-browser-root' as never, workspaceId, channelRef,
+    body: 'ROUNDTRIP-ROOT-MARKER 切页签往返的历史', recipients: [],
+  })
+  if (root.kind !== 'committed') throw new Error(`seed rejected: ${root.kind}`)
+  const threadRef = root.thread.threadRef
+  for (let index = 0; index < 14; index += 1) {
+    const current = host.view({ workspaceId }).threads.find((thread: { threadRef: string }) => thread.threadRef === threadRef)!
+    const sent = await host.replyForAgent(agent, {
+      requestId: `roundtrip-browser-filler-${index}` as never, workspaceId, threadRef,
+      baseRevision: current.revision,
+      body: `HISTORY-${String(index).padStart(2, '0')} 撑出可以停在中间的高度。`, recipients: [],
+    })
+    if (sent.kind !== 'committed') throw new Error(`filler ${index} rejected: ${sent.kind}`)
+  }
+  // The Thread page is reached the way a reader reaches it: a second message in
+  // the Channel cites the Thread's ref, and the chip opens it.
+  const citing = await host.sendMessageForAgent(agent, {
+    requestId: 'roundtrip-browser-cite' as never, workspaceId, channelRef,
+    body: `CITE-MARKER 打开 ${threadRef}`, recipients: [],
+  })
+  if (citing.kind !== 'committed') throw new Error(`cite rejected: ${citing.kind}`)
+  await page.getByRole('button', { name: /^# roundtrip-repro/ }).click()
+  const citeRow = page.locator('[data-team-channel] article').filter({ hasText: 'CITE-MARKER' })
+  await citeRow.waitFor({ timeout: 20_000 })
+  await citeRow.locator(`button[title="${threadRef}"]`).click()
+  await page.locator(`[data-team-thread="${threadRef}"]`).waitFor({ timeout: 20_000 })
+  await expect.poll(() => page.locator('[data-team-thread] article').filter({ hasText: 'HISTORY-13' }).count(), { timeout: 20_000 }).toBe(1)
+  await page.evaluate(() => {
+    const state = { mounts: 0, emptyFrames: 0 }
+    ;(window as unknown as { __tripState: typeof state }).__tripState = state
+    new MutationObserver(records => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof Element && node.matches('article')) state.mounts += 1
+      }
+    }).observe(document.body, { childList: true, subtree: true })
+    const tick = (): void => {
+      const surface = document.querySelector('[data-team-thread]')
+      if (surface !== null && surface.querySelector('article') === null) state.emptyFrames += 1
+      ;(window as unknown as { __tripFrames: number }).__tripFrames = requestAnimationFrame(tick)
+    }
+    ;(window as unknown as { __tripFrames: number }).__tripFrames = requestAnimationFrame(tick)
+  })
+  const box = page.locator('[data-team-thread] [role="tabpanel"]').first()
+  await box.evaluate(box => { box.scrollTop = Math.floor((box.scrollHeight - box.clientHeight) / 2) })
+  await settleLayout(page)
+  const anchorOf = async (): Promise<{ ref: string; index: number }> => page.evaluate(() => {
+    const surface = document.querySelector('[data-team-thread]')!
+    const box = surface.querySelector('[role="tabpanel"]')!
+    const boxRect = box.getBoundingClientRect()
+    const rows = [...box.querySelectorAll('article')]
+    const index = rows.findIndex(entry => {
+      const rect = entry.getBoundingClientRect()
+      return rect.top >= boxRect.top + 40 && rect.bottom <= boxRect.bottom - 40
+    })
+    return { ref: rows[index]?.getAttribute('data-message-ref') ?? '', index }
+  })
+  const { ref: anchor, index: anchorIndex } = await anchorOf()
+  expect(anchor).not.toBe('')
+  const offsetOf = async (ref: string): Promise<number> => page.evaluate(ref => {
+    const surface = document.querySelector('[data-team-thread]')!
+    const box = surface.querySelector('[role="tabpanel"]')!
+    const row = surface.querySelector(`article[data-message-ref="${ref}"]`)
+    if (row === null) throw new Error(`the row under the reader left the document: ${ref}`)
+    return Math.round(row.getBoundingClientRect().top - box.getBoundingClientRect().top)
+  }, anchor)
+  // The row's own ordinal in the rendered history says which end it came back at.
+  const ordinalOf = async (ref: string): Promise<{ index: number; total: number }> => page.evaluate(ref => {
+    const rows = [...document.querySelectorAll('[data-team-thread] article')]
+    return { index: rows.findIndex(entry => entry.getAttribute('data-message-ref') === ref), total: rows.length }
+  }, anchor)
+  const before = await offsetOf(anchor)
+  const ordinalBefore = await ordinalOf(anchor)
+  const readingsBefore = await page.evaluate(() => ({ ...(window as unknown as { __tripState: { mounts: number; emptyFrames: number } }).__tripState }))
+  // Away to the Human to-do board and straight back.
+  await page.getByRole('tab', { name: /待办/ }).click()
+  await page.getByRole('tab', { name: /讨论/ }).waitFor()
+  await settleLayout(page)
+  await page.screenshot({ path: join(shots, 'board-desktop.png'), fullPage: true })
+  await page.getByRole('tab', { name: /讨论/ }).click()
+  await expect.poll(() => page.locator('[data-team-thread] article').count(), { timeout: 20_000 }).toBe(anchorIndex + 1 + (ordinalBefore.total - 1 - anchorIndex))
+  await settleLayout(page)
+  const after = await offsetOf(anchor)
+  const ordinalAfter = await ordinalOf(anchor)
+  const readingsAfter = await page.evaluate(() => ({ ...(window as unknown as { __tripState: { mounts: number; emptyFrames: number } }).__tripState }))
+  await page.evaluate(() => cancelAnimationFrame((window as unknown as { __tripFrames: number }).__tripFrames))
+  await page.screenshot({ path: join(shots, 'discussion-returned-desktop.png'), fullPage: true })
+  const readings = { mounts: readingsAfter.mounts - readingsBefore.mounts, emptyFrames: readingsAfter.emptyFrames - readingsBefore.emptyFrames, offsetBefore: before, offsetAfter: after, ordinalBefore, ordinalAfter }
+  console.info('[roundtrip-probe]', JSON.stringify(readings))
+  // offset: CSS pixels; the same row must sit at the same height in the box.
+  expect(after).toBe(before)
+  expect(ordinalAfter).toEqual(ordinalBefore)
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme })
+    await settleLayout(page)
+    await page.screenshot({ path: join(shots, `${scheme}-desktop.png`), fullPage: true })
+    await page.setViewportSize({ width: 390, height: 844 })
+    await settleLayout(page)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+    await page.screenshot({ path: join(shots, `${scheme}-narrow.png`), fullPage: true })
+    await page.setViewportSize({ width: 1440, height: 960 })
+    await settleLayout(page)
+  }
+  expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
+}, 180_000)
+
 it('keeps Thread member and composer state text readable in both themes', async () => {
   await installLocalBundle()
   scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
