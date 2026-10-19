@@ -164,7 +164,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // The reply the composer is writing as the answer to a to-do: `answer` is a
   // link between an existing message and the to-do, so the reply has to land
   // first and its ref is what answers.
-  const [answeringTodo, setAnsweringTodo] = useState<AgentTeamHumanTodo>()
+  const answeringTodoRef = useRef<AgentTeamHumanTodo>()
   const [threadMembers, setThreadMembers] = useState<readonly AgentTeamThreadMember[]>([])
   const [removedMemberIds, setRemovedMemberIds] = useState<ReadonlySet<AgentTeamMemberId>>(() => new Set())
   const [memberSnapshotLoaded, setMemberSnapshotLoaded] = useState(false)
@@ -416,8 +416,14 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     try {
       const result = await loadHumanTodos({ workspaceId, threadRef })
       if (!mountedRef.current) return
-      if (result.ok) setTodos(result.value.todos)
-      else setError(result.error.message)
+      if (result.ok) {
+        setTodos(result.value.todos)
+        const target = answeringTodoRef.current
+        // The list is complete; cancelled to-dos disappear from it.
+        if (target !== undefined && !result.value.todos.some(todo => todo.todoRef === target.todoRef && isUnsettledTodo(todo))) {
+          answeringTodoRef.current = undefined
+        }
+      } else setError(result.error.message)
     } catch (cause) {
       if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -462,6 +468,9 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
       const result = await changeHumanTodo({ requestId, workspaceId, todoRef: todo.todoRef, action })
       if (!result.ok) { setError(result.error.message); return }
       todoRequestIds.current.delete(key)
+      if (answeringTodoRef.current?.todoRef === result.value.todo.todoRef && !isUnsettledTodo(result.value.todo)) {
+        answeringTodoRef.current = undefined
+      }
       setTodos(current => current === undefined ? current
         : current.map(entry => entry.todoRef === result.value.todo.todoRef ? result.value.todo : entry))
       // `changed` false is not a failure: it is the Host saying the state
@@ -482,15 +491,18 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
    * press targets the composer, and the binding happens when the reply lands.
    */
   const startAnsweringTodo = (todo: AgentTeamHumanTodo): void => {
-    setAnsweringTodo(todo)
+    answeringTodoRef.current = todo
     setView('thread')
     timeline.scrollToBottom()
   }
 
-  /** Bind the reply that just landed to the to-do that was waiting for it. */
-  const settleAnsweredTodo = async (messageRef: AgentTeamMessageRef): Promise<void> => {
-    const target = answeringTodo
-    if (target === undefined) return
+  const announceUnboundAnswer = (reason: string): void => {
+    const notice = t('threadTodoAnswerUnbound', { reason })
+    setStatusMessage(previous => previous === undefined ? notice : `${previous} · ${notice}`)
+  }
+
+  /** Binding can fail after the message committed; it is not a send failure. */
+  const settleAnsweredTodo = async (target: AgentTeamHumanTodo, messageRef: AgentTeamMessageRef): Promise<void> => {
     const requestId = mintRequestId()
     try {
       const result = await changeHumanTodo({ requestId, workspaceId, todoRef: target.todoRef, action: 'answer', messageRef })
@@ -498,14 +510,9 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
       if (result.ok) {
         setTodos(current => current === undefined ? current
           : current.map(entry => entry.todoRef === result.value.todo.todoRef ? result.value.todo : entry))
-      }
-      // The reply itself committed either way: an unbound answer is a worse
-      // record, not a failed message, so it surfaces rather than rolls back.
-      else setError(result.error.message)
+      } else announceUnboundAnswer(result.error.message)
     } catch (cause) {
-      if (mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause))
-    } finally {
-      setAnsweringTodo(undefined)
+      if (mountedRef.current) announceUnboundAnswer(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
@@ -1073,6 +1080,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
     // captured render value would be stale after the composer's own edits.
     const { draft, recipients } = drafts.getSnapshot(draftKey)
     if (pending || thread === undefined || draft.trim() === '') return
+    const answerTarget = answeringTodoRef.current
     const id = replyRequestId ?? mintRequestId()
     setReplyRequestId(id)
     setPending(true)
@@ -1113,10 +1121,12 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         setConfirmation(undefined)
         const undeliveredNames = (committed.undeliveredMentions ?? []).map(memberName)
         setStatusMessage(undeliveredNames.length === 0 ? undefined : t('threadSendUndelivered', { ids: undeliveredNames.join(', ') }))
-        // The reply that just landed is the answer to the to-do the reader
-        // pressed "answer" on: the binding is a second, separate fact about an
-        // existing message, so it is written after the message exists.
-        await settleAnsweredTodo(committed.message.messageRef)
+        // A terminal update can invalidate the intent while the reply is in
+        // flight. Consume it before binding; failed sends retain it for retry.
+        if (answerTarget !== undefined && answeringTodoRef.current === answerTarget) {
+          answeringTodoRef.current = undefined
+          await settleAnsweredTodo(answerTarget, committed.message.messageRef)
+        }
         await refreshSupplemental()
       } else if (result.value.kind === 'confirmation_required') {
         let currentMembers = threadMembers

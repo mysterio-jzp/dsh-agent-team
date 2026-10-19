@@ -38,6 +38,8 @@ Choosing a Message to answer states the target twice, and both must be visible: 
 
 The send carries the parent's ref, so the Host records the link and delivers to the parent's author; a successful send clears the target, and so does switching Threads, so a stale quote can never ride along with the next Enter.
 
+A Human to-do answer binds only after its reply commits and consumes that answer target once. Failed sends preserve a live target for retry; a complete Host checklist that reports the target closed or absent invalidates it, including during an in-flight send. If binding fails after the message committed, a neutral composer status preserves the actual reason and states that the message was sent; it does not label the message as failed or retry the binding on the next ordinary send.
+
 Taskless Thread promotion is Human-only, durable, and non-optimistic. On success reread Thread and supplemental Channel/Member projections; on unread/stale fence errors preserve Host error and reread relevant facts.
 
 ## Thread/Task entry rows

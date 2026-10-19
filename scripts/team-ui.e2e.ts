@@ -1,6 +1,6 @@
 import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { chromium, type Browser, type Locator, type Page } from 'playwright'
 import { launchWebScaffold, acknowledgeReloadConnectionLoss, watchConsole, type WebScaffold } from './scaffold.ts'
 import { connectFreshWorkspaceZh } from './support.ts'
@@ -3110,6 +3110,128 @@ it('opens a taskless thread from its ref chip in real Web', async () => {
   await page.setViewportSize({ width: 390, height: 844 })
   await settleLayout(page)
   await page.screenshot({ path: join(UI02_SHOTS, 'thread-ref-chip-opened-narrow.png'), fullPage: true })
+  expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
+}, 180_000)
+
+it('keeps Human to-do answer targets out of subsequent ordinary messages in real Web', async () => {
+  await installLocalBundle(false)
+  const shots = join(BROWSER_ARTIFACTS, 'human-todo-answer')
+  await mkdir(shots, { recursive: true })
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'todo-workspace')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '添加 Agent' }).click()
+  const agentDialog = page.getByRole('dialog', { name: '添加 Agent' })
+  await agentDialog.getByLabel('名称').fill('requester')
+  await agentDialog.getByLabel('说明').fill('提出待办')
+  await agentDialog.getByRole('button', { name: '创建 Agent' }).click()
+  await page.getByText('requester', { exact: true }).waitFor()
+  const host = scaffold.ctx.agentTeam
+  const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
+  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'requester')!.member
+  await expect.poll(() => scaffold!.ctx.agents.get(member.sessionId) !== undefined).toBe(true)
+  const agent = scaffold.ctx.agents.get(member.sessionId)!
+  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
+  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('todo-repro')
+  await channelDialog.getByLabel('说明').fill('回答和普通消息的边界')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  const channelRef = host.view({ workspaceId }).channels.find((channel: { name: string }) => channel.name === 'todo-repro')!.channelRef
+  const root = await host.sendMessageForAgent(agent, {
+    requestId: 'todo-browser-root' as never, workspaceId, channelRef, asTask: true,
+    body: '确认发布顺序', recipients: [host.status().humanMemberId],
+  })
+  if (root.kind !== 'committed') throw new Error(`seed rejected: ${root.kind}`)
+  const threadRef = root.thread.threadRef
+  await host.changeAttentionForAgent(agent, { requestId: 'todo-browser-unfollow' as never, workspaceId, threadRef, action: 'unfollow' })
+  const dispatch = async (label: string) => (await host.dispatchHumanTodoForAgent(agent, {
+    requestId: `todo-browser-${label}` as never, workspaceId, threadRef, title: label,
+  })).todo
+  const first = await dispatch('确认首次答复')
+  const originalChange = host.changeHumanTodo.bind(host)
+  const changes = vi.spyOn(host, 'changeHumanTodo')
+  const answerCalls = () => changes.mock.calls.filter(([request]) => request.action === 'answer').length
+  const state = (todoRef: string) => host.humanTodos({ workspaceId, threadRef }).todos.find((todo: { todoRef: string }) => todo.todoRef === todoRef)
+  await page.getByRole('button', { name: /^# todo-repro/ }).click()
+  await page.getByRole('button', { name: /打开 Task #/ }).first().click()
+  await page.locator('[data-team-thread]').waitFor()
+  const composer = page.getByRole('textbox', { name: '消息内容' })
+  const board = page.getByRole('tab', { name: /待办/ })
+  const discussion = page.getByRole('tab', { name: /讨论/ })
+  const chooseAnswer = async (todoRef: string) => {
+    await board.click()
+    await page.locator(`[data-todo-card="${todoRef}"]`).getByRole('button', { name: '在讨论里回复…' }).click()
+  }
+  const send = async (body: string, keyboard = true) => {
+    await composer.fill(body)
+    if (keyboard) await composer.press('Enter')
+    else await page.getByRole('button', { name: '发送', exact: true }).click()
+    await expect.poll(() => composer.inputValue()).toBe('')
+    await page.getByRole('button', { name: '发送', exact: true }).waitFor()
+    await expect.poll(() => host.threadHistory({ workspaceId, threadRef, limit: 50 }).facts
+      .some((fact: { kind: string; message?: { body: string } }) => fact.message?.body === body)).toBe(true)
+  }
+  await chooseAnswer(first.todoRef)
+  await send('先发布服务端，这是待办答复')
+  await expect.poll(() => state(first.todoRef)?.state).toBe('answered')
+  const answeredMessageRef = state(first.todoRef)!.answeredMessageRef
+  await board.click()
+  await page.locator(`[data-todo-card="${first.todoRef}"]`).getByRole('button', { name: '结案', exact: true }).click()
+  await expect.poll(() => state(first.todoRef)?.state).toBe('closed')
+  await discussion.click()
+  await send('普通消息一：现在讨论其他问题')
+  await send('普通消息二：不再绑定旧待办', false)
+  expect(answerCalls()).toBe(1)
+  expect(state(first.todoRef)!.answeredMessageRef).toBe(answeredMessageRef)
+  expect(await page.locator('[data-team-thread] [role="alert"]').count()).toBe(0)
+
+  const stale = await dispatch('编辑期间已结案')
+  await chooseAnswer(stale.todoRef)
+  await composer.fill('未提交的答复')
+  await originalChange({ requestId: 'todo-browser-external-close' as never, workspaceId, todoRef: stale.todoRef, action: 'close' })
+  await board.click()
+  await page.locator(`[data-todo-card="${stale.todoRef}"][data-state="closed"]`).waitFor()
+  await discussion.click()
+  await send('普通消息三：编辑期间待办已结案')
+  expect(answerCalls()).toBe(1)
+  expect(await page.locator('[data-team-thread] [role="alert"]').count()).toBe(0)
+
+  const raced = await dispatch('发送后绑定时发生结案')
+  await chooseAnswer(raced.todoRef)
+  changes.mockImplementationOnce(async request => {
+    await originalChange({ requestId: 'todo-browser-racing-close' as never, workspaceId, todoRef: raced.todoRef, action: 'close' })
+    return originalChange(request)
+  })
+  await send('这条消息已发送，待办绑定单独失败')
+  const notice = page.locator('[data-team-composer] [role="status"]')
+  await expect.poll(() => notice.textContent()).toContain('消息已发送，但未能绑定到待办')
+  await expect.poll(() => notice.textContent()).toContain('already closed')
+  expect(await page.locator('[data-team-thread] [role="alert"]').count()).toBe(0)
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme })
+    await settleLayout(page)
+    await page.screenshot({ path: join(shots, `${scheme}-desktop.png`), fullPage: true })
+    await page.setViewportSize({ width: 390, height: 844 })
+    await settleLayout(page)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+    await page.screenshot({ path: join(shots, `${scheme}-narrow.png`), fullPage: true })
+    await page.setViewportSize({ width: 1440, height: 960 })
+    await settleLayout(page)
+  }
+  await send('普通消息四：不重试失败的旧绑定')
+  expect(answerCalls()).toBe(2)
+  expect(await notice.count()).toBe(0)
+  expect(await page.locator('[data-team-thread] [role="alert"]').count()).toBe(0)
+  changes.mockRestore()
+  await page.getByRole('button', { name: '对话', exact: true }).click()
+  await page.locator('[data-composer-input][contenteditable="true"]').waitFor()
+  expect(await page.locator('[data-team-thread]').count()).toBe(0)
   expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
 }, 180_000)
 

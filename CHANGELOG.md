@@ -19,6 +19,10 @@ All notable changes to this project are documented in this file. The format foll
 - The mention picker still ranks every Workspace participant by reach, while the Thread composer adds a Host-backed draft warning that distinguishes never-joined, removed, and unfollowed Members. Candidates remain pickable; selection changes only the draft, while a confirmed successful send is what invites, re-invites, or restores ordinary updates.
 - The Team entry stands at the sidebar's foot beside Settings again instead of taking a row in the shell's panel rail. Team is still the shell's own global panel and this entry still selects it, so entering the mode, leaving it, and the panel selection behind both are unchanged.
 
+**Fixed**
+
+- A Human to-do answer target is consumed when its reply commits and invalidated when the Host reports it closed or withdrawn, including while a reply is in flight. Failed sends still retain a live target for retry. A refused answer binding reports the Host's reason separately from the already-sent message instead of presenting it as a send failure.
+
 ## [0.2.3] - 2026-10-11
 
 **New**
