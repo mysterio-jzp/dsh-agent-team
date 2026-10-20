@@ -664,6 +664,20 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
     legacy: { normalize: 'none', repair: 'none' },
     intent: { scopes: 'derived', inbox: 'none' },
   },
+  'team/member-model-route-recorded': {
+    stored: {
+      ...opBase('operation:protocol-route', 'request:protocol-route', 34, memberActor),
+      previousOperationId,
+      kind: 'team/member-model-route-recorded',
+      data: { memberId, sessionId: fixtureMember.sessionId, source: {
+        kind: 'session', sessionVersion: 12, memberModelVersion: 3,
+      } },
+    },
+    legacyShapes: [],
+    retry: { replayOnly: 'Host-internal acknowledgement deduplicates by Session and source; it exposes no caller request id' },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'no-op', inbox: 'none' },
+  },
   'team/member-added': {
     stored: memberAdded,
     legacyShapes: [],

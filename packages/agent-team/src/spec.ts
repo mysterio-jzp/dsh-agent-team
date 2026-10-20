@@ -495,6 +495,21 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
   z.object({
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/member-model-route-recorded'),
+    data: z.object({
+      memberId: memberIdSchema,
+      sessionId: sessionIdSchema,
+      source: z.object({
+        kind: z.enum(['member', 'session']),
+        sessionVersion: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+        memberModelVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+        memberModel: modelSelectionSchema.optional(),
+      }).strict(),
+    }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/channel-member-added'),
     data: z.object({ workspaceId: workspaceIdSchema, channelRef: channelRefSchema, memberId: memberIdSchema }).strict(),
   }).strict(),

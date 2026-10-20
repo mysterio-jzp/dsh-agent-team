@@ -14,6 +14,11 @@ import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, Service, type Volatile } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import {
+  installMemberModelRoute,
+  updateMemberModelRoute,
+  type MemberModelRoute,
+} from './member-model-route.ts'
 import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
@@ -538,7 +543,8 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private readonly claimedDeliveries = new Map<SessionId, { readonly turn: number; readonly callIds: Set<string> }>()
   /** Live selection refs let model edits take effect without disposing the Session; one per live Session. */
-  private readonly modelSelections = new Map<SessionId, ModelSelectionRef>()
+  /** One live route per Member Session; re-decided from the Session at every step. */
+  private readonly modelRoutes = new Map<SessionId, MemberModelRoute>()
   /** Agent ids with a turn in flight; restarts must wait for the boundary. */
   private readonly runningAgents = new Set<SessionId>()
   /** Per-Member runtime state: tool restrictions, skill mounts, warnings, private memory. */
@@ -1081,7 +1087,8 @@ export default class AgentTeam extends TypertRemoteService {
       await Promise.all([...this.memberLifecycleTails.values(), ...this.additionLifecycleTails.values()])
       await Promise.all([...this.handles.values()].flatMap(bucket => [...bucket.values()]).map(handle => this.disposeWithWakeGuard(handle)))
       this.handles.clear()
-      this.modelSelections.clear()
+      for (const route of this.modelRoutes.values()) route.dispose()
+      this.modelRoutes.clear()
       this.memberRuntime.disposeAll()
       this.runningAgents.clear()
       await domain.close()
@@ -1755,7 +1762,8 @@ export default class AgentTeam extends TypertRemoteService {
       'for the retired Agent to release its Session write path',
       () => this.disposeWithWakeGuard(active))
     this.unregisterHandle(memberId, scopeKey, previousSessionId)
-    this.modelSelections.delete(previousSessionId)
+    this.modelRoutes.get(previousSessionId)?.dispose()
+    this.modelRoutes.delete(previousSessionId)
     this.memberRuntime.forgetMember(memberId, scopeKey)
     this.clearMemberFailure(memberId, 'activation')
     this.clearMemberNotificationState(memberId)
@@ -1984,9 +1992,32 @@ export default class AgentTeam extends TypertRemoteService {
           // One selection ref per live work domain: the stored model is the
           // Member's, so every domain's next step must route through it.
           for (const surface of active) {
-            const selection = this.modelSelections.get(surface.agent.session.id)
-            if (selection === undefined) throw new Error(`Agent Member '${current.handle}' has no live model selection`)
-            selection.current = current.model ?? this.ctx.agentDefaultModel.currentSelection()
+            const route = this.modelRoutes.get(surface.agent.session.id)
+            if (route === undefined) throw new Error(`Agent Member '${current.handle}' has no live model route`)
+            // The edit moves the Member's own configuration; the Session's own
+            // choice still outranks it, so the route is re-decided, not overwritten.
+            updateMemberModelRoute(route, () => ({
+              ctx: surface.agent.ctx,
+              agent: surface.agent,
+              override: current.model,
+              memberModelVersion: this.requireLedger().memberModelVersion(current.memberId),
+              hostDefault: () => this.ctx.agentDefaultModel.currentSelection(),
+            }), current.model ?? this.ctx.agentDefaultModel.currentSelection())
+            // A Member config edit is a Human action, so the Session's own record
+            // moves with it and the selector keeps showing what the next request
+            // will actually use. This is the same `model/selection` event the
+            // Session controller's own selectModel appends, which the
+            // `modelSelection` projection already folds — the controller is not a
+            // seeded service, so appending is the only writer available here.
+            // The Host default is deliberately left alone: a Member edit is not a
+            // statement about every other Member's fallback.
+            if (current.model !== undefined) {
+              surface.agent.session.append('model/selection', {
+                provider: current.model.provider,
+                model: current.model.model,
+                ...current.model.reasoningEffort === undefined ? {} : { reasoningEffort: current.model.reasoningEffort },
+              })
+            }
           }
           effect = 'applied'
         }
@@ -2777,8 +2808,8 @@ export default class AgentTeam extends TypertRemoteService {
     // entered prompt assembly, its `current` selection otherwise. Re-deriving
     // from the ledger or the Host default would race a concurrent default
     // change or live model edit and split the budget from the real route.
-    const ref = this.modelSelections.get(agent.session.id)
-    const selection = ref?.assembled ?? ref?.current ?? member.model ?? this.ctx.agentDefaultModel.currentSelection()
+    const route = this.modelRoutes.get(agent.session.id)
+    const selection = route?.ref.assembled ?? route?.ref.current ?? member.model ?? this.ctx.agentDefaultModel.currentSelection()
     const meter = agent.ctx.get('tokenMeter')
     const usageTokens = meter?.measure(agent.session)?.totalTokens
     if (usageTokens === undefined) return undefined
@@ -3591,7 +3622,6 @@ export default class AgentTeam extends TypertRemoteService {
       // applied to the next request and not lost during activation.
       const selection = member.model ?? this.ctx.agentDefaultModel.currentSelection()
       const agentOptions = { provider: selection.provider, model: selection.model }
-      const selected: ModelSelectionRef = { current: selection, assembled: undefined }
       // Absent skills.allow loads every discovered private skill; a present
       // allow-list filters the catalog by name through the live ref below.
       // `swap` is bound by the provider at activation (no-op until then).
@@ -3607,7 +3637,23 @@ export default class AgentTeam extends TypertRemoteService {
           // failures by type, not by matching message text.
           throw new PresetCompositionError(error instanceof Error ? error.message : String(error), { cause: error })
         }
-        installModelSelection(agentCtx, selected)
+        // The Session's own model choice outranks the Member's stored route, so
+        // the installed selection follows the Session instead of freezing the
+        // override resolved above.
+        const route = installMemberModelRoute(() => ({
+          // Read the projection through the Agent's own context: the Session's
+          // model intent lives on that layer, and the pre-step hook fires there.
+          ctx: agent.ctx,
+          agent,
+          // Read through the ledger at every decision: a config edit moves the
+          // Member's override, and the next step of this Session must see it.
+          override: this.requireLedger().getMember(member.memberId)?.model,
+          memberModelVersion: this.requireLedger().memberModelVersion(member.memberId),
+          hostDefault: () => this.ctx.agentDefaultModel.currentSelection(),
+        }), selection, this.requireLedger().memberModelRouteSource(agent.session.id),
+        source => this.requireLedger().recordMemberModelRoute(member.memberId, agent.session.id, source))
+        this.modelRoutes.get(agent.session.id)?.dispose()
+        this.modelRoutes.set(agent.session.id, route)
         // Admission gate for pending context rollovers: once a successful
         // context_rollover result is durable, queued input must not open another
         // old-generation model request. The turn-stop boundary captures the
@@ -3732,7 +3778,7 @@ export default class AgentTeam extends TypertRemoteService {
       this.memberRuntime.recordAppliedCapabilities(member.memberId, member.capabilities)
       await workspace.attachSession(sessionId)
       this.registerHandle(member.memberId, scopeKey, created)
-      this.modelSelections.set(sessionId, selected)
+
       if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) this.clearMemberFailure(member.memberId, 'activation')
       this.clearMemberFailure(member.memberId, 'preTurnCancellation')
       this.clearMemberFailure(member.memberId, 'capabilityApply')
@@ -3807,7 +3853,8 @@ export default class AgentTeam extends TypertRemoteService {
       }
     } catch (error) {
       if (created !== undefined) await this.disposeWithWakeGuard(created)
-      this.modelSelections.delete(sessionId)
+      this.modelRoutes.get(sessionId)?.dispose()
+      this.modelRoutes.delete(sessionId)
       this.memberRuntime.forgetMember(member.memberId, scopeKey)
       const message = error instanceof Error ? error.message : String(error)
       this.ctx.logger.warn(`agent-team: activation failed for member '${this.memberLabel(member.memberId)}' in work domain '${scopeKey}': ${message}`)
@@ -3842,7 +3889,8 @@ export default class AgentTeam extends TypertRemoteService {
       if (bucket !== undefined) {
         for (const [scopeKey, stale] of [...bucket.entries()]) {
           this.unregisterHandle(memberId, scopeKey, stale.agent.session.id)
-          this.modelSelections.delete(stale.agent.session.id)
+          this.modelRoutes.get(stale.agent.session.id)?.dispose()
+          this.modelRoutes.delete(stale.agent.session.id)
           this.memberRuntime.forgetMember(memberId, scopeKey)
           await this.disposeWithWakeGuard(stale)
         }
@@ -4444,7 +4492,8 @@ export default class AgentTeam extends TypertRemoteService {
         'for the Agent to release its Session write path',
         () => this.disposeWithWakeGuard(handle))
       this.unregisterHandle(memberId, scopeKey, sessionId)
-      this.modelSelections.delete(sessionId)
+      this.modelRoutes.get(sessionId)?.dispose()
+      this.modelRoutes.delete(sessionId)
       this.claimedDeliveries.delete(sessionId)
       this.memberRuntime.forgetMember(memberId, scopeKey)
     }
