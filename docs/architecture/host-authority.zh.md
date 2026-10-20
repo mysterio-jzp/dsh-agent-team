@@ -77,6 +77,15 @@ Member 默认域当前的失败原因以 `diagnostic` 挂在 status 上并由 Cl
 - 两级分工不变。`agent/request-error` 负责同一步的 pressure/compaction 重试。`agent/error` 负责终止回合恢复及其连续错误上限。无论走哪条路，失败都保留已记录的 Member diagnostic。
 - 在任何 `turn/start` 之前被丢弃的 Team 唤醒，是唯一一类背后没有 `agent/error` 的 error diagnostic。当一条 Team 自己的 Inbox 或 recovery 通知在 Agent 开启回合前离开队列、且不是 Host 自己做的替换或 dispose 时，Host 记一条 `runtime` 类 diagnostic，带上 `source: 'agent/inbox/discarded'`、该 Member 的 `sessionId` 和 `occurredAt`。Host 有意替换或拆除的通知不触发任何东西，所以普通的通知替换从不显示 error。被取消的 splice 不带 durable 原因，因此它和所有 runtime diagnostic 一样只在进程内维护。重启后，在下一次唤醒真正运行或再次取消之前什么都不显示。
 
+## Member 模型路由与会话选择
+- Member Session 的模型跟随最近一次人工模型操作。`team/member-model-route-recorded` 在 Team 账本里按 Session 记录来源，不挂在多个工作域共用的 Member 记录上。已消费的 Session 选择可跨 Host 重启保留，且不回写 Member 默认模型。
+- 重放派生最后一条实际改变 provider、model 或 reasoning effort 的 Member 操作序号。来源记录该修订；后续模型编辑将其作废，包括先改走再改回。修改 handle、description 或 capabilities 不改变该修订。Session 序号与账本序号绝不互相比大小。
+- 新 Session 或新工作域没有来源记录，按 Member 配置起步，不继承别的 Session 的选择。旧版已消费且未记录来源的选择无法重建与 Member 编辑的先后关系；升级后需重新选择一次。未消费的选择在 activation 时记录。新操作类型要求相应新版读取器，不支持降级读取。
+- 来源按 Session 和记录值幂等写入。选择事件将其排队，pre-step 在发送请求前等待写入。存储失败会阻止请求，不静默换模型。这类记录不改变 Thread revision、共享投影游标或 Inbox。
+- 没挂 Session 控制器的 Host 没有 `modelSelection` 投影；路由把它读成"这条会话没有自己的选择"，按配置走，不抛错。这种情形下行为与这条路由出现之前一致，这是写明了的边界而不是缺陷——因此报上来的"bug"应先回到这里对一遍。
+- 路由在 `model/selection` 或 `request/header` 落下时就刷新，不只在 step 边界刷新——因为宿主是**先装配 prompt、后跑 `agent/pre-step`**（`agent-loop` 的 `preStep`）。只在边界重算，会把人的点选推迟一条请求生效。`model/selection` 是"现在有新动作"、必须赢下紧接着的那次装配；`request/header` 是"上一步消费掉了它的选择"，用来把那些在路由学会这么早刷新之前就已写进会话的点选通知出来。
+- 改成员的模型会写入与人工点选相同的 `model/selection` 事件，因此选择器与下一条请求保持一致。由此有两个刻意的结果：会话日志分不出这次写入是插件做的还是人点的（谁是谁的账在成员账本里），以及这次改动不改变正在跑的那一条请求——从下一条起生效，且不动全局默认值。
+
 ## 私有记忆、归档与身份效应
 - `$DSH_HOME/agent-team/members/` 下的 private-memory directories 是 Member identity 的 Host-owned effects，不是第二权威。Member activation 确保 private-memory directory、`notes/` 和缺失的 `memory.md` 存在。startup 不会清理 ledger 不知道的 `member:` directories。显式 Member removal 会归档这个 Member 的 Session，并移除这个 Member 的 private-memory directory。Team removal path 之外的 entries 保持不动。
 - 这项删除，以及 activation 时对旧式 colon 目录的改名，都限定在当前进程自己的 members root 之内。记录里的 `privateMemoryPath` 是一条 durable 绝对事实，指向「当初添加这个 Member 的那个 DSH home」里的目录。因此解析到另一个 home 的进程会拒绝搬移或删除这个目录（并告警），而不是把 Member 的真实私有记忆搬出 Member 自己的 home。

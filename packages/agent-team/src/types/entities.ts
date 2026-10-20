@@ -62,7 +62,19 @@ export interface AgentTeamMemberActor {
 
 export type AgentTeamActor = AgentTeamHumanActor | AgentTeamMemberActor
 
-/** Provider route plus provider-owned model id one Member can be pinned to. */
+/** Governing model action for one Session, recorded in the Team operation ledger. */
+export interface AgentTeamMemberRouteSource {
+  readonly kind: 'session' | 'member'
+  readonly sessionVersion?: number
+  /** Sequence of the last actual Member model change, not unrelated edits. */
+  readonly memberModelVersion?: number
+  readonly memberModel?: {
+    readonly provider: string
+    readonly model: string
+    readonly reasoningEffort?: string
+  }
+}
+
 export interface AgentTeamModelSelection {
   readonly provider: string
   readonly model: string
