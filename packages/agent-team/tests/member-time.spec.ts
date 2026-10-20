@@ -104,6 +104,12 @@ async function addLedgerMember(
   await ledger.addMember({ requestId: requestId(`add:${memberId}`), actor: agentTeamHumanActor(), member, handle: member.handle,
     description: member.description, presetId: member.presetId, workspaceId: alpha,
     channelRefs: channelRef === undefined ? [] : [channelRef as never] })
+  // Task and Claim creation are the President's writes: these fixtures test
+  // fact instants, not the authority, so the Member just created takes the
+  // vacant office — the same Human designation production requires.
+  if (ledger.presidentState().kind === 'vacant') {
+    await ledger.setPresident({ requestId: requestId(`president:${memberId}`), actor: agentTeamHumanActor(), memberId: member.memberId })
+  }
   return { member, actor: { kind: 'member', memberId: member.memberId, handle: member.handle } }
 }
 
@@ -271,6 +277,9 @@ describe('discovery projections hang off the same per-fact source', () => {
     const { ledger, actor, taskRef } = await seededThread()
     const channelRef = ledger.inbox(actor, { workspaceId: alpha }).items[0]!.channelRef
     const { actor: second } = await addLedgerMember(ledger, channelRef)
+    // A second owner needs the office for its own Claim: creation is the
+    // President's write, so the fixture moves it to the Member claiming.
+    await ledger.setPresident({ requestId: requestId('second-president'), actor: agentTeamHumanActor(), memberId: second.memberId })
     const secondRead = (await ledger.readThread({ requestId: requestId('second-read'), workspaceId: alpha, taskRef, actor: second })).value
     committed((await ledger.changeClaim({ requestId: requestId('second-claim'), workspaceId: alpha, taskRef,
       action: 'claim', direction: 'second direction', baseRevision: secondRead.thread.revision, actor: second })).value)

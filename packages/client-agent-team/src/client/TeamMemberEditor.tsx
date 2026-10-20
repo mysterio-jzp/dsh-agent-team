@@ -239,9 +239,10 @@ export function ModelPickerField({ model, onModelChange, loadModels, disabled, t
  * through one durable update. Channel membership is managed from the Channel
  * side, not here.
  */
-export function AgentEditorDialog({ status, updateMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, onCommitted, onClose, t }: {
+export function AgentEditorDialog({ status, updateMember, setPresident, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, onCommitted, onClose, t }: {
   readonly status: AgentTeamClientMemberStatus
   readonly updateMember: TeamSidebarProps['updateMember']
+  readonly setPresident: TeamSidebarProps['setPresident']
   readonly loadModels: TeamSidebarProps['loadModels']
   readonly putMemberAvatar: TeamSidebarProps['putMemberAvatar']
   readonly removeMemberAvatar: TeamSidebarProps['removeMemberAvatar']
@@ -264,6 +265,9 @@ export function AgentEditorDialog({ status, updateMember, loadModels, putMemberA
   // this browser cannot read has to fall back to the initial exactly as a
   // removed one does, or the dialog would show a blank circle and call it saved.
   const avatar = useAvatarImage(avatarUrl)
+  const [presidentNotice, setPresidentNotice] = useState<string>()
+  const [presidentBusy, setPresidentBusy] = useState(false)
+  const isPresident = status.member.president === true
   const [personaNotice, setPersonaNotice] = useState<string>()
   const [personaCopied, setPersonaCopied] = useState(false)
   const agentMdPath = status.member.agentMdPath
@@ -311,6 +315,29 @@ export function AgentEditorDialog({ status, updateMember, loadModels, putMemberA
       ...payload,
     }
     await save(request)
+  }
+
+  /**
+   * Move the President office to this Member, or clear it.
+   *
+   * The office is one durable write of its own, not part of the form: it is a
+   * team-wide authority, so it commits immediately instead of waiting for an
+   * unrelated name edit to be saved alongside it. `memberId: null` clears the
+   * office and is what a Human uses to leave nobody holding it.
+   */
+  const togglePresident = async (): Promise<void> => {
+    setPresidentNotice(undefined)
+    setPresidentBusy(true)
+    try {
+      const result = await setPresident({ requestId: mintRequestId(), memberId: isPresident ? null : memberId })
+      if (!result.ok) {
+        setPresidentNotice(t('presidentFailed', { message: result.error.message }))
+        return
+      }
+      await onCommitted()
+    } finally {
+      setPresidentBusy(false)
+    }
   }
 
   /**
@@ -441,6 +468,24 @@ export function AgentEditorDialog({ status, updateMember, loadModels, putMemberA
           <Input className={createCss.input!} value={description} placeholder={t('agentDescriptionPlaceholder')} onChange={event => { setDescription(event.target.value); pendingRequest.current = undefined }} disabled={saving} />
         </label>
         <ModelPickerField model={model} onModelChange={choice => { pendingRequest.current = undefined; setModel(choice) }} loadModels={loadModels} disabled={saving} t={t} />
+        <div className={createCss.field}>
+          <span>{t('presidentRole')}</span>
+          <div className={createCss.avatarRow}>
+            <Button
+              variant={isPresident ? 'primary' : 'outline'}
+              aria-pressed={isPresident}
+              disabled={saving || presidentBusy}
+              onClick={() => { void togglePresident() }}
+            >
+              {presidentBusy ? t('presidentSetting') : isPresident ? t('presidentClearAction') : t('presidentSetAction')}
+            </Button>
+            {isPresident && <small className={createCss.editHint}>{t('presidentManagerBadgeHint')}</small>}
+          </div>
+          {/* The rule, stated where the Human sets it: the office is exclusive,
+              and taking it from someone else is one write, not two. */}
+          <small className={createCss.editHint}>{t('presidentManagerOnly')}</small>
+          {presidentNotice !== undefined && <small className={createCss.error} role="alert">{presidentNotice}</small>}
+        </div>
         {error !== undefined && <p className={createCss.error} role="alert">{error}</p>}
       </form>
     </Modal>

@@ -120,6 +120,7 @@ import type {
   AgentTeamWorkDomainState,
   AgentTeamMemberResult,
   AgentTeamMembersRequest,
+  AgentTeamMemberToolSurface,
   AgentTeamMessageRef,
   AgentTeamResolveMessageRefsRequest,
   AgentTeamResolveMessageRefsResult,
@@ -131,6 +132,9 @@ import type {
   AgentTeamThreadRef,
   AgentTeamOperation,
   AgentTeamOperationReceipt,
+  AgentTeamPresidentResult,
+  AgentTeamProposeRequest,
+  AgentTeamPresidentState,
   AgentTeamPromoteThreadRequest,
   AgentTeamPromoteThreadResult,
   AgentTeamPutAttachmentRequest,
@@ -162,6 +166,7 @@ import type {
   AgentTeamSetHumanProfileRequest,
   AgentTeamSetHumanProfileResult,
   AgentTeamSetMemberStateRequest,
+  AgentTeamSetPresidentRequest,
   AgentTeamStatus,
   AgentTeamTask,
   AgentTeamTaskRequest,
@@ -547,6 +552,17 @@ export default class AgentTeam extends TypertRemoteService {
   /** Live selection refs let model edits take effect without disposing the Session; one per live Session. */
   /** One live route per Member Session; re-decided from the Session at every step. */
   private readonly modelRoutes = new Map<SessionId, MemberModelRoute>()
+  /**
+   * Live tool-surface listeners per Member agent.
+   *
+   * The Team tool plugin is composed by the Member's preset, so it mounts ABOVE
+   * the agent scope and cannot be handed the Member record at `apply` time. It
+   * subscribes once per agent instead, keyed by the agent itself: a President
+   * designation then reaches a Session that is already running, on its next
+   * request, without either side trusting a Session-local snapshot of who holds
+   * the office.
+   */
+  private readonly toolSurfaceAgents = new Map<Agent, { readonly memberId: AgentTeamMemberId; readonly listeners: Set<(surface: AgentTeamMemberToolSurface) => void> }>()
   /** Agent ids with a turn in flight; restarts must wait for the boundary. */
   private readonly runningAgents = new Set<SessionId>()
   /** Per-Member runtime state: tool restrictions, skill mounts, warnings, private memory. */
@@ -665,6 +681,14 @@ export default class AgentTeam extends TypertRemoteService {
    * single writer queue.
    */
   private readonly memberLifecycleTails = new Map<AgentTeamMemberId, Promise<void>>()
+  /**
+   * President designations serialize against EACH OTHER, not against one
+   * Member: the office is single, so two concurrent moves have to observe each
+   * other's commit before deciding what the "previous holder" is. A clear
+   * carries no Member id at all, which is why this cannot reuse the per-Member
+   * tails above.
+   */
+  private readonly presidentLifecycleTails = new Map<'president', Promise<void>>()
   /**
    * addMember chains by request id: the Member id does not exist until the
    * commit answers, and concurrent duplicates of one request must serialize
@@ -1595,6 +1619,106 @@ export default class AgentTeam extends TypertRemoteService {
       await this.convergeMemberEffects(result.value.member)
       return Object.freeze({ receipt: result.value.receipt, status: this.memberStatus(result.value.member) })
     })
+  }
+
+  /**
+   * Human designation of the team's President, or `memberId: null` to clear it.
+   *
+   * The office is a team-wide write authority, so it is a Human act and a
+   * single durable record: the ledger clears the previous holder and sets the
+   * new one in one operation, which is what makes a failure leave the office
+   * exactly as it was. Live surfaces are refreshed right here — a running
+   * Member picks the change up on its next request instead of needing a
+   * restart, and a Member that lost the office stops seeing `asTask`
+   * immediately.
+   */
+  @Remote('setPresident')
+  async setPresident(request: AgentTeamSetPresidentRequest): Promise<AgentTeamPresidentResult> {
+    return this.chainLifecycle(this.presidentLifecycleTails, 'president', async () => {
+      const previous = this.requireLedger().presidentState()
+      const result = await this.requireLedger().setPresident({ ...request, actor: agentTeamHumanActor() })
+      if (result.committed) this.emitCommitted(result.value.receipt)
+      // Both sides of the move: the Member that lost the office must lose the
+      // tool parameter now, and the new holder must gain it now. A replay that
+      // committed nothing refreshes too — the surfaces are derived from the
+      // live projection, so re-deriving them cannot roll anything back.
+      const moved = new Set<AgentTeamMemberId>()
+      if (previous.kind === 'single') moved.add(previous.memberId)
+      if (previous.kind === 'conflict') for (const memberId of previous.memberIds) moved.add(memberId)
+      const current = this.requireLedger().presidentState()
+      if (current.kind === 'single') moved.add(current.memberId)
+      if (current.kind === 'conflict') for (const memberId of current.memberIds) moved.add(memberId)
+      for (const memberId of moved) this.refreshToolSurfaces(memberId)
+      return result.value
+    })
+  }
+
+  /** The President office as the LIVE ledger holds it; never a cached snapshot. */
+  president(): AgentTeamPresidentState {
+    return this.requireLedger().presidentState()
+  }
+
+  /**
+   * The tool surface one live Member agent may compose, or undefined when the
+   * agent is not an active Team Member. Called by the Team tool plugin, so it
+   * answers from the live ledger on every question.
+   */
+  memberToolSurfaceForAgent(agent: Agent): AgentTeamMemberToolSurface | undefined {
+    const member = this.surfaceMemberFor(agent)
+    return member === undefined ? undefined : this.toolSurface(member.memberId)
+  }
+
+  /**
+   * The Member one agent composes tools for.
+   *
+   * The live handle is the authority once a generation is published. During
+   * activation that publication has not happened yet, so fall back to the
+   * durable Session binding — otherwise the first request of every Member
+   * would compose the surface of a stranger.
+   */
+  private surfaceMemberFor(agent: Agent): AgentTeamAgentMember | undefined {
+    const live = this.memberForAgent(agent)
+    if (live !== undefined) return live
+    const bound = this.requireLedger().memberOfBoundSession(agent.session.id)
+    // A suspended Member has no live Session to compose for; a durable binding
+    // left behind by a retired generation must not answer as one.
+    return bound?.state === 'enabled' ? bound : undefined
+  }
+
+  /**
+   * Observe later moves of the office for one live Member agent. The listener
+   * runs synchronously with the surface to compose, and the returned disposer
+   * is what keeps a retired generation from being refreshed.
+   */
+  onMemberToolSurfaceChanged(agent: Agent, listener: (surface: AgentTeamMemberToolSurface) => void): () => void {
+    const member = this.surfaceMemberFor(agent)
+    if (member === undefined) return () => {}
+    const entry = { memberId: member.memberId, listeners: new Set([listener]) }
+    this.toolSurfaceAgents.set(agent, entry)
+    return () => {
+      entry.listeners.delete(listener)
+      if (entry.listeners.size === 0 && this.toolSurfaceAgents.get(agent) === entry) this.toolSurfaceAgents.delete(agent)
+    }
+  }
+
+  /** The surface a Member may compose right now, derived per call — never stored. */
+  private toolSurface(memberId: AgentTeamMemberId): AgentTeamMemberToolSurface {
+    const office = this.requireLedger().presidentState()
+    // A conflicting ledger grants the office to nobody: no Member may create a
+    // Task until a Human designates the holder, which is the same answer the
+    // sending path gives. A vacancy is not a conflict and reads the same way
+    // for this purpose — the difference is only in the refusal the caller sees.
+    const canCreateTask = office.kind === 'single' && office.memberId === memberId
+    return Object.freeze({ memberId, canCreateTask })
+  }
+
+  /** Re-derive one Member's live agent surfaces after the office moved. */
+  private refreshToolSurfaces(memberId: AgentTeamMemberId): void {
+    const surface = this.toolSurface(memberId)
+    for (const entry of this.toolSurfaceAgents.values()) {
+      if (entry.memberId !== memberId) continue
+      for (const listener of entry.listeners) listener(surface)
+    }
   }
 
   /** Commit enabled intent and restore the exact persisted Session. */
@@ -2605,7 +2729,66 @@ export default class AgentTeam extends TypertRemoteService {
 
   /** Agent-only top-level Thread start. Workspace identity is verified against the live binding. */
   async sendMessageForAgent(agent: Agent, request: AgentTeamSendMessageRequest): Promise<AgentTeamSendMessageResult> {
-    return this.sendMessageAs(this.memberCall(agent, request.workspaceId), request, agent.session.id)
+    const actor = this.memberCall(agent, request.workspaceId)
+    // The tool definition already omits `asTask` for a Member that may not
+    // create a Task, so this refusal is for a caller that composed the request
+    // itself. Both read the LIVE office: a designation moving between those two
+    // moments must not let a revoked holder through.
+    if (request.asTask === true) this.assertPresidentCreatingTask(actor)
+    return this.sendMessageAs(actor, request, agent.session.id)
+  }
+
+  /**
+   * Agent-only proposal of a Task or Claim direction, for the Members that may
+   * not create either one.
+   *
+   * A proposal is an ordinary Channel Message — never a Task, a Claim, or a DM.
+   * That is what makes it work when the office is VACANT (there is nobody to
+   * send a DM to) and what keeps it readable by the whole team: the President
+   * sees it in the Channel and decides. When a President is designated the
+   * Message mentions them, so the proposal reaches their inbox as a normal
+   * mention instead of relying on them to poll.
+   */
+  async proposeForAgent(agent: Agent, request: AgentTeamProposeRequest): Promise<AgentTeamSendMessageResult> {
+    const actor = this.memberCall(agent, request.workspaceId)
+    const ledger = this.requireLedger()
+    const summary = request.summary.trim()
+    if (summary === '') throw new Error('a proposal needs a summary of the direction')
+    // Proposing is the path for a Member that cannot do the thing itself. The
+    // President is refused with the tool that actually works, so the authority
+    // never has two routes that could drift apart.
+    if (this.toolSurface(actor.memberId).canCreateTask) {
+      throw new Error('the President creates the Task or Claim directly; proposing is for Members without that authority')
+    }
+    const office = ledger.presidentState()
+    // Mention only a President that is IN this Channel: a mention is delivered
+    // as a follower notification and a Member outside the Channel has no such
+    // row to receive. The Message itself is still a normal Channel Message, so
+    // a vacant office or an outside President costs reachability, never the
+    // write.
+    const mention = office.kind === 'single' && ledger.memberInChannel(request.channelRef, office.memberId)
+      ? `@${office.handle} `
+      : ''
+    const lines: string[] = []
+    if (request.kind === 'claim') {
+      if (request.taskRef === undefined) throw new Error('a Claim proposal must name the Task it is about')
+      // Resolving here makes a bad ref fail at the proposer, in front of the
+      // Member that can still fix it, instead of in front of the President.
+      const resolved = ledger.resolveTaskRefs(request.workspaceId, [request.taskRef])
+      if (resolved.length === 0) throw new Error(`unknown Task ref '${request.taskRef}'`)
+      lines.push(`**Claim proposal** · ${resolved[0]!.taskRef}`)
+      if (mention !== '') lines.push(`${mention}— may I claim this Task?`)
+    } else {
+      lines.push('**Task proposal**')
+      if (mention !== '') lines.push(`${mention}— should this become a Task?`)
+    }
+    lines.push(summary)
+    return this.sendMessageAs(actor, {
+      requestId: request.requestId,
+      workspaceId: request.workspaceId,
+      channelRef: request.channelRef,
+      body: lines.join('\n'),
+    }, agent.session.id)
   }
 
   /** Agent-only existing-Thread reply. */
@@ -3644,6 +3827,24 @@ export default class AgentTeam extends TypertRemoteService {
     const actor = this.memberActor(agent)
     this.requireAgentWorkspace(actor, workspaceId)
     return actor
+  }
+
+  /**
+   * Refuse Task creation unless the LIVE ledger names this Member as President.
+   * The ledger repeats this check on its own write path; this copy exists so
+   * the refusal a composed request sees names the holder and the tool to use
+   * instead, before any attachment is resolved or copied.
+   */
+  private assertPresidentCreatingTask(actor: AgentTeamMemberActor): void {
+    const office = this.president()
+    if (office.kind === 'single' && office.memberId === actor.memberId) return
+    if (office.kind === 'single') {
+      throw new Error(`only the team President can create a Task; @${office.handle} holds the office — propose the Task to them with team_propose instead`)
+    }
+    if (office.kind === 'conflict') {
+      throw new Error('only the team President can create a Task; the ledger records more than one President, so the Human must resolve it first')
+    }
+    throw new Error('only the team President can create a Task; the office is vacant, so the Human must designate one first — send the idea as a normal Message or propose it with team_propose')
   }
 
   private memberActor(agent: Agent): AgentTeamMemberActor {

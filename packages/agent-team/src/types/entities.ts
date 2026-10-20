@@ -180,6 +180,18 @@ export interface AgentTeamAgentMember {
   readonly avatarRef?: string | undefined
   /** Durable capability intent; see AgentTeamMemberCapabilities. */
   readonly capabilities?: AgentTeamMemberCapabilities | undefined
+  /**
+   * Whether this Member holds the team's single President office.
+   *
+   * Absent means not the President, so every ledger recorded before the office
+   * existed replays unchanged. The flag is written only by the dedicated
+   * designation operation, which moves the office in ONE record: a member
+   * update never touches it, and two Members can never be flagged by a
+   * sequence the write path produces. A hand-edited ledger that carries two
+   * flags is reported as a conflict (see `AgentTeamPresidentState`) instead of
+   * being silently resolved to whichever the reader met first.
+   */
+  readonly president?: boolean | undefined
   /** Host-internal namespace; never exposed through Client projections. */
   readonly privateMemoryPath: string
   /**
@@ -190,6 +202,38 @@ export interface AgentTeamAgentMember {
    * data cleanup.
    */
   readonly state: 'enabled' | 'suspended' | 'inactive' | 'archived'
+}
+
+/**
+ * The team's single President office, derived from the live ledger.
+ *
+ * Three outcomes, never collapsed into one: `vacant` (nobody is designated —
+ * including a designated Member who has left the working set), `single` (the
+ * one holder), and `conflict` (a hand-edited or older ledger flags more than
+ * one Member). A conflict is deliberately NOT resolved by picking one: the
+ * Host refuses Task creation and Claim creation under it until a Human
+ * designates the holder explicitly.
+ */
+export type AgentTeamPresidentState =
+  | { readonly kind: 'vacant' }
+  | { readonly kind: 'single'; readonly memberId: AgentTeamMemberId; readonly handle: string }
+  | { readonly kind: 'conflict'; readonly memberIds: readonly AgentTeamMemberId[] }
+
+/**
+ * What one Member's tool surface may expose, derived from the live President
+ * office. The Host owns this decision and hands it to the Team tool plugin at
+ * activation, so the plugin never re-derives authority from a Session-local
+ * snapshot: a designation that moves the office refreshes every live surface
+ * through {@link AgentTeam.onMemberToolSurfaceChanged}.
+ */
+export interface AgentTeamMemberToolSurface {
+  readonly memberId: AgentTeamMemberId
+  /**
+   * Whether this Member's `team_message` carries `asTask`. When false the key
+   * is ABSENT from the tool definition — not present-and-disabled — and the
+   * Member gets the proposal tool instead.
+   */
+  readonly canCreateTask: boolean
 }
 
 /**

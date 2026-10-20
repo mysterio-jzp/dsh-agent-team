@@ -61,6 +61,8 @@ import type {
   AgentTeamRemoveMemberAvatarResult,
   AgentTeamRemoveThreadMemberRequest,
   AgentTeamRemoveThreadMemberResult,
+  AgentTeamSetPresidentRequest,
+  AgentTeamPresidentResult,
   AgentTeamUpdateMemberRequest,
   AgentTeamView,
   AgentTeamViewRequest,
@@ -133,6 +135,12 @@ export type TeamSidebarProps = PropsRuntime<'sidebar.workspaces'>
     updateChannel: (request: AgentTeamUpdateChannelRequest) => Promise<RemoteResult<AgentTeamUpdateChannelResult>>
     archiveChannel: (request: AgentTeamArchiveChannelRequest) => Promise<RemoteResult<AgentTeamArchiveChannelResult>>
     updateMember: (request: AgentTeamUpdateMemberRequest) => Promise<RemoteResult<AgentTeamMemberResult>>
+    /**
+     * Move or clear the President office. One durable record moves it: the old
+     * holder clears and the new one sets inside the same operation, so no
+     * reader observes an empty office mid-move.
+     */
+    setPresident: (request: AgentTeamSetPresidentRequest) => Promise<RemoteResult<AgentTeamPresidentResult>>
     /**
      * Store one Member avatar's bytes and return their opaque reference. The
      * caller records that reference on the Member with `updateMember` as a

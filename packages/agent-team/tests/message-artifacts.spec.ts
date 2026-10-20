@@ -75,6 +75,10 @@ async function teamWithMember(ledger: AgentTeamLedger): Promise<{ readonly chann
       presetId: 'team-member', privateMemoryPath: '/tmp/peer', state: 'enabled',
     },
   })
+  // Creating a Task is the President's write; this fixture's Member sends a
+  // Task, so it takes the vacant office — the Human designation production
+  // requires.
+  await ledger.setPresident({ requestId: requestId('add-peer-president'), actor: human, memberId: added.value.member.memberId })
   return { channelRef: channel.channelRef, memberId: added.value.member.memberId }
 }
 

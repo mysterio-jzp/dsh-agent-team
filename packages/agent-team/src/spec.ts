@@ -113,6 +113,11 @@ const memberSchema = z.object({
   // to open. Optional is therefore the load-time half of the same contract the
   // record's own optional field states.
   avatarRef: z.string().min(1).optional(),
+  // Ledgers written before the President office existed omit the flag. Like
+  // `avatarRef`, a missing line here would not fail the write — it would fail
+  // the NEXT cold start, where `.strict()` rejects the recorded Member and the
+  // whole domain refuses to open.
+  president: z.boolean().optional(),
   privateMemoryPath: z.string().min(1),
   state: z.union([z.literal('enabled'), z.literal('suspended'), z.literal('inactive'), z.literal('archived')]),
 }).strict()
@@ -495,6 +500,15 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-updated'),
     data: z.object({ member: memberSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/president-set'),
+    data: z.object({
+      presidentMemberId: memberIdSchema.optional(),
+      previousMemberId: memberIdSchema.optional(),
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,
