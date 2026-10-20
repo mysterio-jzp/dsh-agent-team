@@ -242,6 +242,24 @@ export interface AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation extend
   }
 }
 
+/**
+ * Durable Human designation of the team's single President office.
+ *
+ * ONE record moves the office: the previous holder's flag clears and the new
+ * holder's flag sets inside the same operation, so no reader can observe an
+ * empty office between two writes and a failure leaves the previous holder in
+ * place. `presidentMemberId` is absent when the office is deliberately cleared.
+ */
+export interface AgentTeamPresidentSetOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/president-set'
+  readonly data: {
+    /** The designated Member; absent records a cleared office. */
+    readonly presidentMemberId?: AgentTeamMemberId | undefined
+    /** The Member the office moved away from, kept for the audit trail. */
+    readonly previousMemberId?: AgentTeamMemberId | undefined
+  }
+}
+
 /** Durable Human edit of one Member's mutable facts (handle, description, model). */
 export interface AgentTeamMemberUpdatedOperation extends AgentTeamOperationBase {
   readonly kind: 'team/member-updated'
@@ -573,6 +591,7 @@ export type AgentTeamOperation =
   | AgentTeamChannelWorkingDirectoriesUpdatedOperation
   | AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation
   | AgentTeamMemberUpdatedOperation
+  | AgentTeamPresidentSetOperation
   | AgentTeamMemberModelRouteRecordedOperation
   | AgentTeamChannelMemberAddedOperation
   | AgentTeamChannelMemberRemovedOperation

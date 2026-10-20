@@ -497,6 +497,20 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The President mark on the Agent row. It sits in the row's own line, after
+   the handle's column, so a Member wearing the office is identifiable without
+   opening the editor that grants it. */
+.presidentBadge {
+  flex: none;
+  align-self: center;
+  border: 1px solid var(--dsw-alias-border-secondary);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10px;
+  line-height: 15px;
+  white-space: nowrap;
+}
 .agentCopy small {
   color: var(--dsw-alias-label-tertiary);
   font-size: 10px;

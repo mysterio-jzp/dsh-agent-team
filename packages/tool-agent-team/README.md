@@ -4,6 +4,12 @@ English | [中文](README.zh.md)
 
 Model-facing tools for Agent Team Members. The package registers tools in the calling Agent preset scope and does not provide or replace Host services.
 
+## The President office
+
+One Member holds the President office at a time, and the office — not a role string — is the authority. Only the holder may create a Task (`team_message` with `asTask`) or a Claim (`team_claim` action `claim`); every other Member routes the same intent through `team_propose`, which posts an ordinary Channel Message and mentions the holder when they are in that Channel. `list` and the author's own `done`/`release` stay open to everyone: losing the office takes away creation, never the ability to read the collision surface or to close your own Claim.
+
+The surface is composed per agent, not per plugin. The Member preset mounts this plugin above the agent scope, so `apply(ctx)` has no identity and no reachable Team Host there; the registry therefore carries the conservative `team_message` (no `asTask` key at all, not a `false` default) plus every other Team tool, and per-agent registration happens at `agent/created`, where `agent.ctx` resolves the Host. A President's Session gets a shadowing `team_message` carrying `asTask`; everyone else gets `team_propose` instead. A later move of the office re-registers that agent-scoped pair through the Host's listener, so a running Session composes the new surface on its next request with no restart and no Session-local snapshot of who holds the office. Because these registrations live in the agent's own layer, no `tools` allow-list can hide the proposal path.
+
 ## Tools
 
 - `team_inbox` lists bounded unread Thread summaries for the calling Member, ordered by direct work and then recency; Task standing appears only where the Thread has a real Task overlay. The header states total unread/direct counts and the number of Threads shown (with a truncation conclusion when unread work lies beyond the bounded list); each item shows its exact unread/direct counts, Channel ref, and Task standing. The footer routes reading to `team_thread read`; the render carries no revision and no write token.

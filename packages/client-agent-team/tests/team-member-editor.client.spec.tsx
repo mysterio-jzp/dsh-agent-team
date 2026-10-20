@@ -119,11 +119,18 @@ describe('AgentEditorDialog boundary page', () => {
     readonly member?: AgentTeamClientMemberStatus['member']
   } = {}) {
     const updateMember = vi.fn(options.update ?? (async () => ({ ok: true, value: { member } }) as RemoteResult<unknown>))
+    // The office is its own write; these tests do not move it, they only need a
+    // callable that reports success.
+    const setPresident = vi.fn(async (request: { requestId: string; memberId: string | null }) => {
+      void request
+      return { ok: true, value: {} } as RemoteResult<unknown>
+    })
     const openMemberPersonaPath = vi.fn(options.openPersona ?? (async () => null))
     render(
       <AgentEditorDialog
         status={{ member: options.member ?? member, availability: 'active' } as AgentTeamClientMemberStatus}
         updateMember={updateMember as never}
+        setPresident={setPresident as never}
         loadModels={async () => catalogOk()}
         putMemberAvatar={vi.fn(options.put ?? (async () => ({ ok: true, value: { avatarRef: 'member-avatar:2' } }) as RemoteResult<unknown>)) as never}
         removeMemberAvatar={vi.fn(options.remove ?? (async () => ({ ok: true, value: { removed: true } }) as RemoteResult<unknown>)) as never}
@@ -134,7 +141,7 @@ describe('AgentEditorDialog boundary page', () => {
         t={t}
       />,
     )
-    return { updateMember, openMemberPersonaPath }
+    return { updateMember, openMemberPersonaPath, setPresident }
   }
 
   it('opens the persona path verbatim and says nothing when the Host accepts', async () => {
@@ -187,6 +194,23 @@ describe('AgentEditorDialog boundary page', () => {
     expect((await screen.findByRole('alert')).textContent).toContain('disk full')
     // No reference is written, so the Member keeps the face it had.
     expect(updateMember).not.toHaveBeenCalled()
+  })
+
+  it('grants the office in one write and clears it with a null Member', async () => {
+    const first = open()
+    fireEvent.click(screen.getByRole('button', { name: zh.presidentSetAction }))
+    // Granting names the Member; the request identity is minted per call.
+    await waitFor(() => { expect(first.setPresident).toHaveBeenCalledTimes(1) })
+    const granted = first.setPresident.mock.calls[0]![0]
+    expect(granted.memberId).toBe(member.memberId)
+    expect(granted.requestId).toBeTypeOf('string')
+    cleanup()
+    // The holder's own editor offers the reverse, and clearing states `null`
+    // rather than an empty string: the Host reads absence as "no Member".
+    const holder = open({ member: { ...member, president: true } as AgentTeamClientMemberStatus['member'] })
+    fireEvent.click(screen.getByRole('button', { name: zh.presidentClearAction }))
+    await waitFor(() => { expect(holder.setPresident).toHaveBeenCalledTimes(1) })
+    expect(holder.setPresident.mock.calls[0]![0].memberId).toBeNull()
   })
 
   it('draws no persona row for a Member the projection gave no path', async () => {

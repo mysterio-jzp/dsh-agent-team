@@ -65,6 +65,7 @@ const EXPECTED_REMOTE_METHODS = [
   'resolveThreadRefs',
   'sendMessage',
   'setHumanProfile',
+  'setPresident',
   'threadHistory',
   'threadObservations',
   'updateChannel',
