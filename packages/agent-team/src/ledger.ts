@@ -1211,8 +1211,19 @@ export class AgentTeamLedger {
       if (operation.kind === 'team/channel-created') {
         const created = (operation as AgentTeamChannelCreatedOperation).data
         if (created.channel.channelRef !== channelRef || !created.memberIds.includes(memberId)) continue
-        if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) return undefined
-        if (operation.actor.kind !== 'human') return undefined
+        // A retired grant is skipped rather than treated as the answer: a Member
+        // this batch granted, removed, and later added back by its own creation
+        // has a live grant further along, and stopping here would report it as
+        // un-attributable despite that later Human act.
+        if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) continue
+        // Unreachable today: the only production writer of `team/channel-created`
+        // is `createChannel`, which calls `assertHumanActor` before committing it.
+        // A record like this is still handled as "this grant does not count"
+        // rather than as the end of the scan, which would also hide a later
+        // `team/member-added` that does count. If a second writer of this
+        // operation ever appears, whether this branch is reachable has to be
+        // re-evaluated.
+        if (operation.actor.kind !== 'human') continue
         return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
       }
       if (operation.kind !== 'team/member-added') continue
