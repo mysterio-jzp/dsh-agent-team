@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { chromium, type Browser, type Locator, type Page } from 'playwright'
@@ -130,6 +130,22 @@ type ContrastSample = {
   readonly ratio: number
   /** The error lead bar's own ratio against the same composited background, when the element carries one. */
   readonly bar: number | null
+}
+
+/**
+ * The right rail's open tabs, de-duplicated by id.
+ *
+ * `[data-sidebar-right-tab]` marks both the strip entry and the body of the
+ * same tab, so a plain `locator().count()` reports two per tab. Anything that
+ * needs to know how many tabs are open — not how many nodes carry the marker —
+ * has to go through here, or it will read one ordinary tab as two.
+ */
+async function openTabIds(page: Page): Promise<readonly string[]> {
+  return page.evaluate(() => [...new Set(
+    [...document.querySelectorAll('[data-sidebar-right-tab]')]
+      .map(tab => tab.getAttribute('data-sidebar-right-tab') ?? '')
+      .filter(id => id !== ''),
+  )])
 }
 
 /** Resolve WCAG contrast from the browser's computed foreground and composited ancestor backgrounds. */
@@ -4246,4 +4262,356 @@ it('configures the jev endpoint from the Team page in real Web', async () => {
   await settleLayout(page)
 
   expect(consoleWatch).toEqual({ warnings: [], pageErrors: [] })
+}, 180_000)
+
+/**
+ * A non-image attachment opens in the right Sidebar (task #16). The block is
+ * the whole gesture and carries the copy's age on itself, because the Sidebar's
+ * title belongs to the viewer plugin and Team cannot promise anything about it.
+ *
+ * Proven here: the block is a real button reachable by keyboard, Enter opens
+ * the Sidebar, and the viewer lands on the file the Host cached — not on a
+ * blank panel and not on a path this side invented.
+ */
+it('opens a text attachment in the right Sidebar in real Web', async () => {
+  await installLocalBundle()
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'text-attachment')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('attachment-open')
+  await channelDialog.getByLabel('说明').fill('text attachment opens in the sidebar')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  await page.getByRole('button', { name: '# attachment-open', exact: true }).click()
+  await page.getByRole('heading', { name: '# attachment-open', exact: true }).waitFor()
+
+  const composer = page.getByRole('textbox', { name: '消息内容' })
+  await page.locator('[data-team-composer] input[type="file"]').setInputFiles([{
+    name: '验收记录.txt', mimeType: 'text/plain', buffer: Buffer.from('第一行\n第二行\n'),
+  }])
+  await page.getByText('验收记录.txt').first().waitFor()
+  await composer.fill('TXT-ATTACHMENT-MARKER 这条带文本附件')
+  await page.getByRole('button', { name: '发送', exact: true }).click()
+
+  const row = page.locator('[data-team-channel] article').filter({ hasText: 'TXT-ATTACHMENT-MARKER' })
+  await row.waitFor()
+  const block = row.getByRole('button', { name: /验收记录\.txt/ })
+  await block.waitFor()
+  // Permanent on the block: a cached attachment is a snapshot, and when it was
+  // sent is the fact that makes the copy readable.
+  // "副本" must be界面上的事实, not a comment: the block says the copy is the
+  // one taken when the file was sent, so a reader never mistakes it for the
+  // original as it stands now.
+  await expect.poll(() => row.getByText(/发送时的副本/).count()).toBeGreaterThanOrEqual(1)
+
+  // 11px body text on the chip's own fill, in both themes, measured from the
+  // computed style and its composited ancestors — never from token sources,
+  // which is how a 2.99:1 light-theme override slipped through once already.
+  // This assertion exists so the next palette change goes red on its own.
+  for (const scheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme: scheme })
+    await settleLayout(page)
+    const [copyReading] = await readTextContrast(page, ['[class*="attachmentChipCopy"]'])
+    expect(copyReading, `${scheme} copy line not rendered`).toBeDefined()
+    console.log(`[contrast:${scheme}] attachmentChipCopy ${copyReading!.ratio.toFixed(2)}:1 ${copyReading!.foreground} on ${copyReading!.background}`)
+    expect(copyReading!.ratio, `${scheme} attachment copy line ${copyReading!.text}`).toBeGreaterThanOrEqual(4.5)
+    await page.screenshot({ path: join(UI04_SHOTS, `message-text-attachment-${scheme}.png`), fullPage: true })
+  }
+  await page.emulateMedia({ colorScheme: 'light' })
+  await settleLayout(page)
+
+  // The second click on the same attachment is an ordinary gesture, not a
+  // failure: the rail focuses the tab that is already there instead of adding
+  // another, so nothing about it may surface as an error.
+  await page.getByRole('button', { name: /验收记录\.txt/ }).click()
+  await settleLayout(page)
+  await expect.poll(async () => (await openTabIds(page)).length, { timeout: 15_000 }).toBe(1)
+  expect(await row.locator('[class*="attachmentChipStatus"]').count()).toBe(0)
+  await page.screenshot({ path: join(UI04_SHOTS, 'message-text-attachment-reopened.png'), fullPage: true })
+
+  // Keyboard, not just pointer: focus reaches the block and Enter is the same
+  // gesture a click is.
+  await block.focus()
+  expect(await block.evaluate(element => element === document.activeElement)).toBe(true)
+  await page.keyboard.press('Enter')
+  await expect.poll(() => page.locator('[data-sidebar-right-panel][data-sidebar-right-open]').count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(1)
+  await expect.poll(() => page.locator('[data-sidebar-right-tab]').count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(1)
+  // The viewer landed on content, not on an empty shell: the cached bytes are
+  // what it renders, so a blank panel would fail this.
+  await expect.poll(() => page.getByText('第一行').count(), { timeout: 15_000 }).toBeGreaterThanOrEqual(1)
+  await page.screenshot({ path: join(UI04_SHOTS, 'message-text-attachment-sidebar.png'), fullPage: true })
+
+  expect(consoleWatch.pageErrors).toEqual([])
+}, 180_000)
+
+/**
+ * The failure branches and PDF, measured on the real interface (task #16).
+ *
+ * The unit specs pin the decision table, but they cannot show what the Human
+ * actually sees when the Host refuses: whether the block says something and
+ * stays clickable, or goes blank. That is what this case reads. Branches that
+ * cannot be triggered without forging Host state are left unverified on
+ * purpose rather than faked into a pass.
+ */
+/**
+ * One binary file that is not UTF-8, in a Session of its own.
+ *
+ * The Host's own rule is that an unknown extension falls back to plain-text
+ * reading, so a mere "weird type" never reaches a refusal. This sample is the
+ * one that can reach the boundary between "no registered type claims the
+ * address" and "a type claimed it and could not decode the bytes" — two
+ * failures with different next steps for the reader, and the block must state
+ * whichever actually happened rather than assuming either.
+ *
+ * It runs separately from the other branches because the PDF viewer caches a
+ * rejected lazy import for the life of the page: reusing one page across PDF
+ * states makes every reading after the first untrustworthy.
+ */
+it('states what happened for a binary attachment it cannot render', async () => {
+  await installLocalBundle()
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'attach-binary')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('attach-binary')
+  await channelDialog.getByLabel('说明').fill('binary sample')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  await page.getByRole('button', { name: '# attach-binary', exact: true }).click()
+  await page.getByRole('heading', { name: '# attach-binary', exact: true }).waitFor()
+  const composer = page.getByRole('textbox', { name: '消息内容' })
+  await composer.waitFor()
+
+  const bytes = Buffer.from([0x00, 0xff, 0xfe, 0x00, 0x81, 0x00, 0x9c, 0x00, 0x00, 0x02, 0xff])
+  await page.locator('[data-team-composer] input[type="file"]').setInputFiles([{ name: '样本.bin', mimeType: 'application/octet-stream', buffer: bytes }])
+  await page.getByText('样本.bin').first().waitFor()
+  await composer.fill('BIN-MARKER')
+  await page.getByRole('button', { name: '发送', exact: true }).click()
+  const row = page.locator('[data-team-channel] article').filter({ hasText: 'BIN-MARKER' })
+  await row.waitFor()
+  await row.getByRole('button', { name: /样本\.bin/ }).click()
+
+  // Either a stated failure or an opened viewer is an answer; a block that
+  // keeps saying "opening…" while nothing arrives is the one unacceptable end.
+  // A bare "opening…" is not an answer, so the wait is for a settled state:
+  // either the block reports a reason, or a tab appears. Polling on the mere
+  // presence of the status line would pass while nothing had been decided.
+  await expect.poll(async () => {
+    const text = await row.locator('[class*="attachmentChipStatus"]').textContent().catch(() => null)
+    const tabs = await page.locator('[data-sidebar-right-tab]').count()
+    const stillOpening = text !== null && text.includes('正在侧栏打开')
+    return tabs > 0 || (text !== null && !stillOpening)
+  }, { timeout: 25_000 }).toBe(true)
+  const outcome = await page.evaluate(() => ({
+    status: [...document.querySelectorAll('[class*="attachmentChipStatus"]')].map(node => node.textContent ?? ''),
+    tabs: [...document.querySelectorAll('[data-sidebar-right-tab]')].map(tab => tab.textContent ?? ''),
+    panel: (document.querySelector('[data-sidebar-right-panel]')?.textContent ?? '').slice(0, 240),
+    img: document.querySelectorAll('[data-sidebar-right-panel] img').length,
+    pre: document.querySelectorAll('[data-sidebar-right-panel] pre').length,
+  }))
+  console.log('[branch:binary]', JSON.stringify(outcome))
+  await page.screenshot({ path: join(UI04_SHOTS, 'attachment-binary.png'), fullPage: true })
+  expect(consoleWatch.pageErrors).toEqual([])
+}, 180_000)
+
+/**
+ * A Markdown attachment, which the Human could not open.
+ *
+ * `.md` has a shipped viewer of its own, and the rail's fallback text type also
+ * claims every session-scoped file address, so this must open rather than
+ * report that no viewer exists. The reading records which of the two answers
+ * the block actually gives.
+ */
+it('opens a Markdown attachment in real Web', async () => {
+  await installLocalBundle()
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'attach-markdown')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('attach-markdown')
+  await channelDialog.getByLabel('说明').fill('markdown sample')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  await page.getByRole('button', { name: '# attach-markdown', exact: true }).click()
+  await page.getByRole('heading', { name: '# attach-markdown', exact: true }).waitFor()
+  const composer = page.getByRole('textbox', { name: '消息内容' })
+  await composer.waitFor()
+
+  const markdown = Buffer.from('# 开发文档\n\n成员频道上下文域。\n\n- 第一行\n- 第二行\n', 'utf8')
+  await page.locator('[data-team-composer] input[type="file"]').setInputFiles([{ name: '开发文档-成员频道上下文域.md', mimeType: 'text/markdown', buffer: markdown }])
+  await page.getByText('开发文档-成员频道上下文域.md').first().waitFor()
+  await composer.fill('MD-MARKER')
+  await page.getByRole('button', { name: '发送', exact: true }).click()
+  const row = page.locator('[data-team-channel] article').filter({ hasText: 'MD-MARKER' })
+  await row.waitFor()
+  await row.getByRole('button', { name: /开发文档-成员频道上下文域\.md/ }).click()
+
+  await expect.poll(async () => {
+    const text = await row.locator('[class*="attachmentChipStatus"]').textContent().catch(() => null)
+    const tabs = await openTabIds(page)
+    const stillOpening = text !== null && text.includes('正在侧栏打开')
+    return tabs.length > 0 || (text !== null && !stillOpening)
+  }, { timeout: 25_000 }).toBe(true)
+  const outcome = await page.evaluate(() => ({
+    status: [...document.querySelectorAll('[class*="attachmentChipStatus"]')].map(node => node.textContent ?? ''),
+    tabs: [...new Set([...document.querySelectorAll('[data-sidebar-right-tab]')].map(tab => tab.getAttribute('data-sidebar-right-tab') ?? ''))],
+    panel: (document.querySelector('[data-sidebar-right-panel]')?.textContent ?? '').slice(0, 200),
+  }))
+  console.log('[md]', JSON.stringify(outcome))
+  await page.screenshot({ path: join(UI04_SHOTS, 'attachment-markdown.png'), fullPage: true })
+  expect(consoleWatch.pageErrors).toEqual([])
+}, 180_000)
+
+it('states each attachment failure branch and opens a PDF in real Web', async () => {
+  await installLocalBundle()
+  scaffold = await launchWebScaffold({ harnessHome: HOME, profile: { packages: [{ dir: STAGED_BUNDLE, enabled: true }] } })
+  browser = await chromium.launch({ headless: true, executablePath: CHROME })
+  const page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: 'zh-CN' })
+  const consoleWatch = watchConsole(page)
+  await page.goto(scaffold.authenticatedUrl)
+  await connectFreshWorkspaceZh(page, scaffold.workspaceCwd, 'attach-branches')
+  await page.getByRole('button', { name: '团队', exact: true }).click()
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('attach-branches')
+  await channelDialog.getByLabel('说明').fill('failure branches and pdf')
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+  await page.getByRole('button', { name: '# attach-branches', exact: true }).click()
+  await page.getByRole('heading', { name: '# attach-branches', exact: true }).waitFor()
+  await page.locator('[data-team-channel] textarea, [data-team-composer] textarea').first().waitFor()
+  const composer = page.getByRole('textbox', { name: '消息内容' })
+
+  // A real one-page PDF: the Host ships a PDF viewer keyed by extension, so
+  // this reads whether the address Team builds actually reaches it.
+  // A structurally complete PDF (catalog, pages, a content stream, a font and
+  // a real xref table), so a failure to render is the viewer's, not the
+  // sample's.
+  const pdfBytes = ((): Buffer => {
+    const body = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+      null,
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ]
+    const content = 'BT /F1 24 Tf 40 100 Td (PDF RENDER CHECK) Tj ET'
+    body[3] = `<< /Length ${content.length} >>\nstream\n${content}\nendstream`
+    const parts: Buffer[] = [Buffer.from('%PDF-1.4\n', 'latin1')]
+    const offsets: number[] = []
+    let length = parts[0]!.length
+    body.forEach((object, index) => {
+      offsets.push(length)
+      const chunk = Buffer.from(`${index + 1} 0 obj\n${object}\nendobj\n`, 'latin1')
+      parts.push(chunk)
+      length += chunk.length
+    })
+    const xref = length
+    const table = ['xref', `0 ${body.length + 1}`, '0000000000 65535 f ']
+      .concat(offsets.map(offset => `${String(offset).padStart(10, '0')} 00000 n `))
+      .concat(['trailer', `<< /Size ${body.length + 1} /Root 1 0 R >>`, 'startxref', String(xref), '%%EOF', ''])
+      .join('\n')
+    parts.push(Buffer.from(table, 'latin1'))
+    return Buffer.concat(parts)
+  })()
+  await page.locator('[data-team-composer] input[type="file"]').setInputFiles([{ name: '报告.pdf', mimeType: 'application/pdf', buffer: pdfBytes }])
+  await page.getByText('报告.pdf').first().waitFor()
+  await composer.fill('PDF-MARKER 这是 PDF 附件')
+  await page.getByRole('button', { name: '发送', exact: true }).click()
+  const pdfRow = page.locator('[data-team-channel] article').filter({ hasText: 'PDF-MARKER' })
+  await pdfRow.waitFor()
+  const pdfBlock = pdfRow.getByRole('button', { name: /报告\.pdf/ })
+  await pdfBlock.waitFor()
+  await pdfBlock.click()
+  // Whatever happens next is the evidence: an opened tab, or a stated failure.
+  // Both are acceptable answers; a silent nothing is not.
+  // Wait for the real outcome, not the click's first frame: the column opens
+  // and creates the tab before the document renderer paints, so a snapshot
+  // taken immediately reads "no tab" for a PDF that did open.
+  await expect.poll(async () => {
+    const opened = await page.locator('[data-sidebar-right-panel][data-sidebar-right-open]').count()
+    const tabs = await page.locator('[data-sidebar-right-tab]').count()
+    const stated = await pdfRow.locator('[class*="attachmentChipStatus"]').count()
+    return (opened > 0 && tabs > 0) || stated > 0
+  }, { timeout: 20_000 }).toBe(true)
+  // Expand the column: the tab list is only rendered while it is open, so a
+  // collapsed rail would report zero tabs whether or not anything is there.
+  await page.screenshot({ path: join(UI04_SHOTS, 'attachment-pdf-rail.png'), fullPage: true })
+  const pdfOutcome = await page.evaluate(() => ({
+    opened: document.querySelectorAll('[data-sidebar-right-panel][data-sidebar-right-open]').length,
+    panelPresent: document.querySelectorAll('[data-sidebar-right-panel]').length,
+    hidden: [...document.querySelectorAll('[data-sidebar-right-panel]')].map(node => node.getAttribute('aria-hidden')),
+    tabs: [...document.querySelectorAll('[data-sidebar-right-tab]')].map(tab => tab.textContent ?? ''),
+    canvas: document.querySelectorAll('[data-sidebar-right-panel] canvas, [data-sidebar-right-panel] iframe, [data-sidebar-right-panel] embed').length,
+    status: [...document.querySelectorAll('[class*="attachmentChipStatus"]')].map(node => node.textContent ?? ''),
+  }))
+  console.log('[branch:pdf]', JSON.stringify(pdfOutcome))
+  // Loading is not rendering. Wait for the viewer to place actual document
+  // content — a canvas, a page count, or rendered text — so the reading states
+  // what the reader ends up seeing rather than that a spinner appeared.
+  await expect.poll(async () => page.evaluate(() => {
+    const local = document.querySelector('[data-sidebar-right-panel]')
+    if (local === null) return 0
+    // A canvas is rendered document content. Text alone is not: the panel also
+    // carries the file name and the viewer's own path, which would otherwise
+    // read as content.
+    return local.querySelectorAll('canvas, iframe, embed, [data-pdf-page]').length
+  }), { timeout: 30_000 }).toBeGreaterThan(0)
+  const pdfFinal = await page.evaluate(() => {
+    const local = document.querySelector('[data-sidebar-right-panel]')
+    return {
+      canvas: local?.querySelectorAll('canvas').length ?? 0,
+      canvases: [...(local?.querySelectorAll('canvas') ?? [])].map(node => `${node.width}x${node.height}`),
+      text: (local?.textContent ?? '').slice(0, 160),
+      stillLoading: (local?.textContent ?? '').includes('文档渲染中'),
+    }
+  })
+  console.log('[branch:pdf:final]', JSON.stringify(pdfFinal))
+  await page.screenshot({ path: join(UI04_SHOTS, 'attachment-pdf-rendered.png'), fullPage: true })
+  // The tab list is only rendered while the column is expanded, so a DOM count
+  // of zero cannot tell "never opened" from "opened, column collapsed". The
+  // sidebar's own inventory answers that: it is the record every open writes.
+  const openTabs = await page.evaluate(() => {
+    const store = (window as unknown as { __dshSidebarTabs?: unknown }).__dshSidebarTabs
+    return store === undefined ? null : JSON.stringify(store)
+  })
+  console.log('[branch:pdf:tabs]', String(openTabs))
+  await page.screenshot({ path: join(UI04_SHOTS, 'attachment-pdf-open.png'), fullPage: true })
+
+  // Expired: the entry is gone from the Host cache. The block must say the
+  // copy is gone rather than fail silently or claim a viewer is missing.
+  const goneRow = page.locator('[data-team-channel] article').filter({ hasText: 'PDF-MARKER' })
+  const goneAttachmentId = await page.evaluate(() => {
+    const chip = document.querySelector('[class*="attachmentChip"]')
+    return chip === null ? null : chip.getAttribute('title')
+  })
+  void goneAttachmentId
+  const attachmentsRoot = join(HOME, 'agent-team', 'attachments', 'v1')
+  const cacheDirs = await readdir(attachmentsRoot).catch(() => [] as string[])
+  for (const dir of cacheDirs) await rm(join(attachmentsRoot, dir), { recursive: true, force: true })
+  await goneRow.getByRole('button', { name: /报告\.pdf/ }).click()
+  await expect.poll(() => goneRow.locator('[class*="attachmentChipStatus"]').textContent(), { timeout: 15_000 }).toContain('已被清理')
+  console.log('[branch:expired]', await goneRow.locator('[class*="attachmentChipStatus"]').textContent())
+  await page.screenshot({ path: join(UI04_SHOTS, 'attachment-expired.png'), fullPage: true })
+
+  // Left unverified on purpose: the "no Session on screen" branch. Leaving the
+  // discussion keeps the right Sidebar's panel mounted (collapsed), so this
+  // surface cannot reach `mounted === undefined` without forging the Host's
+  // selection state. The unit spec pins that branch
+  // (`attachment-open.spec.ts`); what is missing here is a real-interface
+  // reading, and it stays missing rather than being faked into a pass.
+
+  expect(consoleWatch.pageErrors).toEqual([])
 }, 180_000)

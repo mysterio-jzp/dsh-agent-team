@@ -7,7 +7,7 @@ const attachment = (value: string, mediaType = 'image/png') => ({
   attachmentId: `attachment:${value}` as AgentTeamAttachmentId,
   mediaType,
 })
-const image: AgentTeamGetAttachmentResult = { name: 'design.png', mediaType: 'image/png', byteSize: 3, bytesBase64: 'cG5n' }
+const image: AgentTeamGetAttachmentResult = { name: 'design.png', mediaType: 'image/png', byteSize: 3, bytesBase64: 'cG5n', path: '/host/cache/attachment/design.png', uploadedAt: '2026-10-20T03:00:00.000Z' }
 
 describe('attachment preview failure handling', () => {
   it('settles a gone entry on the stable code and never reaches the Host again', async () => {

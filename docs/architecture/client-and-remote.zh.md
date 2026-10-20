@@ -78,5 +78,30 @@ UI work 的边界如下：
 - Message、Activity、Claim 和 Task 的 presentation 要保持区分且用户可读。不要暴露 opaque refs 或 internal enums。
 - Durable mutations 不做 optimistic update。失败时保留 input，并渲染下一份 Host projection。
 - 保持 Team mode enter/leave、refresh recovery、slot restoration 和 narrow layout behavior。
+## 在右侧栏打开缓存附件
+非图片附件块把它的缓存副本开到 Shell 右侧栏。读取走 `getAttachment` 打 Host 缓存；地址是 Session 作用域的 `dsh-resource://file/…`，由右侧栏的兜底文本类型认领，再按扩展名分发。
+
+`ctx.sidebarRight.openResource` 返回 `void`、不上报任何东西：对一个已在屏、但从未被 adopt 的 Session，它既不记录标签页也不抛错，于是「右侧栏收下了地址」与「什么都没发生」在调用点无法区分。
+
+附件块因此在开完之后读右侧栏自己的 `openTabs` 记录，找那个地址对应的标签页。判定依据是这个记录，绝不是标签页总数：右侧栏对已存在的标签页是**聚焦**而非新增，所以对同一附件再点一次时总数不变，但打开是照常发生的。
+
+三种结果保持分开，因为只有第一种是这次调用真正确立的事实：
+
+- **记录里存在目标标签页** —— 已打开。
+- **注册的类型拒绝该地址，或无人认领** —— `unsupported`，陈述为没有可用的查看器。
+- **既没抛错、也没有对应标签页** —— `unknown`。`open` 什么也不回答，所以这次调用说不出原因，只能说自己没能确认打开。
+
+**`unknown` 这一支只有单测覆盖，没有真实界面读数**，因为在真实界面上要走到那个状态，得伪造 Host 的选择状态。不要把它读成真机已验。
+
+三层事实保持分开，文案也保持分开：
+
+- **没有注册的类型认领这个地址** —— `openResource` 抛错，块上陈述「这个格式没有可用的查看器」。
+- **查看器认领了地址但解不开字节** —— 查看器在自己的面板里陈述，Team 完全看不到。二进制非 UTF-8 文件落在这里，因为 Host 对未知扩展名退回纯文本读取，而不是拒收。
+- **缓存条目已不存在** —— `team/attachment-not-found`，渲染成「附件副本已被清理，请让发送方重发」。
+
+Host 查看器说「该格式文件暂时无法预览」，而块上说「这个格式没有可用的查看器」。两种说法**有意不统一**：查看器知道它认领了却没解开，Team 只知道没人认领。统一措辞会让其中一方断言它并不知道的事。
+
+右侧栏头部显示查看器给出的绝对缓存路径，其中含 Host 用户名。Team 不做遮蔽——那是查看器自己的呈现——而把含该路径的截图对外分享，会泄露用户名与本地目录结构。
+
 
 UI redesign 已完成。需要理解当时的取舍时，查 [`.scratch/archive/2026-08/ui-redesign/`](../../.scratch/archive/2026-08/ui-redesign/)。它是历史设计背景，不是当前实现权威。UI 改动的当前验收规则见 [`development/README.zh.md`](../development/README.zh.md)。

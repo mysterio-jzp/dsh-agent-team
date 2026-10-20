@@ -444,6 +444,17 @@ export interface AgentTeamGetAttachmentResult {
   readonly mediaType: string
   readonly byteSize: number
   readonly bytesBase64: string
+  /**
+   * Absolute path of the cached payload, resolved by the Host from the
+   * `attachmentId` alone.
+   *
+   * The Client builds a right-Sidebar address from this and never invents a
+   * path of its own: what it can ask the Host to resolve is exactly the set of
+   * attachments it can name, not any path on the machine.
+   */
+  readonly path: string
+  /** When the payload was cached, so a reader can tell the copy from the original. */
+  readonly uploadedAt: string
 }
 
 /** Human profile read: name + avatar reference + version footnote facts. */

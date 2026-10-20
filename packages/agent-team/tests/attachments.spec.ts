@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, sep } from 'node:path'
+import { isAbsolute, join, sep } from 'node:path'
 
 /** Escape a literal string for embedding in a RegExp (path separators differ per platform). */
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -201,6 +201,12 @@ describe('Agent Team attachment remotes', () => {
     const readBack = await ctx.agentTeam.getAttachment({ attachmentId: uploaded.attachmentId })
     expect(readBack.bytesBase64).toBe(Buffer.from('png-bytes').toString('base64'))
     expect(readBack.name).toBe('design.png')
+    // The path a reader is handed must name the file whose bytes just came
+    // back, and it must be the Host's own cache copy: the Client builds a
+    // Sidebar address from it instead of inventing a path of its own.
+    expect(isAbsolute(readBack.path)).toBe(true)
+    expect(await readFile(readBack.path, 'utf8')).toBe('png-bytes')
+    expect(Number.isNaN(Date.parse(readBack.uploadedAt))).toBe(false)
 
     await expect(ctx.agentTeam.putAttachment({
       requestId: requestId('big'), workspaceId: alpha,

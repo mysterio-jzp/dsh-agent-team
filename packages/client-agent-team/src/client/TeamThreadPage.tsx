@@ -60,6 +60,7 @@ interface TeamThreadPageProps {
   readonly loadMembers: TeamConversationProps['loadMembers']
   readonly drafts: TeamDraftStore
   readonly getAttachment: TeamConversationProps['getAttachment']
+  readonly openAttachment?: TeamConversationProps['openAttachment'] | undefined
   readonly reply: TeamConversationProps['reply']
   readonly changeTask: TeamConversationProps['changeTask']
   readonly promoteThread: TeamConversationProps['promoteThread']
@@ -143,7 +144,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   const {
     workspaceId, humanName, humanAvatarUrl, memberAvatars, channelRef, taskRef, threadRef, taskNumber, backToWorkspace, selectChannel, selectThread, resolveTaskRefs, resolveThreadRefs, openMemberSession, putAttachment,
     loadChannels, readThread, loadThreadHistory, threadObservations, removeThreadMember,
-    subscribeChanges, loadMembers, drafts, getAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, loadHumanTodos, changeHumanTodo, t,
+    subscribeChanges, loadMembers, drafts, getAttachment, openAttachment, reply, changeTask, promoteThread, resolveMessageRefs, replyCapabilities, loadHumanTodos, changeHumanTodo, t,
   } = props
   const threadRequest = { threadRef, ...(taskRef === undefined ? {} : { taskRef }) }
   const [projection, setProjection] = useState<ReadProjection>()
@@ -932,6 +933,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         body={fact.message.body}
         attachments={fact.message.attachments}
         loadAttachment={getAttachment}
+        {...(openAttachment === undefined ? {} : { openAttachment })}
         t={t}
         occurredAt={fact.message.occurredAt}
         mentionNames={stableMentionNames(fact.mentions, mentionHandlesMap, humanName)}
