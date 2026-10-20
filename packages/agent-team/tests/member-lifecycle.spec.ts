@@ -5779,7 +5779,7 @@ describe('Agent Team President office', () => {
     // A non-holder is refused by the Host and by the ledger, and the refusal
     // names who holds the office so the Member can route the idea.
     await expect(ctx.agentTeam.sendMessageForAgent(builderAgent, { requestId: requestId('task-refused'), workspaceId,
-      channelRef: channel.channel.channelRef, body: 'Start work', asTask: true })).rejects.toThrow(/@lead holds the office/)
+      channelRef: channel.channel.channelRef, body: 'Start work', asTask: true })).rejects.toThrow(/@lead holds the office .*with team_propose/)
     // A plain Message is still open to everyone.
     const plain = await ctx.agentTeam.sendMessageForAgent(builderAgent, { requestId: requestId('task-plain'), workspaceId,
       channelRef: channel.channel.channelRef, body: 'Thinking out loud' })
