@@ -1,4 +1,4 @@
-import type { AgentTeamActivity, AgentTeamClaim, AgentTeamClientMemberStatus, AgentTeamMemberDiagnosticClass, AgentTeamMemberId, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamActivity, AgentTeamChannelRowReason, AgentTeamClaim, AgentTeamClientChannelRow, AgentTeamClientMemberStatus, AgentTeamMemberDiagnosticClass, AgentTeamMemberId, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadRef } from '@contexera/dsh-agent-team/types'
 import { hasAllMarker, resolveBodyMentions, scanBodyHandles } from '@contexera/dsh-agent-team/mentions'
 import type { TeamKey } from './locales.ts'
 import type { TeamConversationProps } from './slots.ts'
@@ -46,6 +46,39 @@ export function formatRiskClass(
 ): { readonly label: string, readonly sentenceKey: TeamKey } {
   const [labelKey, sentenceKey] = RISK_CLASS_KEYS[status.diagnostic?.class ?? 'runtime']
   return { label: t(labelKey), sentenceKey }
+}
+
+/**
+ * Why one Channel row cannot be opened, as a sentence in the interface
+ * language.
+ *
+ * The table is `satisfies Record<AgentTeamChannelRowReason, …>`, so adding a
+ * reason code on the Host side fails compilation here instead of shipping a
+ * row with no explanation. `unknown` is not a fallback reading of the other
+ * codes: it is the code the Host sends when the Client is older than it, and
+ * `channelRowReasonKey` keeps any unrecognised value on that same sentence —
+ * a row must never render a raw code at a Human.
+ */
+const CHANNEL_ROW_REASON_KEYS = {
+  'session-create-failed': 'channelRowReasonSessionCreateFailed',
+  'activation-failed': 'channelRowReasonActivationFailed',
+  'origin-unrecorded': 'channelRowReasonOriginUnrecorded',
+  'unbound': 'channelRowReasonUnbound',
+  'unknown': 'channelRowReasonUnknown',
+} as const satisfies Record<AgentTeamChannelRowReason, TeamKey>
+
+function channelRowReasonKey(reason: AgentTeamChannelRowReason): TeamKey {
+  // `in` rather than a switch: a code from a newer Host reaches a Client built
+  // before it, and that path must fall through to the generic sentence.
+  return reason in CHANNEL_ROW_REASON_KEYS ? CHANNEL_ROW_REASON_KEYS[reason] : CHANNEL_ROW_REASON_KEYS.unknown
+}
+
+/** The sentence under a Channel row that cannot be opened, or `undefined` when it can. */
+export function formatChannelRowReason(
+  row: Pick<AgentTeamClientChannelRow, 'reason'>,
+  t: TeamConversationProps['t'],
+): string | undefined {
+  return row.reason === undefined ? undefined : t(channelRowReasonKey(row.reason))
 }
 
 /**

@@ -162,6 +162,41 @@ export type AgentTeamWorkDomainState =
   | { readonly kind: 'unbound'; readonly memberId: AgentTeamMemberId; readonly scopeKey: AgentTeamMemberScopeKey }
   | { readonly kind: 'bound'; readonly binding: AgentTeamMemberScopeSession }
 
+/**
+ * Why one Channel row cannot be opened, as a code rather than a sentence.
+ *
+ * The Client owns the wording, so a failure reads in the reader's own language
+ * and never leaks `detail` — which addresses the Host operator (refs, session
+ * ids) and would be noise in a sidebar. `unknown` is the landing place for a
+ * code this Client was not built with: a row with no reason at all would read
+ * as a rendering bug, and inventing a specific cause is worse than admitting
+ * the row cannot be explained.
+ */
+export type AgentTeamChannelRowReason =
+  | 'session-create-failed' // the Channel Session itself could not be created
+  | 'activation-failed' // bound, but the Session never started
+  | 'origin-unrecorded' // the act that granted the membership is missing, so nothing was created
+  | 'unbound' // a Member domain exists but its durable binding is gone
+  | 'unknown' // a code this projection was not taught: render the generic sentence
+
+/**
+ * One Channel in a Member's session tree: which Channel, which Session, and
+ * whether that Session can be opened right now.
+ *
+ * These three states are the render contract. A Client draws the row without
+ * consulting presence or activation, so a Member whose own row is busy still
+ * shows its Channels faithfully.
+ */
+export interface AgentTeamClientChannelRow {
+  readonly channelRef: AgentTeamChannelRef
+  readonly channelName: string
+  /** The Channel Session; absent only when nothing was ever created for it. */
+  readonly sessionId?: SessionId | undefined
+  readonly state: 'ready' | 'creating' | 'unopenable'
+  /** Present exactly when `state` is `unopenable`; the Client turns it into a sentence. */
+  readonly reason?: AgentTeamChannelRowReason | undefined
+}
+
 /** Durable identity and lifecycle intent of one team-managed Agent. */
 export interface AgentTeamAgentMember {
   readonly memberId: AgentTeamMemberId
@@ -317,6 +352,14 @@ export type AgentTeamClientMember = Omit<AgentTeamAgentMember, 'privateMemoryPat
 export interface AgentTeamClientMemberStatus extends Omit<AgentTeamAgentMemberStatus, 'member'> {
   readonly member: AgentTeamClientMember
   readonly workspaceIds: readonly WorkspaceId[]
+  /**
+   * This Member's Channels, one row each, in Channel creation order.
+   *
+   * Empty is meaningful: the Member joined no Channel. A row is here because
+   * the membership is durable, so a Channel the Member belongs to never goes
+   * missing from the tree — it reports `unopenable` with a reason instead.
+   */
+  readonly channels: readonly AgentTeamClientChannelRow[]
 }
 
 /** Human roster: omit Workspace to select from the global Member catalog. */

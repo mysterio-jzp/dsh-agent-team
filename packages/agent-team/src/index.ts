@@ -73,7 +73,9 @@ import type {
   AgentTeamClaimList,
   AgentTeamClaimRequest,
   AgentTeamClaimResult,
+  AgentTeamClientChannelRow,
   AgentTeamClientMemberStatus,
+  AgentTeamChannelRowReason,
   AgentTeamContextCheckpointRef,
   AgentTeamContextJudgeRequest,
   AgentTeamContextJudgeResult,
@@ -1463,7 +1465,67 @@ export default class AgentTeam extends TypertRemoteService {
           agentMdPath: join(memberMemoryDirectoryPath({ memberId: member.memberId, privateMemoryPath: _privateMemoryPath }), 'agent.md'),
         }),
         workspaceIds: ledger.workspacesOf(member.memberId),
+        channels: this.channelRowsFor(member.memberId),
       }))
+  }
+
+  /**
+   * One Member's Channels as session-tree rows.
+   *
+   * A row exists for every durable Channel membership, so a membership whose
+   * Session could not be created still appears — as `unopenable` with a reason
+   * — rather than vanishing and leaving the Human unable to tell "no Channel"
+   * from "a broken one". Order follows Channel creation so the tree does not
+   * reshuffle between loads.
+   *
+   * The three states read the durable binding first and the live surface
+   * second. A binding with no live generation is `creating`: the Session was
+   * committed to the ledger and either has not started or is starting, which
+   * is the window a Human must not be told is `ready`.
+   */
+  private channelRowsFor(memberId: AgentTeamMemberId): readonly AgentTeamClientChannelRow[] {
+    const ledger = this.requireLedger()
+    const rows: { readonly row: AgentTeamClientChannelRow; readonly createdAt: number }[] = []
+    for (const { memberId: owner, channelRef, channelName, channelCreatedAt } of ledger.channelMemberships()) {
+      if (owner !== memberId) continue
+      const scopeKey = channelMemberScopeKey(channelRef)
+      const binding = ledger.memberScopeSessionFor(memberId, scopeKey)
+      const reason = this.channelRowReason(memberId, binding)
+      const row: AgentTeamClientChannelRow = Object.freeze({
+        channelRef, channelName,
+        ...(binding === undefined ? {} : { sessionId: binding.sessionId }),
+        state: reason !== undefined ? 'unopenable' : this.handleFor(memberId, scopeKey) === undefined ? 'creating' : 'ready',
+        ...(reason === undefined ? {} : { reason }),
+      })
+      rows.push({ row, createdAt: channelCreatedAt })
+    }
+    rows.sort((left, right) => left.createdAt - right.createdAt)
+    return Object.freeze(rows.map(entry => entry.row))
+  }
+
+  /**
+   * Why one Channel row cannot be opened, or `undefined` when it can.
+   *
+   * Only the shapes the Host can actually distinguish are reported as their own
+   * code. Anything unrecognised lands on `unknown` instead of guessing: the
+   * generic sentence tells the Human the row is broken, which is true, while a
+   * made-up cause would send them after the wrong thing.
+   */
+  private channelRowReason(
+    memberId: AgentTeamMemberId, binding: AgentTeamMemberScopeSession | undefined,
+  ): AgentTeamChannelRowReason | undefined {
+    const diagnostic = this.memberFailures.get(memberId)?.activation
+    if (binding === undefined) {
+      // Nothing was created: either the originating act is unrecorded, which
+      // the activation carries as `domain-unattributed`, or creation failed
+      // for a cause recorded on the Member's activation slot.
+      if (diagnostic === undefined) return 'session-create-failed'
+      return diagnostic.class === 'domain-unattributed' ? 'origin-unrecorded' : 'activation-failed'
+    }
+    // Bound but no live generation: a failed start is the only state that makes
+    // the row unopenable. A healthy row in that window reports `creating`.
+    if (diagnostic !== undefined && diagnostic.sessionId === binding.sessionId) return 'activation-failed'
+    return undefined
   }
 
   /** Emit a current baseline, then coalesced invalidations until canceled. */

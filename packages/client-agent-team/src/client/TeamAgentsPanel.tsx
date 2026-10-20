@@ -13,6 +13,7 @@ import { moveSidebarItem, useSidebarOrder } from './sidebar-order.ts'
 import { useSidebarSectionOpen, setSidebarSectionOpen } from './sidebar-sections.ts'
 import { mintRequestId } from './requests.ts'
 import { diagnosticText, restartOffered } from './TeamPresenceDot.tsx'
+import { formatChannelRowReason } from './team-formatters.ts'
 import { TeamRowMenu } from './TeamRowMenu.tsx'
 import { TeamSidebarSection } from './TeamSidebarSection.tsx'
 import { AgentEditorDialog, ModelPickerField, sameModel, warmModelCatalog } from './TeamMemberEditor.tsx'
@@ -186,7 +187,10 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
     try {
       const result = await addMember(request)
       if (result.ok) {
-        const committed = { ...result.value.status, workspaceIds: result.value.workspaceIds }
+        // A just-created Member holds no Channel yet, so the row set is known
+        // rather than fetched: the add request grants none, and the next change
+        // notification replaces this projection with the Host's own.
+        const committed = { ...result.value.status, workspaceIds: result.value.workspaceIds, channels: [] as const }
         setMembers(current => {
           const retained = current.filter(status => status.member.memberId !== committed.member.memberId)
           return committed.member.state === 'inactive' || committed.member.state === 'archived' ? retained : [...retained, committed]
@@ -294,6 +298,51 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
 }
 
 /**
+ * The Channel layer of one Member's session tree: a row per Channel the Member
+ * belongs to, each naming its state and — when it cannot be opened — the
+ * sentence explaining why.
+ *
+ * A row is a button only while it has a Session and no failure, so the tree
+ * never offers a click that goes nowhere. The reason lives in the row's own
+ * text rather than a title or tooltip: it has to be readable without hovering,
+ * and a tooltip is invisible to a touch screen, a keyboard-only reader, and
+ * anyone scanning the list.
+ */
+function ChannelRows({ status, openMemberSession, setRowAlert, t }: {
+  readonly status: AgentTeamClientMemberStatus
+  readonly openMemberSession: TeamSidebarProps['openMemberSession']
+  readonly setRowAlert: (message: string) => void
+  readonly t: TeamSidebarProps['t']
+}) {
+  return (
+    <ul className={css.channelRows} aria-label={t('channelRowsLabel', { name: status.member.handle.replace(/^@/, '') })}>
+      {status.channels.map(row => {
+        const reason = formatChannelRowReason(row, t)
+        const openable = row.state === 'ready' && row.sessionId !== undefined
+        const label = row.state === 'ready' ? t('channelRowReady') : row.state === 'creating' ? t('channelRowCreating') : t('channelRowUnopenable')
+        const body = (
+          <>
+            <span className={css.channelRowName}>{row.channelName}</span>
+            <span className={css.channelRowState} data-channel-row-state={row.state}>{label}</span>
+          </>
+        )
+        return (
+          <li key={row.channelRef} className={css.channelRow} data-channel-row data-channel-row-ok={openable || undefined}>
+            {openable
+              ? <button type="button" className={css.channelRowSelect} onClick={() => { openMemberSession(row.sessionId!, message => { setRowAlert(t('openAgentSessionFailed', { name: row.channelName, message })) }) }}>{body}</button>
+              : <div className={css.channelRowSelect} aria-disabled="true">{body}</div>}
+            {/* Always rendered when there is a reason, never clamped or hidden:
+                an unopenable row with no visible reason is the failure this
+                layer exists to prevent. */}
+            {reason !== undefined && <p className={css.channelRowReason}>{reason}</p>}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
+/**
  * One sidebar Agent row: the select button opens the Member's own Session
  * conversation page, the avatar carries identity plus the presence badge, and
  * the row menu opens the editor.
@@ -397,6 +446,10 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
           />
         </span>
       </div>
+      {/* `channels` is read defensively: a Client can meet a Host older than the
+          row projection and must render the Agent line without the Channel
+          layer rather than crash the whole sidebar slot. */}
+      {(status.channels?.length ?? 0) > 0 && <ChannelRows status={status} openMemberSession={openMemberSession} setRowAlert={setRowAlert} t={t} />}
       {!archiving && rowAlert !== undefined && <div className={css.rowAlert} role="alert">{rowAlert}</div>}
       {archiving && (
         <Modal

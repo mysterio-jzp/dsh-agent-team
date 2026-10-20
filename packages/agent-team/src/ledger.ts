@@ -5098,14 +5098,23 @@ export class AgentTeamLedger {
   channelMemberships(): readonly {
     readonly memberId: AgentTeamMemberId
     readonly channelRef: AgentTeamChannelRef
+    /** The Channel's display name, so a reader of the pair needs no second lookup. */
+    readonly channelName: string
+    /** Channel creation order: the stable order a session tree lists rows in. */
+    readonly channelCreatedAt: number
   }[] {
-    const pairs: { readonly memberId: AgentTeamMemberId; readonly channelRef: AgentTeamChannelRef }[] = []
+    const pairs: {
+      readonly memberId: AgentTeamMemberId
+      readonly channelRef: AgentTeamChannelRef
+      readonly channelName: string
+      readonly channelCreatedAt: number
+    }[] = []
     for (const [channelRef, members] of this.state.memberships) {
       const channel = this.state.channels.get(channelRef)
       if (channel === undefined || channel.state === 'archived') continue
       for (const memberId of members) {
         if (memberId === AGENT_TEAM_HUMAN_MEMBER_ID) continue
-        pairs.push({ memberId, channelRef })
+        pairs.push({ memberId, channelRef, channelName: channel.name, channelCreatedAt: channel.createdAtSequence })
       }
     }
     return Object.freeze(pairs)

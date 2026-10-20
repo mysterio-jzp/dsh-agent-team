@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { AgentTeamActivity, AgentTeamClaim, AgentTeamClientMemberStatus, AgentTeamMemberDiagnostic, AgentTeamMemberId } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamActivity, AgentTeamChannelRowReason, AgentTeamClaim, AgentTeamClientMemberStatus, AgentTeamMemberDiagnostic, AgentTeamMemberId } from '@contexera/dsh-agent-team/types'
 import { AGENT_TEAM_HUMAN_HANDLE } from '@contexera/dsh-agent-team/host'
 import { MENTION_BODY_FIXTURE } from '../../agent-team/tests/fixtures/mention-bodies.ts'
 import { zh } from '../src/client/locales.ts'
 import type { TeamConversationProps } from '../src/client/slots.ts'
-import { allMentionMembers, containsAllMention, containsMention, firstSentence, formatAbsoluteTime, formatActivity, formatClaimState, formatInboxTime, formatMessageTime, formatTaskStatus, HUMAN_HISTORIC_HANDLE, HUMAN_MEMBER_ID, isPlainTextBody, isSingleBrandedRef, mentionNamesOf, mentionsHuman, formatRiskClass, mentionedMemberIds, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, taskStatusDot } from '../src/client/team-formatters.ts'
+import { allMentionMembers, containsAllMention, containsMention, firstSentence, formatChannelRowReason, formatAbsoluteTime, formatActivity, formatClaimState, formatInboxTime, formatMessageTime, formatTaskStatus, HUMAN_HISTORIC_HANDLE, HUMAN_MEMBER_ID, isPlainTextBody, isSingleBrandedRef, mentionNamesOf, mentionsHuman, formatRiskClass, mentionedMemberIds, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, taskStatusDot } from '../src/client/team-formatters.ts'
 
 const t = ((key: keyof typeof zh, params?: Record<string, string | number>) => {
   let value: string = zh[key]
@@ -396,5 +396,26 @@ describe('Team presentation formatters', () => {
     expect(mentionsHuman(['member:builder' as AgentTeamMemberId])).toBe(false)
     expect(mentionsHuman([])).toBe(false)
     expect(mentionsHuman(['member:builder' as AgentTeamMemberId, HUMAN_MEMBER_ID])).toBe(true)
+  })
+})
+
+describe('Channel row reasons', () => {
+  it('says the generic sentence for a code this Client was not taught', () => {
+    // A Host newer than this Client sends a reason the table does not carry.
+    // Rendering the raw code, or nothing at all, is the failure this prevents.
+    expect(formatChannelRowReason({ reason: 'a-code-from-a-newer-host' as AgentTeamChannelRowReason }, t)).toBe(zh.channelRowReasonUnknown)
+  })
+
+  it('says the matched sentence for every code it does know', () => {
+    // Pinned to the wording, not just "not the generic one": a lookup that
+    // silently fell back for a known code would still pass the case above.
+    expect(formatChannelRowReason({ reason: 'unbound' }, t)).toBe(zh.channelRowReasonUnbound)
+    expect(formatChannelRowReason({ reason: 'origin-unrecorded' }, t)).toBe(zh.channelRowReasonOriginUnrecorded)
+    expect(formatChannelRowReason({ reason: 'activation-failed' }, t)).toBe(zh.channelRowReasonActivationFailed)
+    expect(formatChannelRowReason({ reason: 'session-create-failed' }, t)).toBe(zh.channelRowReasonSessionCreateFailed)
+  })
+
+  it('says nothing at all for a row that can be opened', () => {
+    expect(formatChannelRowReason({}, t)).toBeUndefined()
   })
 })

@@ -43,6 +43,7 @@ function status(handle: string, memberId: string): AgentTeamClientMemberStatus {
     presence: 'available',
     capabilityState: 'applied',
     workspaceIds: ['workspace:alpha' as never],
+    channels: [],
   }
 }
 
