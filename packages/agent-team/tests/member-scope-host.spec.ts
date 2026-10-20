@@ -21,7 +21,7 @@ import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY, memberScopeSession, threadMemberScopeKey } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type {
@@ -133,7 +133,7 @@ describe('one Message, one work domain', () => {
     const { ctx } = await harness()
     const { channelRef, threadRef } = await channelWithThread(ctx)
     const member = await addMember(ctx, channelRef, 'reader')
-    const scopeKey = threadMemberScopeKey(threadRef)
+    const scopeKey = channelMemberScopeKey(channelRef)
     // The discussion is a real domain: bound in the ledger for its first delivery.
     const discussionSessionId = SessionId('session:reader-discussion')
     await ctx.agentTeam['ledger']!.bindMemberScopeSession({
@@ -216,7 +216,7 @@ describe('work-domain activation paths', () => {
       .toEqual([cwd, missingDirectory])
     const bound = await ctx.agentTeam['ledger']!.bindMemberScopeSession({ requestId: requestId('missing-dir-bind'), actor: agentTeamHumanActor(),
       workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
-      binding: memberScopeSession(threadMemberScopeKey(threadRef), SessionId('session:path-check-domain')) })
+      binding: memberScopeSession(channelMemberScopeKey(channelRef), SessionId('session:path-check-domain')) })
     if (!bound.committed) throw new Error('domain binding unexpectedly resolved instead of committing')
 
     const defaultSession = ctx.sessions.create(member.sessionId, { meta: { cwd } })
@@ -238,7 +238,7 @@ describe('work-domain activation paths', () => {
       workspaceId: alpha, channelRef, workingDirectories: [domainRoot, cwd] })
     const bound = await ctx.agentTeam['ledger']!.bindMemberScopeSession({ requestId: requestId('cwd-dir-bind'), actor: agentTeamHumanActor(),
       workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
-      binding: memberScopeSession(threadMemberScopeKey(threadRef), SessionId('session:cwd-check-domain')) })
+      binding: memberScopeSession(channelMemberScopeKey(channelRef), SessionId('session:cwd-check-domain')) })
     if (!bound.committed) throw new Error('domain binding unexpectedly resolved instead of committing')
 
     ctx.agentTeam['memberRuntime']['initializePrivateMemory'] = async () => {}
@@ -262,22 +262,57 @@ describe('work-domain activation paths', () => {
   })
 })
 
-describe('the rollover entry a discussion domain refuses', () => {
-  it('throws the readable reason instead of answering, and names the Session that can roll over', async () => {
+describe('the rollover entry by work-domain kind', () => {
+  // A Channel domain is a long-lived context shared by every discussion in the
+  // Channel, so it renews exactly like the Member default. Gating it off would
+  // leave its container growing with only in-place reduction as relief.
+  it('admits a Channel domain instead of refusing it', async () => {
     const { ctx } = await harness()
-    const { channelRef, threadRef } = await channelWithThread(ctx)
+    const { channelRef } = await channelWithThread(ctx)
     const member = await addMember(ctx, channelRef, 'reader')
-    const scopeKey = threadMemberScopeKey(threadRef)
-    const discussionSessionId = SessionId('session:reader-discussion')
+    const scopeKey = channelMemberScopeKey(channelRef)
     const ownSession = ctx.sessions.create(member.sessionId, { meta: { cwd } })
-    const discussionSession = ctx.sessions.create(discussionSessionId, { meta: { cwd } })
+    const domainSession = ctx.sessions.create(SessionId('session:reader-domain'), { meta: { cwd } })
     const ownAgent = liveAgent(ownSession)
-    const discussionAgent = liveAgent(discussionSession)
-    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, ownAgent], [scopeKey, discussionAgent]])
+    const domainAgent = liveAgent(domainSession)
+    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, ownAgent], [scopeKey, domainAgent]])
 
-    // The refusal is a failure the caller can read, not an outcome: a discussion
-    // whose Session carried one Thread's facts has no generation to replace.
-    await expect(ctx.agentTeam.requestNewContext(discussionAgent, { memberId: member.memberId }))
-      .rejects.toThrow("context_rollover is not supported in a discussion's work domain; the Member's own Session is the one that starts a new context")
+    // The domain-kind refusal must no longer fire for a Channel domain. The
+    // guards unrelated to the kind stay in force, so a fabricated agent is
+    // refused for running outside its own turn — which is exactly the proof
+    // wanted here: rejection reaches a later, kind-independent guard.
+    await expect(ctx.agentTeam.requestNewContext(domainAgent, { memberId: member.memberId }))
+      .rejects.not.toThrow(/not supported in work domain/)
+  })
+
+  it('classifies the same domains as renewable for the pressure judge', async () => {
+    const { ctx } = await harness()
+    const { channelRef } = await channelWithThread(ctx)
+    const member = await addMember(ctx, channelRef, 'reader')
+    const scopeKey = channelMemberScopeKey(channelRef)
+    const ownSession = ctx.sessions.create(member.sessionId, { meta: { cwd } })
+    const domainSession = ctx.sessions.create(SessionId('session:judged-domain'), { meta: { cwd } })
+    const ownAgent = liveAgent(ownSession)
+    const domainAgent = liveAgent(domainSession)
+    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, ownAgent], [scopeKey, domainAgent]])
+
+    // The judge and the gate must answer identically: a domain offered a
+    // remedy the gate refuses would stall instead of relieving, and one the
+    // gate allows but the judge skips would grow without reduction.
+    const renewable = (agent: Parameters<typeof ctx.agentTeam.requestNewContext>[0]) => ctx.agentTeam['renewsContextForAgent'](agent)
+    expect(renewable(ownAgent)).toBe(true)
+    expect(renewable(domainAgent)).toBe(true)
+  })
+
+  it('still refuses a Session that is not a live Member work domain', async () => {
+    const { ctx } = await harness()
+    const { channelRef } = await channelWithThread(ctx)
+    const member = await addMember(ctx, channelRef, 'reader')
+    const stranger = liveAgent(ctx.sessions.create(SessionId('session:not-a-domain'), { meta: { cwd } }))
+
+    // Not registered as any domain, so the entry cannot classify it as
+    // renewable; it must fail rather than fall through to a swap.
+    await expect(ctx.agentTeam.requestNewContext(stranger, { memberId: member.memberId }))
+      .rejects.toThrow()
   })
 })

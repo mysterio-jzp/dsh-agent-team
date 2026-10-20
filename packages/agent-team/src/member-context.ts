@@ -48,8 +48,17 @@ export function apply(ctx: Context): void {
         : 'memory.md is currently unreadable; do not use any earlier private memory context.')
     }
     const workspaces = renderMemberWorkspaces(host.workspacesForAgent(agent))
-    const workDomain = host.workDomainForAgent(agent)
-    const text = [renderMemberIdentity(member), memory, workspaces, workDomain === undefined ? '' : renderMemberWorkDomain(workDomain)]
+    const workDomainState = host.workDomainStateForAgent(agent)
+    // A domain whose binding is missing is not the same as a Session that holds
+    // no domain: the model must not be told this context is the Member default
+    // when it is really an orphaned Channel domain, or it would answer as
+    // though a shared Channel context were its own.
+    const workDomain = workDomainState.kind === 'bound'
+      ? renderMemberWorkDomain(workDomainState.binding)
+      : workDomainState.kind === 'unbound'
+        ? `Work domain ${workDomainState.scopeKey}: this Session belongs to that domain but its durable binding is missing. Do not assume the Member default context; report this state to the operator instead of continuing as though the binding existed.`
+        : ''
+    const text = [renderMemberIdentity(member), memory, workspaces, workDomain]
       .filter(section => section !== '')
       .join('\n\n')
     const latestText = agent.session.surface.nodes.toReversed().flatMap(sequence => {
@@ -87,7 +96,7 @@ export function renderMemberWorkspaces(workspaces: readonly { readonly workspace
     ...workspaces.map(workspace => `${workspace.workspaceId}${workspace.default ? ' (Member default Workspace)' : ''}: ${workspace.path === undefined
       ? 'Workspace path unavailable; ask @human before filesystem work.'
       : `${JSON.stringify(workspace.path)}; instructions: ${JSON.stringify(join(workspace.path, 'AGENTS.md'))}`}`),
-    'Workspace participation is separate from work-domain directories. Each bound Thread domain has its own Session cwd and snapshotted directory set; joining another Workspace does not move the Member default or an existing domain.',
+    'Workspace participation is separate from work-domain directories. Each bound Channel domain has its own Session cwd and snapshotted directory set; joining another Workspace does not move the Member default or an existing domain.',
     'For filesystem work in another Workspace, use absolute paths (or an explicit command cwd). Before working there, read its AGENTS.md and applicable directory instructions yourself; their contents are not injected here.',
     'Pass workspace explicitly to team_view, team_thread, team_message, team_claim and team_todo. team_inbox is the cross-Workspace triage entry point.',
     'If an instruction is ambiguous about which Workspace it concerns, ask @human before acting. Participation does not itself join Channels.',
@@ -102,7 +111,7 @@ export function renderMemberWorkDomain(binding: AgentTeamMemberScopeSession): st
     return `Work domain ${binding.scopeKey}: this legacy binding uses its Workspace root and has no configured additional directories. Do not reuse bare relative paths from another work domain.`
   }
   return [
-    `Work domain ${binding.scopeKey}: this Session is isolated from the Member default and every other Thread domain.`,
+    `Work domain ${binding.scopeKey}: this Session is isolated from the Member default and every other Channel domain. Every discussion in this Channel shares this one Session, so what you read here may come from a different discussion than the one you are answering.`,
     `Work-domain root (this Session's cwd): ${JSON.stringify(directories[0])}.`,
     ...(directories.length < 2 ? [] : ['Additional directories available to this domain:', ...directories.slice(1).map(path => `- ${JSON.stringify(path)}`)]),
     'Do not carry bare relative paths from another work domain into this one; use a domain-labeled absolute path or name its source domain and root.',

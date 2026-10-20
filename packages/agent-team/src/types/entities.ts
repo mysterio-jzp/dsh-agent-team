@@ -109,21 +109,23 @@ export interface AgentTeamMemberCapabilities {
 
 /**
  * Which work domain one Member Session bucket belongs to — the namespace its
- * key encodes. `thread` is the granularity the Human fixed (one discussion, one
- * bucket); a discussion's Task does not split it further.
+ * key encodes. `channel` is the granularity the Human fixed (one Channel, one
+ * bucket); the discussions inside it share that bucket, so a Task or a Thread
+ * does not split it further.
  */
-export type AgentTeamMemberScopeKind = 'thread' | 'default'
+export type AgentTeamMemberScopeKind = 'channel' | 'default'
 
 /**
- * Stable key of one Member Session bucket: `thread:<threadRef>` for one
- * discussion, or `default` for facts that belong to no discussion (Member
- * lifecycle, recovery, delivery) — including the single Session a ledger
- * recorded before buckets holds.
+ * Stable key of one Member Session bucket: `channel:<channelRef>` for one
+ * Channel, or `default` for facts that belong to no Channel (Member lifecycle,
+ * recovery, delivery) — including the single Session a ledger recorded before
+ * buckets holds.
  *
  * Built from immutable refs only: a Channel name or a Member handle would move
- * the key under a rename. It is deliberately not derived from a Task, because a
- * taskless discussion becomes taskful in place (`promoteThread`), and the domain
- * must not change identity when it does.
+ * the key under a rename. It is deliberately not derived from a Thread or a
+ * Task: every discussion in the Channel shares one domain, so promoting a
+ * taskless discussion (`promoteThread`) must not change its identity, and a
+ * Channel rename leaves both the ref and the key untouched.
  */
 export type AgentTeamMemberScopeKey = Branded<'AgentTeamMemberScopeKey'>
 
@@ -135,16 +137,30 @@ export type AgentTeamMemberScopeKey = Branded<'AgentTeamMemberScopeKey'>
 export interface AgentTeamMemberScopeSession {
   readonly scopeKey: AgentTeamMemberScopeKey
   readonly scopeKind: AgentTeamMemberScopeKind
-  /** The immutable ref the kind names; absent on the `default` domain. */
+  /** The immutable ref the kind names: the `channelRef` on a `channel` domain; absent on `default`. */
   readonly scopeRef?: string | undefined
   /** The Session this domain runs on; every domain has its own context. */
   readonly sessionId: SessionId
-  /** Ordered absolute roots snapshotted on first Thread binding; absent for `default` and pre-snapshot legacy bindings. */
+  /** Ordered absolute roots snapshotted on first Channel binding; absent for `default` and pre-snapshot legacy bindings. */
   readonly workingDirectories?: AgentTeamWorkingDirectorySet | undefined
 }
 
 /** Ordered absolute directory paths configured for one work domain (one to four; Host validates writes). */
 export type AgentTeamWorkingDirectorySet = readonly string[]
+
+/**
+ * What a running generation can say about its work domain.
+ *
+ * `not-a-work-domain` and `unbound` are not the same absence: the first is a
+ * Session outside the Member domain table at all, the second is a Session that
+ * IS a Member domain and whose durable binding is gone. Only the second is a
+ * defect, and a projection that cannot tell them apart has no way to report it
+ * without inventing a binding.
+ */
+export type AgentTeamWorkDomainState =
+  | { readonly kind: 'not-a-work-domain' }
+  | { readonly kind: 'unbound'; readonly memberId: AgentTeamMemberId; readonly scopeKey: AgentTeamMemberScopeKey }
+  | { readonly kind: 'bound'; readonly binding: AgentTeamMemberScopeSession }
 
 /** Durable identity and lifecycle intent of one team-managed Agent. */
 export interface AgentTeamAgentMember {
@@ -164,6 +180,18 @@ export interface AgentTeamAgentMember {
   readonly avatarRef?: string | undefined
   /** Durable capability intent; see AgentTeamMemberCapabilities. */
   readonly capabilities?: AgentTeamMemberCapabilities | undefined
+  /**
+   * Whether this Member holds the team's single President office.
+   *
+   * Absent means not the President, so every ledger recorded before the office
+   * existed replays unchanged. The flag is written only by the dedicated
+   * designation operation, which moves the office in ONE record: a member
+   * update never touches it, and two Members can never be flagged by a
+   * sequence the write path produces. A hand-edited ledger that carries two
+   * flags is reported as a conflict (see `AgentTeamPresidentState`) instead of
+   * being silently resolved to whichever the reader met first.
+   */
+  readonly president?: boolean | undefined
   /** Host-internal namespace; never exposed through Client projections. */
   readonly privateMemoryPath: string
   /**
@@ -174,6 +202,38 @@ export interface AgentTeamAgentMember {
    * data cleanup.
    */
   readonly state: 'enabled' | 'suspended' | 'inactive' | 'archived'
+}
+
+/**
+ * The team's single President office, derived from the live ledger.
+ *
+ * Three outcomes, never collapsed into one: `vacant` (nobody is designated —
+ * including a designated Member who has left the working set), `single` (the
+ * one holder), and `conflict` (a hand-edited or older ledger flags more than
+ * one Member). A conflict is deliberately NOT resolved by picking one: the
+ * Host refuses Task creation and Claim creation under it until a Human
+ * designates the holder explicitly.
+ */
+export type AgentTeamPresidentState =
+  | { readonly kind: 'vacant' }
+  | { readonly kind: 'single'; readonly memberId: AgentTeamMemberId; readonly handle: string }
+  | { readonly kind: 'conflict'; readonly memberIds: readonly AgentTeamMemberId[] }
+
+/**
+ * What one Member's tool surface may expose, derived from the live President
+ * office. The Host owns this decision and hands it to the Team tool plugin at
+ * activation, so the plugin never re-derives authority from a Session-local
+ * snapshot: a designation that moves the office refreshes every live surface
+ * through {@link AgentTeam.onMemberToolSurfaceChanged}.
+ */
+export interface AgentTeamMemberToolSurface {
+  readonly memberId: AgentTeamMemberId
+  /**
+   * Whether this Member's `team_message` carries `asTask`. When false the key
+   * is ABSENT from the tool definition — not present-and-disabled — and the
+   * Member gets the proposal tool instead.
+   */
+  readonly canCreateTask: boolean
 }
 
 /**
@@ -223,6 +283,7 @@ export type AgentTeamMemberDiagnosticClass =
   | 'runtime' // live runtime or compaction failure
   | 'activation' // unclassified activation failure
   | 'capability-apply' // post-commit configuration apply failed at the runtime
+  | 'domain-unattributed' // a work domain could not be created because its originating act is unrecorded
 
 /** One Member failure's structured reason; rendered, never persisted. */
 export interface AgentTeamMemberDiagnostic {

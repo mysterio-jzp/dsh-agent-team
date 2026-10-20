@@ -64,7 +64,7 @@ describe('Team Member private memory composition', () => {
     ctx.provide('agentTeam', {
       memberForAgent: (subject: Agent) => subject === agent ? { privateMemoryPath: root } : undefined,
       workspacesForAgent: () => workspaces,
-      workDomainForAgent: () => undefined,
+      workDomainStateForAgent: () => ({ kind: 'not-a-work-domain' }),
     } as never)
     await mount(ctx)
 
@@ -103,9 +103,12 @@ describe('Team Member private memory composition', () => {
     ctx.provide('agentTeam', {
       memberForAgent: () => ({ privateMemoryPath: root }),
       workspacesForAgent: () => [{ workspaceId: 'workspace:default', path: root, default: true }],
-      workDomainForAgent: () => ({
-        scopeKey: 'thread:thread:current', scopeKind: 'thread', scopeRef: 'thread:current',
-        sessionId: agent.session.id, workingDirectories: [selectedRoot, selectedAdditional],
+      workDomainStateForAgent: () => ({
+        kind: 'bound',
+        binding: {
+          scopeKey: 'channel:channel:current', scopeKind: 'channel', scopeRef: 'channel:current',
+          sessionId: agent.session.id, workingDirectories: [selectedRoot, selectedAdditional],
+        },
       }),
     } as never)
     await mount(ctx)
@@ -126,6 +129,50 @@ describe('Team Member private memory composition', () => {
     ctx.provide('agentTeam', { memberForAgent: () => undefined } as never)
     await mount(ctx)
     expect(await preStep(ctx, agent)).toEqual({ kind: 'enter', messages: [] })
+    await ctx.fiber.dispose()
+  })
+
+  // B15: a Session that belongs to a domain whose binding is gone must not read
+  // as "no domain at all". Collapsing the two into one absence is what lets a
+  // projection report a lost binding as an ordinary Member default context.
+  it('renders a domain whose binding is missing as a defect rather than as no domain', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'team-member-unbound-'))
+    roots.push(root)
+    const ctx = new Context()
+    const agent = fakeAgent(ctx)
+    ctx.provide('agentTeam', {
+      memberForAgent: () => ({ privateMemoryPath: root }),
+      workspacesForAgent: () => [],
+      workDomainStateForAgent: () => ({ kind: 'unbound', memberId: 'member:x', scopeKey: 'channel:channel:lost' }),
+    } as never)
+    await mount(ctx)
+
+    const result = await preStep(ctx, agent)
+    const content = result.kind === 'enter' ? result.messages.at(-1)?.content[0] : undefined
+    const text = content?.type === 'text' ? content.text : undefined
+    expect(text).toContain('channel:channel:lost')
+    expect(text).toContain('durable binding is missing')
+    expect(text).not.toContain('Work-domain root')
+    await ctx.fiber.dispose()
+  })
+
+  it('renders no work-domain section when the Session holds no domain at all', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'team-member-no-domain-'))
+    roots.push(root)
+    const ctx = new Context()
+    const agent = fakeAgent(ctx)
+    ctx.provide('agentTeam', {
+      memberForAgent: () => ({ privateMemoryPath: root }),
+      workspacesForAgent: () => [],
+      workDomainStateForAgent: () => ({ kind: 'not-a-work-domain' }),
+    } as never)
+    await mount(ctx)
+
+    const result = await preStep(ctx, agent)
+    const content = result.kind === 'enter' ? result.messages.at(-1)?.content[0] : undefined
+    const text = content?.type === 'text' ? content.text : undefined
+    expect(text ?? '').not.toContain('work domain')
+    expect(text ?? '').not.toContain('durable binding is missing')
     await ctx.fiber.dispose()
   })
 })

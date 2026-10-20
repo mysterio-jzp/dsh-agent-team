@@ -4,6 +4,12 @@
 
 面向 Agent Team Member 的模型工具。本包在调用方 Agent preset scope 内注册工具，不提供或替换 Host service。
 
+## 主理人（President）
+
+同一时刻只有一位 Member 持有主理人席位，**权威是这个席位，不是角色名**。只有持有人可以创建 Task（`team_message` 带 `asTask`）与 Claim（`team_claim` 的 `claim`）；其他成员把同样的意图走 `team_propose`——它发一条普通 Channel Message，持有人在那个 Channel 里时就提及他。`list` 与作者自己的 `done`/`release` 对所有人保持开放：失去席位收走的是创建权，绝不是读取 collision surface 或收尾自己 Claim 的能力。
+
+工具面按 agent 组合，而非按插件组合。成员 preset 把本插件挂在 agent scope **之上**，所以 `apply(ctx)` 那里既没有身份、也取不到 Team Host；因此注册表里放的是保守的 `team_message`（`asTask` 键**根本不存在**，而不是默认 `false`）与其余 Team 工具，按 agent 的注册发生在 `agent/created`——那里 `agent.ctx` 才解析得到 Host。主理人的 Session 拿到一份遮蔽全局的 `team_message`，带 `asTask`；其他成员改拿 `team_propose`。席位之后发生移交时，Host 的 listener 会重新注册这一对 agent-scoped 工具，运行中的 Session 在下一次请求就按新工具面组装，无需重启，也不依赖任何 Session 内的席位快照。因为这些注册落在 agent 自己的层里，任何 `tools` allow-list 都挡不住提议通道。
+
 ## 工具
 
 - `team_inbox` 列出调用方 Member 的有界未读 Thread 摘要，先按 direct work、再按最近活动排序；只有 Thread 存在真实 Task overlay 时才出现 Task standing。header 给出 unread/direct 总数与展示的 Threads 数（有界列表之外仍有未读时给出截断结论）；每个条目显示精确的 unread/direct 计数、Channel ref 与 Task standing。页脚把阅读指向 `team_thread read`；渲染不携带 revision 与写令牌。

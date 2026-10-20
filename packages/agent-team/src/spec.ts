@@ -28,19 +28,20 @@ const workspaceIdSchema = z.string().min(1).transform(value => value as Workspac
 const sessionIdSchema = z.string().min(1).transform(value => value as SessionId)
 /**
  * A Member Session bucket key: its namespace plus the immutable ref it names,
- * or `default`. Refs already carry their own namespace, so a Thread key reads
- * `thread:thread:<uuid>` — the kind, then the ref the fact itself carried.
- * `thread` is the only namespace this bundle writes, so it is the only one the
- * durable schema admits; anything else is a record no reader can resolve.
+ * or `default`. Refs already carry their own namespace, so a Channel key reads
+ * `channel:channel:<ref>` — the kind, then the ref the fact itself carried.
+ * `channel` is the only namespace this bundle writes, so it is the only one the
+ * durable schema admits; anything else (a former `thread:` key included) is a
+ * record no reader can resolve.
  */
 const memberScopeKeySchema = z.string()
-  .regex(/^(default|thread:thread:[^:]+)$/)
+  .regex(/^(default|channel:channel:[^:]+)$/)
   .transform(value => value as AgentTeamMemberScopeKey)
 const workingDirectorySetSchema = z.array(z.string().min(1)).min(1).max(4)
 const memberScopeSessionSchema = z.object({
   scopeKey: memberScopeKeySchema,
-  scopeKind: z.union([z.literal('thread'), z.literal('default')]),
-  // Absent on the default domain, which names no ref.
+  scopeKind: z.union([z.literal('channel'), z.literal('default')]),
+  // Absent on the default domain, which names no ref; a Channel ref otherwise.
   scopeRef: z.string().min(1).optional(),
   sessionId: sessionIdSchema,
   // Bindings recorded before work-domain directory snapshots remain replayable.
@@ -112,6 +113,11 @@ const memberSchema = z.object({
   // to open. Optional is therefore the load-time half of the same contract the
   // record's own optional field states.
   avatarRef: z.string().min(1).optional(),
+  // Ledgers written before the President office existed omit the flag. Like
+  // `avatarRef`, a missing line here would not fail the write — it would fail
+  // the NEXT cold start, where `.strict()` rejects the recorded Member and the
+  // whole domain refuses to open.
+  president: z.boolean().optional(),
   privateMemoryPath: z.string().min(1),
   state: z.union([z.literal('enabled'), z.literal('suspended'), z.literal('inactive'), z.literal('archived')]),
 }).strict()
@@ -457,7 +463,10 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-scope-session-bound'),
-    data: z.object({ memberId: memberIdSchema, workspaceId: workspaceIdSchema.optional(), binding: memberScopeSessionSchema }).strict(),
+    data: z.object({
+      memberId: memberIdSchema, workspaceId: workspaceIdSchema.optional(), binding: memberScopeSessionSchema,
+      sourceOperationId: operationIdSchema.optional(),
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,
@@ -491,6 +500,15 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-updated'),
     data: z.object({ member: memberSchema }).strict(),
+  }).strict(),
+  z.object({
+    ...operationBase,
+    previousOperationId: operationIdSchema.nullable(),
+    kind: z.literal('team/president-set'),
+    data: z.object({
+      presidentMemberId: memberIdSchema.optional(),
+      previousMemberId: memberIdSchema.optional(),
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,

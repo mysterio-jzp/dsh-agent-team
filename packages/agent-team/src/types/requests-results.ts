@@ -187,6 +187,41 @@ export interface AgentTeamUpdateMemberRequest {
   readonly avatarRef?: string | null | undefined
 }
 
+/**
+ * Human intent to designate one Member as the team's President, or to clear
+ * the office. `memberId: null` records a vacancy; every other value moves the
+ * office in a single durable record, so a failure never leaves the team
+ * without a President.
+ */
+export interface AgentTeamSetPresidentRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly memberId: AgentTeamMemberId | null
+}
+
+/**
+ * Agent-only proposal of a Task or Claim direction.
+ *
+ * A proposal is an ordinary Channel Message, never a Task or a Claim: it is
+ * the path a Member without the President office uses to put a direction in
+ * front of the President, and it still works while the office is vacant.
+ */
+export interface AgentTeamProposeRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly channelRef: AgentTeamChannelRef
+  readonly kind: 'task' | 'claim'
+  /** What the Member proposes, in its own words. */
+  readonly summary: string
+  /** The Task a Claim proposal is about; required for `kind: 'claim'`. */
+  readonly taskRef?: AgentTeamTaskRef | undefined
+}
+
+/** Result of one President designation: the holder after the write, or absence for a vacancy. */
+export interface AgentTeamPresidentResult {
+  readonly receipt: AgentTeamOperationReceipt
+  readonly president?: AgentTeamAgentMember | undefined
+}
+
 /** Human intent to suspend or resume one Agent Member. */
 export interface AgentTeamSetMemberStateRequest {
   readonly requestId: AgentTeamRequestId

@@ -207,9 +207,9 @@ const memberScopeSessionBound: Op<'team/member-scope-session-bound'> = {
   data: {
     memberId,
     binding: {
-      scopeKey: `thread:${memberThread}` as AgentTeamMemberScopeKey,
-      scopeKind: 'thread',
-      scopeRef: memberThread,
+      scopeKey: `channel:${channelRef}` as AgentTeamMemberScopeKey,
+      scopeKind: 'channel',
+      scopeRef: channelRef,
       sessionId: SessionId('session:protocol-scope'),
       workingDirectories: ['/tmp/protocol-domain', '/tmp/protocol-shared'],
     },
@@ -224,9 +224,9 @@ const memberScopeSessionBoundLegacy: Op<'team/member-scope-session-bound'> = {
   data: {
     memberId,
     binding: {
-      scopeKey: `thread:${memberThread}` as AgentTeamMemberScopeKey,
-      scopeKind: 'thread',
-      scopeRef: memberThread,
+      scopeKey: `channel:${channelRef}` as AgentTeamMemberScopeKey,
+      scopeKind: 'channel',
+      scopeRef: channelRef,
       sessionId: SessionId('session:protocol-scope-legacy'),
     },
   },
@@ -271,6 +271,13 @@ const memberUpdated: Op<'team/member-updated'> = {
   previousOperationId,
   kind: 'team/member-updated',
   data: { member: fixtureMember },
+}
+
+const presidentSet: Op<'team/president-set'> = {
+  ...opBase('operation:protocol-35', 'request:protocol-president-set', 35),
+  previousOperationId,
+  kind: 'team/president-set',
+  data: { presidentMemberId: memberId },
 }
 
 const channelMemberAdded: Op<'team/channel-member-added'> = {
@@ -937,6 +944,20 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
         handle: 'protocol-agent-two',
         description: memberUpdated.data.member.description,
       }),
+    },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'derived', inbox: 'none' },
+  },
+  'team/president-set': {
+    stored: presidentSet,
+    legacyShapes: [],
+    retry: {
+      same: async () => {
+        const out = await ledger.setPresident({ requestId: presidentSet.requestId, actor: human, memberId })
+        expect(out.value.president?.memberId, 'the designation mapper answers with the stored holder').toBe(memberId)
+        return out
+      },
+      changed: () => ledger.setPresident({ requestId: presidentSet.requestId, actor: human, memberId: null }),
     },
     legacy: { normalize: 'none', repair: 'none' },
     intent: { scopes: 'derived', inbox: 'none' },

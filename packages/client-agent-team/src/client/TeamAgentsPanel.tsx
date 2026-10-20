@@ -26,6 +26,7 @@ interface TeamAgentsPanelProps {
   readonly subscribeChanges: TeamSidebarProps['subscribeChanges']
   readonly addMember: TeamSidebarProps['addMember']
   readonly updateMember: TeamSidebarProps['updateMember']
+  readonly setPresident: TeamSidebarProps['setPresident']
   readonly recoverMember: TeamSidebarProps['recoverMember']
   readonly archiveMember: TeamSidebarProps['archiveMember']
   readonly joinWorkspace: TeamSidebarProps['joinWorkspace']
@@ -42,7 +43,7 @@ interface TeamAgentsPanelProps {
   readonly t: TeamSidebarProps['t']
 }
 
-export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, recoverMember, archiveMember, joinWorkspace, leaveWorkspace, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
+export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, addMember, updateMember, setPresident, recoverMember, archiveMember, joinWorkspace, leaveWorkspace, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, memberSessionId, openMemberSession, onCreatingChange, t }: TeamAgentsPanelProps) {
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>()
@@ -277,7 +278,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         <div className={css.agentList}>
           {orderedMembers.map(status => (
             <SortableRow key={status.member.memberId} drag={drag} orderKey={status.member.memberId}>
-              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} putMemberAvatar={putMemberAvatar} removeMemberAvatar={removeMemberAvatar} memberAvatars={memberAvatars} openMemberPersonaPath={openMemberPersonaPath} openMemberSession={openMemberSession} onUpdated={refresh} t={t} />
+              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} setPresident={setPresident} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} putMemberAvatar={putMemberAvatar} removeMemberAvatar={removeMemberAvatar} memberAvatars={memberAvatars} openMemberPersonaPath={openMemberPersonaPath} openMemberSession={openMemberSession} onUpdated={refresh} t={t} />
             </SortableRow>
           ))}
         </div>
@@ -297,13 +298,14 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
  * conversation page, the avatar carries identity plus the presence badge, and
  * the row menu opens the editor.
  */
-function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, recoverMember, archiveMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, openMemberSession, onUpdated, t }: {
+function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, setPresident, recoverMember, archiveMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, openMemberSession, onUpdated, t }: {
   readonly workspaceId: WorkspaceId
   readonly leaveWorkspace: TeamSidebarProps['leaveWorkspace']
   readonly status: AgentTeamClientMemberStatus
   /** This Member's Session is the one embedded in the conversation seat. */
   readonly current?: boolean
   readonly updateMember: TeamSidebarProps['updateMember']
+  readonly setPresident: TeamSidebarProps['setPresident']
   readonly recoverMember: TeamSidebarProps['recoverMember']
   readonly archiveMember: TeamSidebarProps['archiveMember']
   readonly loadModels: TeamSidebarProps['loadModels']
@@ -376,6 +378,7 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
         }}>
           <TeamMemberIdentity status={status} name={status.member.handle.replace(/^@/, '')} className={css.agentCopy} t={t} memberAvatars={memberAvatars} />
         </button>
+        {status.member.president === true && <span className={css.presidentBadge} title={t('presidentManagerBadgeHint')}>{t('presidentRole')}</span>}
         <span className={css.rowMenu}>
           <TeamRowMenu
             label={t('actionsAgent', { name: status.member.handle })}
@@ -416,6 +419,7 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
         <AgentEditorDialog
           status={status}
           updateMember={updateMember}
+          setPresident={setPresident}
           loadModels={loadModels}
           openMemberPersonaPath={openMemberPersonaPath}
           putMemberAvatar={putMemberAvatar}

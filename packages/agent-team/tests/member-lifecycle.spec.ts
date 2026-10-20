@@ -28,7 +28,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { AgentTeamLedger } from '../src/ledger.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey } from '../src/member-scope.ts'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -388,12 +388,37 @@ describe('Agent Team Member lifecycle', () => {
     ctx.agentTeam.validateLedger()
   })
 
+  it('opens the new Channel work domain for an initial Member as the Channel is created', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const seeded = await ctx.agentTeam.createChannel({ requestId: requestId('provision-seed'), workspaceId,
+      name: 'seed', description: 'Seeded participation' })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('provision-add'), workspaceId,
+      handle: 'seeded', description: '', presetId: 'team-member', channelRefs: [seeded.channel.channelRef] })
+    expect(added.status.availability, JSON.stringify(added.status)).toBe('active')
+    const memberId = added.status.member.memberId
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(seeded.channel.channelRef))).toBeDefined()
+
+    const named = await ctx.agentTeam.createChannel({ requestId: requestId('provision-named'), workspaceId,
+      name: 'named', description: 'Names an existing Member', memberIds: [memberId] })
+
+    // Nothing runs the startup reconciliation between these two lines, and this
+    // case must never let it: a pass that backfilled the binding would keep the
+    // assertion below green after the create-time call was deleted, which is the
+    // only thing this case exists to catch. Membership granted and context
+    // provisioned are one Human intent, so this domain is bound here or nowhere.
+    const bound = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(named.channel.channelRef))
+    expect(bound).toBeDefined()
+  })
+
   it('archives a Member: session disposed and archived, private memory kept, claims released', async () => {
     const { ctx, workspaceId, archived } = await realHarness()
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('archive-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('archive-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
+    // Creating a Claim is the President's write; the designation is the same
+    // Human act production requires.
+    await ctx.agentTeam.setPresident({ requestId: requestId('archive-president'), memberId })
 
     // Give the Member an active Claim so the release cleanup is observable
     // end-to-end.
@@ -953,10 +978,20 @@ describe('Agent Team Member lifecycle', () => {
     // Straight after the boot the Member has already been woken by the
     // restart, so it is working rather than still marked failed — the error
     // presence returns once that turn settles on the same durable failure.
+    // The Member joined a Channel, so the failure it must re-derive lives in
+    // that Channel's domain: the wake starts that domain, not the Member's own,
+    // because a domain is only told about the facts it holds. The Member row
+    // reports the domain it owns, so it stays `available` while the Channel
+    // domain carries the turn.
     const booting = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
     expect(booting?.availability).toBe('active')
-    expect(booting?.presence).toBe('working')
-    const agent = ctx.agents.get(booting!.member.sessionId)!
+    const channelDomain = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channel.channel.channelRef))!
+    // The wake itself is the property under test, and it needs its own
+    // assertion: `whenIdle()` returns immediately for an Agent that never
+    // started, so a later `error` alone would not prove the restart woke
+    // anything — a different path could produce that error on an idle Agent.
+    const agent = ctx.agents.get(channelDomain.sessionId)!
+    expect(agent.status).toBe('running')
     await agent.whenIdle()
     const after = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
     expect(after?.presence).toBe('error')
@@ -1118,6 +1153,8 @@ describe('Agent Team Member lifecycle', () => {
     const reviewer = await ctx.agentTeam.addMember({ requestId: requestId('protocol-reviewer'), workspaceId, handle: 'reviewer', description: 'Reviews changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const agent = ctx.agents.get(builder.status.member.sessionId)!
     let callNumber = 0
+    // The pull protocol ends in a Claim, which is the President's write.
+    await ctx.agentTeam.setPresident({ requestId: requestId('protocol-president'), memberId: builder.status.member.memberId })
     const call = async (name: string, args: unknown) => {
       const result = await ctx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId(`team-protocol-${++callNumber}`), name, arguments: args, agent })
       expect(result.isError, `${name} ${JSON.stringify(args)}: ${result.isError ? result.error.message : 'ok'}`).toBe(false)
@@ -1696,6 +1733,8 @@ describe('Agent Team Member lifecycle', () => {
       taskRef: started.task!.taskRef, action: 'follow' })
     const initialRead = await ctx.agentTeam.readThreadForAgent(agent, { requestId: requestId('task-update-agent-read'), workspaceId,
       taskRef: started.task!.taskRef })
+    // Creating a Claim is the President's write.
+    await ctx.agentTeam.setPresident({ requestId: requestId('task-update-president'), memberId: builder.status.member.memberId })
     const claim = await ctx.agentTeam.changeClaimForAgent(agent, { requestId: requestId('task-update-claim'), workspaceId,
       taskRef: started.task!.taskRef, action: 'claim', direction: 'browser verification', baseRevision: initialRead.thread.revision })
     expect(claim).toMatchObject({ kind: 'committed', claim: { state: 'active' } })
@@ -3438,6 +3477,8 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const live = ctx.agents.get(added.status.member.sessionId)!
     await waitForIdle(ctx, live)
     const read = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('noauto-read'), workspaceId, taskRef: started.task!.taskRef })
+    // Creating a Claim is the President's write.
+    await ctx.agentTeam.setPresident({ requestId: requestId('noauto-president'), memberId })
     const claim = await ctx.agentTeam.changeClaimForAgent(live, { requestId: requestId('noauto-claim'), workspaceId, taskRef: started.task!.taskRef, action: 'claim', baseRevision: read.thread.revision, direction: 'own the fix' })
     if (claim.kind !== 'committed') throw new Error(`expected committed claim, received ${claim.kind}`)
     const humanRead = await ctx.agentTeam.readThread({ requestId: requestId('noauto-human-read'), workspaceId, taskRef: started.task!.taskRef })
@@ -3463,6 +3504,8 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const live = ctx.agents.get(added.status.member.sessionId)!
     await waitForIdle(ctx, live)
     const memberRead = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('advice-member-read'), workspaceId, taskRef: started.task!.taskRef })
+    // Creating a Claim is the President's write.
+    await ctx.agentTeam.setPresident({ requestId: requestId('advice-president'), memberId })
     const claimed = await ctx.agentTeam.changeClaimForAgent(live, { requestId: requestId('advice-claim'), workspaceId, taskRef: started.task!.taskRef, action: 'claim', baseRevision: memberRead.thread.revision, direction: 'own it' })
     if (claimed.kind !== 'committed') throw new Error(`expected committed claim, received ${claimed.kind}`)
     const readDone = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('advice-done-read'), workspaceId, taskRef: started.task!.taskRef })
@@ -3546,6 +3589,8 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const live = ctx.agents.get(added.status.member.sessionId)!
     await waitForIdle(ctx, live)
     const memberRead = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('narrow-advice-read-claim'), workspaceId, taskRef: started.task!.taskRef })
+    // Creating a Claim is the President's write.
+    await ctx.agentTeam.setPresident({ requestId: requestId('narrow-advice-president'), memberId })
     const claimed = await ctx.agentTeam.changeClaimForAgent(live, { requestId: requestId('narrow-advice-claim'), workspaceId, taskRef: started.task!.taskRef, action: 'claim', baseRevision: memberRead.thread.revision, direction: 'narrow route' })
     if (claimed.kind !== 'committed') throw new Error(`expected committed claim, received ${claimed.kind}`)
     const readDone = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('narrow-advice-read-done'), workspaceId, taskRef: started.task!.taskRef })
@@ -3613,6 +3658,9 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     // stays idle and the helper resolves immediately for it.
     adapter.enqueue(textResponse('reviewer saw the claim.'))
     const builderRead = await ctx.agentTeam.readThreadForAgent(builderAgent, { requestId: requestId('notify-builder-read'), workspaceId, taskRef: started.task!.taskRef })
+    // Two owners, one office: creating a Claim is the President's write, so the
+    // office moves to each owner in turn.
+    await ctx.agentTeam.setPresident({ requestId: requestId('notify-builder-president'), memberId: builder.status.member.memberId })
     const builderClaim = await ctx.agentTeam.changeClaimForAgent(builderAgent, { requestId: requestId('notify-builder-claim'), workspaceId, taskRef: started.task!.taskRef, action: 'claim', baseRevision: builderRead.thread.revision, direction: 'implement' })
     if (builderClaim.kind !== 'committed') throw new Error(`expected committed claim, received ${builderClaim.kind}`)
     await waitForIdle(ctx, builderAgent)
@@ -3630,6 +3678,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     // reviewer: still holds an active Claim at accept time (early accept).
     adapter.enqueue(textResponse('builder saw the review claim.'))
     const reviewerRead = await ctx.agentTeam.readThreadForAgent(reviewerAgent, { requestId: requestId('notify-reviewer-read'), workspaceId, taskRef: started.task!.taskRef })
+    await ctx.agentTeam.setPresident({ requestId: requestId('notify-reviewer-president'), memberId: reviewer.status.member.memberId })
     const reviewerClaim = await ctx.agentTeam.changeClaimForAgent(reviewerAgent, { requestId: requestId('notify-reviewer-claim'), workspaceId, taskRef: started.task!.taskRef, action: 'claim', baseRevision: reviewerRead.thread.revision, direction: 'review' })
     if (reviewerClaim.kind !== 'committed') throw new Error(`expected committed claim, received ${reviewerClaim.kind}`)
     await waitForIdle(ctx, reviewerAgent)
@@ -3694,6 +3743,8 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     // for this reader. The combined-semantics branch must not then render
     // an empty "finished Claim" list — regression against the review
     // finding on commit afd2c16.
+    // Creating a Claim is the President's write.
+    await ctx.agentTeam.setPresident({ requestId: requestId('emptyclause-president'), memberId: builder.status.member.memberId })
     const claimed = await ctx.agentTeam.changeClaimForAgent(builderAgent, { requestId: requestId('emptyclause-claim'), workspaceId, taskRef: started.task!.taskRef, action: 'claim', baseRevision: started.thread.revision, direction: 'implement' })
     if (claimed.kind !== 'committed') throw new Error(`expected committed claim, received ${claimed.kind}`)
     const humanRead = await ctx.agentTeam.readThread({ requestId: requestId('emptyclause-human-read'), workspaceId, taskRef: started.task!.taskRef })
@@ -5664,5 +5715,197 @@ describe('Agent Team private memory scaffold language (issue #43 #4)', () => {
     await ctx.agentTeam.suspendMember({ requestId: requestId('scaffold-suspend'), memberId: added.status.member.memberId })
     await ctx.agentTeam.resumeMember({ requestId: requestId('scaffold-resume'), memberId: added.status.member.memberId })
     expect(await readFile(memoryPath, 'utf8')).toBe('# Member memory\n\nhand-written\n')
+  })
+})
+
+/**
+ * The President office: one Holder, one durable record per move, and a live
+ * authority that every write path reads at the moment it decides.
+ */
+describe('Agent Team President office', () => {
+  /** Parameter names of one composed tool, or undefined when the scope lacks it. */
+  function toolParameters(ctx: Context, agent: ReturnType<Context['agents']['get']> & object, name: string): readonly string[] | undefined {
+    const schema = ctx.tools.schemas(agent as never).find(entry => entry.name === name)
+    const properties = (schema?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties
+    return properties === undefined ? undefined : Object.keys(properties)
+  }
+
+  it('moves the office in one durable record and refuses a same-Member re-set', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('pres-channel'), workspaceId, name: 'engineering', description: '' })
+    const first = await ctx.agentTeam.addMember({ requestId: requestId('pres-add-1'), workspaceId, handle: 'first', description: 'First', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const second = await ctx.agentTeam.addMember({ requestId: requestId('pres-add-2'), workspaceId, handle: 'second', description: 'Second', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const firstId = first.status.member.memberId
+    const secondId = second.status.member.memberId
+    expect(ctx.agentTeam.president()).toEqual({ kind: 'vacant' })
+
+    const designated = await ctx.agentTeam.setPresident({ requestId: requestId('pres-set-1'), memberId: firstId })
+    expect(designated.president?.memberId).toBe(firstId)
+    expect(ctx.agentTeam.president()).toEqual({ kind: 'single', memberId: firstId, handle: 'first' })
+
+    // Re-setting the same Member is refused rather than reported as success: a
+    // caller must never mistake a no-op for a move.
+    await expect(ctx.agentTeam.setPresident({ requestId: requestId('pres-set-again'), memberId: firstId }))
+      .rejects.toThrow(/already the President/)
+
+    // Moving the office is ONE record: the old flag clears and the new one sets
+    // inside the same operation, so no reader can observe an empty office.
+    const recordsBefore = (await ctx.agentTeam.members()).length
+    const moved = await ctx.agentTeam.setPresident({ requestId: requestId('pres-set-2'), memberId: secondId })
+    expect(moved.president?.memberId).toBe(secondId)
+    expect(ctx.agentTeam.president()).toEqual({ kind: 'single', memberId: secondId, handle: 'second' })
+    const firstStatus = (await ctx.agentTeam.members()).find(status => status.member.memberId === firstId)!
+    const secondStatus = (await ctx.agentTeam.members()).find(status => status.member.memberId === secondId)!
+    expect(firstStatus.member.president).toBeUndefined()
+    expect(secondStatus.member.president).toBe(true)
+    expect((await ctx.agentTeam.members()).length).toBe(recordsBefore)
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it('refuses Task creation without the office, names the holder, and lets the holder create one', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('task-channel'), workspaceId, name: 'engineering', description: '' })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('task-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const lead = await ctx.agentTeam.addMember({ requestId: requestId('task-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
+
+    // Vacant office: nobody may create a Task, and the refusal says so.
+    await expect(ctx.agentTeam.sendMessageForAgent(builderAgent, { requestId: requestId('task-vacant'), workspaceId,
+      channelRef: channel.channel.channelRef, body: 'Start work', asTask: true })).rejects.toThrow(/office is vacant/)
+
+    await ctx.agentTeam.setPresident({ requestId: requestId('task-president'), memberId: lead.status.member.memberId })
+
+    // A non-holder is refused by the Host and by the ledger, and the refusal
+    // names who holds the office so the Member can route the idea.
+    await expect(ctx.agentTeam.sendMessageForAgent(builderAgent, { requestId: requestId('task-refused'), workspaceId,
+      channelRef: channel.channel.channelRef, body: 'Start work', asTask: true })).rejects.toThrow(/@lead holds the office/)
+    // A plain Message is still open to everyone.
+    const plain = await ctx.agentTeam.sendMessageForAgent(builderAgent, { requestId: requestId('task-plain'), workspaceId,
+      channelRef: channel.channel.channelRef, body: 'Thinking out loud' })
+    expect(plain.kind).toBe('committed')
+
+    const created = await ctx.agentTeam.sendMessageForAgent(leadAgent, { requestId: requestId('task-created'), workspaceId,
+      channelRef: channel.channel.channelRef, body: 'Implement the fix', asTask: true })
+    expect(created.kind).toBe('committed')
+    expect(created.kind === 'committed' ? created.task?.taskRef : undefined).toBeDefined()
+  })
+
+  it('composes asTask only for the President and team_propose only for the others', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('surface-channel'), workspaceId, name: 'engineering', description: '' })
+    const lead = await ctx.agentTeam.addMember({ requestId: requestId('surface-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('surface-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
+    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+
+    // No office yet: neither Member carries the Task switch, both carry the
+    // proposal path — the surface never advertises a capability it lacks.
+    expect(toolParameters(ctx, builderAgent as never, 'team_message')).not.toContain('asTask')
+    expect(toolParameters(ctx, builderAgent as never, 'team_propose')).toBeDefined()
+
+    await ctx.agentTeam.setPresident({ requestId: requestId('surface-president'), memberId: lead.status.member.memberId })
+
+    // The President gained asTask and LOST the proposal tool; the other Member
+    // kept its proposal path. Both changes landed without a restart.
+    expect(toolParameters(ctx, leadAgent as never, 'team_message')).toContain('asTask')
+    expect(toolParameters(ctx, leadAgent as never, 'team_propose')).toBeUndefined()
+    expect(toolParameters(ctx, builderAgent as never, 'team_message')).not.toContain('asTask')
+    expect(toolParameters(ctx, builderAgent as never, 'team_propose')).toBeDefined()
+
+    // Moving the office back reverses both surfaces on the same Sessions.
+    await ctx.agentTeam.setPresident({ requestId: requestId('surface-move'), memberId: builder.status.member.memberId })
+    expect(toolParameters(ctx, leadAgent as never, 'team_message')).not.toContain('asTask')
+    expect(toolParameters(ctx, leadAgent as never, 'team_propose')).toBeDefined()
+    expect(toolParameters(ctx, builderAgent as never, 'team_message')).toContain('asTask')
+    expect(toolParameters(ctx, builderAgent as never, 'team_propose')).toBeUndefined()
+  })
+
+  it('lets only the President create a Claim while list and the author close stay open', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('claim-channel'), workspaceId, name: 'engineering', description: '' })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('claim-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const builderId = builder.status.member.memberId
+    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+    await ctx.agentTeam.setPresident({ requestId: requestId('claim-president'), memberId: builderId })
+    const started = await ctx.agentTeam.sendMessage({ requestId: requestId('claim-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Implement', asTask: true })
+    if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
+    const taskRef = started.task!.taskRef
+    const read = await ctx.agentTeam.readThreadForAgent(builderAgent, { requestId: requestId('claim-read'), workspaceId, taskRef })
+    const claim = await ctx.agentTeam.changeClaimForAgent(builderAgent, { requestId: requestId('claim-create'), workspaceId, taskRef,
+      action: 'claim', direction: 'own it', baseRevision: read.thread.revision })
+    expect(claim.kind).toBe('committed')
+    const claimRef = claim.kind === 'committed' ? claim.claim.claimRef : undefined
+    expect(claimRef).toBeDefined()
+
+    // Losing the office does not take the author's close away: `done` stays the
+    // author's own write, and `list` stays readable.
+    const lead = await ctx.agentTeam.addMember({ requestId: requestId('claim-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
+    await ctx.agentTeam.setPresident({ requestId: requestId('claim-move'), memberId: lead.status.member.memberId })
+    const leadRead = await ctx.agentTeam.readThreadForAgent(leadAgent, { requestId: requestId('claim-lead-read'), workspaceId, taskRef })
+    await expect(ctx.agentTeam.changeClaimForAgent(leadAgent, { requestId: requestId('claim-lead-create'), workspaceId, taskRef,
+      action: 'claim', direction: 'mine now', baseRevision: leadRead.thread.revision })).resolves.toMatchObject({ kind: 'committed' })
+    const closed = await ctx.agentTeam.changeClaimForAgent(builderAgent, { requestId: requestId('claim-done'), workspaceId, taskRef,
+      action: 'done', claimRef: claimRef as never, baseRevision: (await ctx.agentTeam.readThreadForAgent(builderAgent, { requestId: requestId('claim-read-done'), workspaceId, taskRef })).thread.revision })
+    expect(closed.kind).toBe('committed')
+    // The former holder may not create another Claim: the office is read live.
+    await expect(ctx.agentTeam.changeClaimForAgent(builderAgent, { requestId: requestId('claim-refused'), workspaceId, taskRef,
+      action: 'claim', direction: 'again', baseRevision: (await ctx.agentTeam.readThreadForAgent(builderAgent, { requestId: requestId('claim-read-refused'), workspaceId, taskRef })).thread.revision }))
+      .rejects.toThrow(/@lead holds the office/)
+    expect(ctx.agentTeam.listClaimsForAgent(builderAgent, { workspaceId, taskRef }).claims.length).toBeGreaterThan(0)
+  })
+
+  it('proposes through the Channel without creating a Task or a Claim', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('propose-channel'), workspaceId, name: 'engineering', description: '' })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('propose-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+    const view = () => ctx.agentTeam.viewForAgent(builderAgent, { workspaceId, includeCatalog: true })
+    expect(view().tasks).toEqual([])
+
+    // A vacant office still has a path forward: the proposal is an ordinary
+    // Channel Message, so it needs nobody to address.
+    const proposed = await ctx.agentTeam.proposeForAgent(builderAgent, { requestId: requestId('propose-1'), workspaceId,
+      channelRef: channel.channel.channelRef, kind: 'task', summary: 'We should split the parser first.' })
+    expect(proposed.kind).toBe('committed')
+    expect(view().tasks).toEqual([])
+
+    const lead = await ctx.agentTeam.addMember({ requestId: requestId('propose-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
+    await ctx.agentTeam.setPresident({ requestId: requestId('propose-president'), memberId: lead.status.member.memberId })
+    const withHolder = await ctx.agentTeam.proposeForAgent(builderAgent, { requestId: requestId('propose-2'), workspaceId,
+      channelRef: channel.channel.channelRef, kind: 'task', summary: 'Same direction, told to the holder.' })
+    expect(withHolder.kind).toBe('committed')
+    expect(withHolder.kind === 'committed' ? withHolder.message.body : '').toContain('@lead')
+    // Still no Task and no Claim: a proposal is a Message.
+    expect(view().tasks).toEqual([])
+
+    // The President does not get a second, weaker route to the same write.
+    await expect(ctx.agentTeam.proposeForAgent(leadAgent, { requestId: requestId('propose-lead'), workspaceId,
+      channelRef: channel.channel.channelRef, kind: 'task', summary: 'I can create it myself.' }))
+      .rejects.toThrow(/President creates the Task or Claim directly/)
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it('reports a vacancy when the holder is suspended, and clears the office on request', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('vac-channel'), workspaceId, name: 'engineering', description: '' })
+    const lead = await ctx.agentTeam.addMember({ requestId: requestId('vac-add'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const leadId = lead.status.member.memberId
+    await ctx.agentTeam.setPresident({ requestId: requestId('vac-president'), memberId: leadId })
+
+    // A suspended holder leaves the office VACANT — nothing is inherited.
+    await ctx.agentTeam.suspendMember({ requestId: requestId('vac-suspend'), memberId: leadId })
+    expect(ctx.agentTeam.president()).toEqual({ kind: 'vacant' })
+
+    // Clearing an already-vacant office is refused rather than silently equal.
+    await expect(ctx.agentTeam.setPresident({ requestId: requestId('vac-clear'), memberId: null })).rejects.toThrow(/no President to clear/)
+    await ctx.agentTeam.resumeMember({ requestId: requestId('vac-resume'), memberId: leadId })
+    expect(ctx.agentTeam.president()).toEqual({ kind: 'single', memberId: leadId, handle: 'lead' })
+    const cleared = await ctx.agentTeam.setPresident({ requestId: requestId('vac-clear-2'), memberId: null })
+    expect(cleared.president).toBeUndefined()
+    expect(ctx.agentTeam.president()).toEqual({ kind: 'vacant' })
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 })

@@ -243,6 +243,13 @@ function liveAgent(ctx: Context, facts: MemberFacts): Agent {
   return agent!
 }
 
+/**
+ * The surface a Member WITHOUT the President office composes: the roster every
+ * Team preset must publish, plus the proposal path that replaces Task creation
+ * for that Member. A President composes the roster alone.
+ */
+const memberSurfaceTools = [...AGENT_TEAM_TOOL_NAMES, 'team_propose']
+
 describe('Agent Team member tool policy', () => {
   it('restricts each Member to its own allow-list without affecting siblings', async () => {
     useAdapter(new EmptyAdapter())
@@ -250,15 +257,15 @@ describe('Agent Team member tool policy', () => {
     // Baseline: an unrestricted Member sees the five Team tools and both fixtures.
     const base = await addMember(ctx, workspaceId, 't1-baseline')
     const baseAgent = liveAgent(ctx, base)
-    expect(toolNames(ctx, baseAgent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, baseAgent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
 
     const narrow = await addMember(ctx, workspaceId, 't1-narrow', { tools: { allow: ['ordinary_tool'] } })
     const narrowAgent = liveAgent(ctx, narrow)
     // The five Team tools are force-unioned; spare_tool disappears.
-    expect(toolNames(ctx, narrowAgent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool'].sort())
+    expect(toolNames(ctx, narrowAgent)).toEqual([...memberSurfaceTools, 'ordinary_tool'].sort())
     // The sibling surface is unchanged by the restriction, and the hidden
     // tool resolves as absent rather than callable.
-    expect(toolNames(ctx, baseAgent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, baseAgent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
     expect(ctx.tools.get('spare_tool', narrowAgent as never)).toBeUndefined()
     const status = ctx.agentTeam.membersForClient({ workspaceId }).find(item => item.member.memberId === narrow.memberId)
     expect(status?.capabilityWarnings).toBeUndefined()
@@ -271,12 +278,16 @@ describe('Agent Team member tool policy', () => {
     // pure intent, dropped at activation, never fatal.
     const drifted = await addMember(ctx, workspaceId, 't2-drifted', { tools: { allow: ['tool-renamed-away', 'ordinary_tool'] } })
     const driftedAgent = liveAgent(ctx, drifted)
-    expect(toolNames(ctx, driftedAgent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool'].sort())
+    expect(toolNames(ctx, driftedAgent)).toEqual([...memberSurfaceTools, 'ordinary_tool'].sort())
     const status = ctx.agentTeam.membersForClient({ workspaceId }).find(item => item.member.memberId === drifted.memberId)
     expect(status?.availability).toBe('active')
     expect(status?.capabilityWarnings).toEqual([
       expect.objectContaining({
         name: 'tool-renamed-away',
+        // The digest is what the policy observed at activation, and the
+        // proposal path is composed per agent AFTER policies apply (it is
+        // agent-scoped, so no restriction can hide it): the roster names are
+        // the ones the digest can carry.
         knownNames: expect.arrayContaining([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool']),
       }),
     ])
@@ -301,9 +312,9 @@ describe('Agent Team member tool policy', () => {
     // Reactivation re-applied the stored intent: the roster says so from the
     // same real surface the schema read below verifies.
     expect(resumed.status.capabilityState).toBe('applied')
-    expect(toolNames(ctx, liveAgent(ctx, narrow))).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool'].sort())
+    expect(toolNames(ctx, liveAgent(ctx, narrow))).toEqual([...memberSurfaceTools, 'ordinary_tool'].sort())
     // The sibling never moved.
-    expect(toolNames(ctx, liveAgent(ctx, other))).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, liveAgent(ctx, other))).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
 
     // Host restart: disposal releases restriction state; replay plus
     // reactivation rebuild the same restricted surface from durable intent.
@@ -312,7 +323,7 @@ describe('Agent Team member tool policy', () => {
     const restored = ctx.agentTeam.membersForClient({ workspaceId }).find(item => item.member.memberId === narrow.memberId)
     expect(restored?.availability, JSON.stringify(restored)).toBe('active')
     expect(restored?.capabilityState).toBe('applied')
-    expect(toolNames(ctx, liveAgent(ctx, narrow))).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool'].sort())
+    expect(toolNames(ctx, liveAgent(ctx, narrow))).toEqual([...memberSurfaceTools, 'ordinary_tool'].sort())
   })
 
   it('live-applies an allow-list edit at the turn boundary in the same Session', async () => {
@@ -330,7 +341,7 @@ describe('Agent Team member tool policy', () => {
     })
     expect(widened.status.member.capabilities).toEqual({ tools: { allow: ['ordinary_tool', 'spare_tool'] } })
     expect(widened.status.member.sessionId).toBe(narrow.sessionId)
-    expect(toolNames(ctx, agent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, agent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
 
     // The next model turn sees the widened surface in its request tools and
     // can call the newly visible tool.
@@ -379,7 +390,7 @@ describe('Agent Team member tool policy', () => {
     expect(settled.status.availability).toBe('active')
     expect(settled.status.member.sessionId).toBe(narrow.sessionId)
     expect(settled.status.member.capabilities).toEqual({ tools: { allow: ['ordinary_tool', 'spare_tool'] } })
-    expect(toolNames(ctx, agent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, agent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
     const suspended = await suspending
     expect(suspended.status.availability).toBe('suspended')
     await turnDone
@@ -387,7 +398,7 @@ describe('Agent Team member tool policy', () => {
     // Resume applies the stored intent at the next activation.
     const resumed = await ctx.agentTeam.resumeMember({ requestId: requestId('resume-after-wait'), memberId: narrow.memberId })
     expect(resumed.status.availability).toBe('active')
-    expect(toolNames(ctx, liveAgent(ctx, narrow))).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, liveAgent(ctx, narrow))).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
   })
 
   it('keeps Team tools hidden from ordinary sessions outside the preset', async () => {
@@ -451,7 +462,7 @@ describe('Agent Team member tool policy', () => {
       description: 'Policy member', capabilities: { tools: { allow: ['ordinary_tool', 'spare_tool'] } },
     })
     expect(current.status.member.capabilities?.tools?.allow).toEqual(['ordinary_tool', 'spare_tool'])
-    expect(toolNames(ctx, agent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, agent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
 
     // Retrying the stale request is idempotent in effect: it replays its own
     // receipt but must neither re-apply its own historical configuration over
@@ -459,7 +470,7 @@ describe('Agent Team member tool policy', () => {
     const replayed = await ctx.agentTeam.updateMember(stale)
     expect(replayed.status.member.capabilities?.tools?.allow).toEqual(['ordinary_tool', 'spare_tool'])
     expect(replayed.status.availability).toBe('active')
-    expect(toolNames(ctx, agent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'ordinary_tool', 'spare_tool'].sort())
+    expect(toolNames(ctx, agent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
     ctx.agentTeam.validateLedger()
   })
 
@@ -491,7 +502,7 @@ describe('Agent Team member tool policy', () => {
       // surface matching the currently accepted configuration.
       const retried = await ctx.agentTeam.updateMember(request)
       expect(retried.status.member.capabilities?.tools?.allow).toEqual(['spare_tool'])
-      expect(toolNames(ctx, agent)).toEqual([...AGENT_TEAM_TOOL_NAMES, 'spare_tool'].sort())
+      expect(toolNames(ctx, agent)).toEqual([...memberSurfaceTools, 'spare_tool'].sort())
       ctx.agentTeam.validateLedger()
     } finally {
       restrict.mockRestore()
