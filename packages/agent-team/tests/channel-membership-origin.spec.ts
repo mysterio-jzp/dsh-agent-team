@@ -48,14 +48,20 @@ const member: AgentTeamAgentMember = {
   state: 'enabled',
 }
 
-function op(operationId: string, sequence: number, kind: string, data: object): AgentTeamOperation {
+function op(
+  operationId: string,
+  sequence: number,
+  kind: string,
+  data: object,
+  actor: AgentTeamOperation['actor'] = agentTeamHumanActor(),
+): AgentTeamOperation {
   return {
     operationId: operationId as AgentTeamOperationId,
     requestId: `request:${operationId}`,
     sequence,
     occurredAt: '2026-10-20T00:00:00.000Z',
     previousOperationId: sequence === 1 ? undefined : `operation:${sequence - 1}` as AgentTeamOperationId,
-    actor: agentTeamHumanActor(),
+    actor,
     kind,
     data,
   } as unknown as AgentTeamOperation
@@ -80,11 +86,17 @@ function seed(ledger: AgentTeamLedger, operations: readonly AgentTeamOperation[]
   (ledger['state'].ordered as AgentTeamOperation[]).push(...operations)
 }
 
-const created = (): AgentTeamOperation => op('operation:1', 1, 'team/channel-created', {
-  workspaceId: alpha,
-  channel: { channelRef, workspaceId: alpha, name: 'origin', description: '' },
-  memberIds: [memberId],
-})
+const created = (actor?: AgentTeamOperation['actor']): AgentTeamOperation => op(
+  'operation:1',
+  1,
+  'team/channel-created',
+  {
+    workspaceId: alpha,
+    channel: { channelRef, workspaceId: alpha, name: 'origin', description: '' },
+    memberIds: [memberId],
+  },
+  actor,
+)
 
 const removed = (): AgentTeamOperation => op('operation:2', 2, 'team/channel-member-removed', {
   workspaceId: alpha, channelRef, memberId,
@@ -110,6 +122,19 @@ describe('Channel membership attribution', () => {
 
     // The retired create-time grant does not answer for a membership a later
     // Human act made, and it does not silence that act either.
+    expect(ledger.channelMembershipOrigin(memberId, channelRef)?.operationId).toBe('operation:3')
+  })
+
+  it('walks past a create-time grant an agent recorded instead of a Human', async () => {
+    const ledger = await ledgerWithOperations()
+    // `createChannel` calls `assertHumanActor` before committing, so no
+    // production path can write this shape today; it is stated here for the
+    // same reason the retired removal is: the scan is a pure read of the log,
+    // and a log that holds one must not read as "this Member has no source"
+    // while a valid later grant sits behind it.
+    const agentActor = { kind: 'member', memberId } as unknown as AgentTeamOperation['actor']
+    seed(ledger, [created(agentActor), addedBack()])
+
     expect(ledger.channelMembershipOrigin(memberId, channelRef)?.operationId).toBe('operation:3')
   })
 
