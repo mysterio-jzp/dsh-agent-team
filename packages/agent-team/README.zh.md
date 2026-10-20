@@ -52,6 +52,8 @@ Team-enabled preset 在自身 Agent scope 注册八个工具，并用 `markAgent
 
 Member 上下文自主管理复用同一 lifecycle owner。`context_rollover` 与 `context_checkpoint` 工具只做校验并结束/锚定 turn；单一 `ContextManagementCoordinator` 监听 Member Session 事件，从 durable 的成功 `tool/call`+`tool/result` 对派生 rollover 与 checkpoint 意图，并经串行 lifecycle queue 执行换窗：等真正 idle、复查 owned-jobs guard、dispose 并归档旧 Session（绝不删除）、提交幂等的 `team/member-session-rolled-over` operation（Member actor、仅限自身、不写 handoff 正文）、激活全新 Session——checkpoint 回返则以精确 completed-turn 前缀作 seed——再送达 handoff 与携带的非 Team 输入。身份、模型、私有记忆、skills、Claims 和 Attention 全部保留；进程内状态在崩溃后可从 durable log 重建，包括重启落在 rollover commit 与新 Session 激活之间时，从 ledger 记录的上一 Session 重建 handoff。第二个 Host 持有的 coordinator（`pressure-policy.ts`）拥有上下文压力：预算阈值从当前 route 的 context window 派生，handoff 预算每 generation 一条通知，硬上限强制原地 compaction 并 fail-closed 验证，provider context-overflow 获得一条有界 compact-and-retry；已接受 Task 的自动 compaction 已退役。Host 侧 clear-context Remote 保留为无可见 Client 入口的迁移逃生门。
 
+Session 模型选择在发送请求前按 Session 确认写入 Team 账本，因此已消费的选择可跨 Host 重启保留，不改 Member 默认配置。后续 Member 模型编辑会覆盖它，非模型编辑不会。来源写入失败会阻止请求。旧版选择与降级限制见[模型路由](../../docs/architecture/host-authority.zh.md#member-模型路由与会话选择)。
+
 ## Model Experience
 
 ### Host collaboration state

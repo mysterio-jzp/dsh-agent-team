@@ -73,6 +73,8 @@ import type {
   AgentTeamMemberArchivedOperation,
   AgentTeamMemberCapabilities,
   AgentTeamMemberId,
+  AgentTeamMemberRouteSource,
+  AgentTeamMemberModelRouteRecordedOperation,
   AgentTeamMemberRemovedOperation,
   AgentTeamMemberResumedOperation,
   AgentTeamMemberScopeKey,
@@ -469,6 +471,8 @@ interface Projection {
   readonly ordered: AgentTeamOperation[]
   readonly channels: Map<AgentTeamChannelRef, AgentTeamChannel>
   readonly members: Map<AgentTeamMemberId, AgentTeamAgentMember>
+  readonly modelVersions: Map<AgentTeamMemberId, number>
+  readonly modelRouteSources: Map<SessionId, AgentTeamMemberRouteSource>
   /** Member ↔ Workspace participation relation: the Workspace authorization set, seeded by member-added with the Member's default Workspace. */
   readonly participations: Map<AgentTeamMemberId, Set<WorkspaceId>>
   readonly memberships: Map<AgentTeamChannelRef, Set<AgentTeamMemberId>>
@@ -539,7 +543,7 @@ interface AgentTeamAttentionObservation {
 
 function emptyProjection(): Projection {
   return { byRequest: new Map(), byOperation: new Map(), ordered: [], channels: new Map(), members: new Map(), participations: new Map(), memberships: new Map(),
-    channelWorkingDirectories: new Map(), channelMemberWorkingDirectories: new Map(),
+    channelWorkingDirectories: new Map(), channelMemberWorkingDirectories: new Map(), modelVersions: new Map(), modelRouteSources: new Map(),
     claims: new Map(), tasks: new Map(), threads: new Map(), attention: new Map(), removedThreadMembers: new Map(), directMarkers: new Map(), activityMarkers: new Map(),
     orderedFacts: [], claimsByTask: new Map(), humanTodos: new Map(), humanTodosByThread: new Map(), factsByThread: new Map(), channelRefByThread: new Map(), mentionsByMessage: new Map(), messageCountByThread: new Map(),
     messagesByRef: new Map(),
@@ -961,6 +965,40 @@ export class AgentTeamLedger {
     })
   }
 
+  /** Last actual model edit; unrelated Member edits do not retire Session choices. */
+  memberModelVersion(memberId: AgentTeamMemberId): number {
+    this.requireMember(memberId)
+    return this.state.modelVersions.get(memberId)!
+  }
+
+  /** Restore only the source recorded for this exact Session, never another domain. */
+  memberModelRouteSource(sessionId: SessionId): AgentTeamMemberRouteSource | undefined {
+    return this.state.modelRouteSources.get(sessionId)
+  }
+
+  /** Acknowledge a bound Agent's route before its next request can consume the pick. */
+  recordMemberModelRoute(memberId: AgentTeamMemberId, sessionId: SessionId, source: AgentTeamMemberRouteSource): Promise<void> {
+    return this.enqueue(async () => {
+      // A queued observation superseded by a lifecycle/configuration edit has no
+      // authority to restore the old source. The next live decision retries fresh.
+      const member = this.requireMember(memberId)
+      if (member.state !== 'enabled' || source.memberModelVersion !== this.memberModelVersion(memberId)
+        || !isDeepStrictEqual(source.memberModel, member.model)) return
+      if (isDeepStrictEqual(this.state.modelRouteSources.get(sessionId), source)) return
+      const operation: AgentTeamMemberModelRouteRecordedOperation = {
+        ...this.operationBase({
+          requestId: `agent-team:model-route:${randomUUID()}` as AgentTeamRequestId,
+          actor: { kind: 'member', memberId, handle: member.handle },
+        }, this.nextSequence()),
+        kind: 'team/member-model-route-recorded',
+        data: { memberId, sessionId, source },
+      }
+      this.assertModelRouteRecord(this.state, operation)
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+    })
+  }
+
   suspendMember(request: AgentTeamAuthorizedSetMemberStateRequest): Promise<AgentTeamLedgerResult<AgentTeamDurableMemberResult>> {
     return this.setMemberState(request, 'suspended')
   }
@@ -1095,6 +1133,7 @@ export class AgentTeamLedger {
   getMember(memberId: AgentTeamMemberId): AgentTeamAgentMember | undefined {
     return this.state.members.get(memberId)
   }
+
 
   /**
    * Every Session bucket this Member holds, the default domain first: its
@@ -2674,6 +2713,8 @@ export class AgentTeamLedger {
         return [{ kind: 'thread', threadRef: operation.data.thread.threadRef }]
       case 'team/thread-member-removed':
         return [{ kind: 'thread', threadRef: operation.data.threadRef }]
+      case 'team/member-model-route-recorded':
+        return []
       case 'team/thread-read':
         // A read advances only the reader's private watermark; no projection
         // visible to other participants changes, so nobody is woken.
@@ -2745,6 +2786,7 @@ export class AgentTeamLedger {
       case 'team/member-session-rolled-over':
       case 'team/member-scope-session-bound':
       case 'team/member-updated':
+      case 'team/member-model-route-recorded':
       case 'team/channel-member-added':
       case 'team/thread-read':
       case 'team/dm-sent':
@@ -2924,6 +2966,10 @@ export class AgentTeamLedger {
         throw new Error('invalid Member × Channel working-directory update')
       }
       this.normalizeWorkingDirectorySet(operation.data.workingDirectories)
+      return
+    }
+    if (operation.kind === 'team/member-model-route-recorded') {
+      this.assertModelRouteRecord(projection, operation)
       return
     }
     if (operation.kind === 'team/member-updated') {
@@ -3525,6 +3571,7 @@ export class AgentTeamLedger {
       return
     }
     if (operation.kind === 'team/member-added') {
+      target.modelVersions.set(operation.data.member.memberId, operation.sequence)
       target.members.set(operation.data.member.memberId, operation.data.member)
       // Creation seeds the first Workspace participation; member.workspaceId
       // stays the default Workspace the Session roots in, immutable after add.
@@ -3606,7 +3653,14 @@ export class AgentTeamLedger {
       }
       return
     }
+    if (operation.kind === 'team/member-model-route-recorded') {
+      target.modelRouteSources.set(operation.data.sessionId, Object.freeze({ ...operation.data.source }))
+      return
+    }
     if (operation.kind === 'team/member-updated') {
+      if (!isDeepStrictEqual(target.members.get(operation.data.member.memberId)?.model, operation.data.member.model)) {
+        target.modelVersions.set(operation.data.member.memberId, operation.sequence)
+      }
       target.members.set(operation.data.member.memberId, operation.data.member)
       return
     }
@@ -5377,6 +5431,20 @@ export class AgentTeamLedger {
       || operation.data.member.sessionId === prior.sessionId
       || binding.sessionId !== operation.data.previousSessionId
       || binding.sessionId === operation.data.member.sessionId) throw new Error('invalid Member session transition scope')
+  }
+
+  private assertModelRouteRecord(projection: Projection, operation: AgentTeamMemberModelRouteRecordedOperation): void {
+    const { memberId, sessionId, source } = operation.data
+    const member = projection.members.get(memberId)
+    const bound = member?.sessionId === sessionId
+      || [...projection.memberScopes.get(memberId)?.values() ?? []].some(scope => scope.sessionId === sessionId)
+    if (member === undefined || member.state !== 'enabled' || !bound
+      || operation.actor.kind !== 'member' || operation.actor.memberId !== memberId || operation.actor.handle !== member.handle
+      || source.memberModelVersion !== projection.modelVersions.get(memberId)
+      || !isDeepStrictEqual(source.memberModel, member.model)
+      || (source.kind === 'session' && (!Number.isSafeInteger(source.sessionVersion) || source.sessionVersion! < 1))) {
+      throw new Error('invalid Member model route record')
+    }
   }
 
   private sameMemberIdentity(left: AgentTeamAgentMember, right: AgentTeamAgentMember): boolean {

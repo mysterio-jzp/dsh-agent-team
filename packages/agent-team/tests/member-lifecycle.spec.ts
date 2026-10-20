@@ -38,6 +38,11 @@ import { AGENT_TEAM_PLUGIN_ID, continuationCheckpointRefOf, handoffOf, isCheckpo
 import { RECOVERY_DELAY_MS } from '../src/recovery.ts'
 import type { AgentTeamChannelRef, AgentTeamClaimRef, AgentTeamMemberId, AgentTeamRequestId } from '../src/types.ts'
 import { MemoryStorageBackend } from './helpers/memory-backend.ts'
+import { installFixtureModelSelection } from './helpers/model-selection.ts'
+import { SqliteStorageBackend } from '../src/vendor/storage-sqlite/index.ts'
+import type { MemberModelRoute } from '../src/member-model-route.ts'
+import { sessionModelChoice } from '../src/member-model-route.ts'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 
 const cleanups: Array<() => Promise<void>> = []
 const originalDshHome = process.env.DSH_HOME
@@ -90,7 +95,8 @@ class ScriptedAdapter extends EmptyAdapter {
   resolveModelWindow: (model: string) => number = () => 320_000
 
   override resolveModel(provider: string, model: string) {
-    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: this.resolveModelWindow(model) } })
+    return Promise.resolve({ provider, id: model, name: model, context: { contextWindow: this.resolveModelWindow(model) },
+      reasoning: { efforts: [{ id: ReasoningEffortId('max'), name: 'Maximum' }] } })
   }
 
   enqueue(response: StreamChunk[]): void {
@@ -204,7 +210,9 @@ async function realHarness(
   adapter: LlmAdapter = new EmptyAdapter(),
   persistenceBackend: PersistenceBackend = 'jsonl',
   reopen?: { readonly root: string },
+  options: { readonly sqlite?: boolean; readonly modelSelection?: boolean } = {},
 ): Promise<{
+  readonly shutdown: () => Promise<void>
   readonly ctx: Context
   readonly workspaceId: WorkspaceId
   readonly root: string
@@ -255,10 +263,11 @@ async function realHarness(
   ctx.loader.builtins.include = Include
   ctx.loader.builtins.group = Group
   await ctx.plugin(LlmRuntime)
-  ctx.llm.registerAdapter(['mock'], adapter)
+  ctx.llm.registerAdapter(['mock', 'mock-other'], adapter)
   await ctx.plugin(SessionStore)
   // The preset registry injects 'sessionProjections'; the roster stays PENDING without it.
   await ctx.plugin(SessionProjectionRegistry)
+  if (options.modelSelection === true) installFixtureModelSelection(ctx)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
@@ -284,8 +293,11 @@ async function realHarness(
   await ctx.plugin(TestablePresets, { default: 'team-member' })
   await ctx.plugin(AgentPresetPlugin, { id: 'team-member', plugins: teamMemberPlugins })
   await ctx.plugin(Storage)
-  ctx.storage.backend.register('memory', new MemoryStorageBackend())
-  const facility = new DomainFacility(ctx, { backend: 'memory', routes: {} })
+  const backend = options.sqlite === true
+    ? new SqliteStorageBackend({ path: join(root, 'team.sqlite'), journalMode: 'delete' })
+    : new MemoryStorageBackend()
+  ctx.storage.backend.register('test', backend)
+  const facility = new DomainFacility(ctx, { backend: 'test', routes: {} })
   ctx.storage.mount('domain', facility)
   ctx.provide('storageDomain', facility)
   const workspaceId = WorkspaceId('workspace:member-test')
@@ -311,8 +323,17 @@ async function realHarness(
     },
   })
   const teamFiber = await ctx.plugin(AgentTeam)
-  cleanups.push(async () => { await ctx.fiber.dispose(); await facility.closeAll(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, workspaceId, root, project, workspaces, teamFiber, archived, archiveFailures, presets: ctx.agentPresets as TestablePresets, pressureState, jobsState }
+  let closed = false
+  const shutdown = async (): Promise<void> => {
+    if (closed) return
+    await ctx.sessionPersistence.flush()
+    await ctx.fiber.dispose()
+    await facility.closeAll()
+    await backend.close()
+    closed = true
+  }
+  cleanups.push(async () => { await shutdown(); await rm(root, { recursive: true, force: true }) })
+  return { ctx, workspaceId, root, project, workspaces, teamFiber, archived, archiveFailures, presets: ctx.agentPresets as TestablePresets, pressureState, jobsState, shutdown }
 }
 
 describe('Agent Team Member lifecycle', () => {
@@ -2043,6 +2064,178 @@ describe('Agent Team Member lifecycle', () => {
     const generic = teamPresetScopeMismatchMessage(false)
     expect(generic).toContain('different physical copies')
     expect(generic).toContain('pnpm install')
+  })
+
+  it('sends a Session model pick to the next real request and keeps it afterwards', async () => {
+    // This reading needs the Host's own model-selection projection mounted, or the
+    // pick cannot reach the route at all and the case silently re-tests the
+    // no-controller path instead of the one a real deployment runs.
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    installFixtureModelSelection(ctx)
+    const added = await ctx.agentTeam.addMember({
+      requestId: requestId('pick-feedback-add'), workspaceId, handle: 'builder',
+      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [],
+      model: { provider: 'mock', model: 'configured-model' },
+    })
+    const agent = ctx.agents.get(added.status.member.sessionId)!
+    adapter.enqueue(textResponse('first response'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Say hello.' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(adapter.requests.at(-1)?.model).toBe('configured-model')
+
+    // A Human picks another model inside this Session. The append is not the test
+    // seeding a value: it is the very event the Session controller's own
+    // selectModel records, and everything after it — the projection folding it,
+    // the route reading it, the Host assembling with it — is production code.
+    // What the test does NOT do is assert on that event; the only assertion is on
+    // the selection the adapter actually received.
+    agent.session.append('model/selection', { provider: 'mock', model: 'picked-model' })
+    adapter.enqueue(textResponse('second response'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Say hello again.' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(adapter.requests.at(-1)?.model).toBe('picked-model')
+
+    // And it stays: a later request keeps the Human's pick over the Member's
+    // configured model, which is what "the pick outranks the configuration" means
+    // once it has been consumed rather than merely queued.
+    adapter.enqueue(textResponse('third response'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'One more.' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(adapter.requests.at(-1)?.model).toBe('picked-model')
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it('sends the Member config edit to the next request and records it in the Session', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const added = await ctx.agentTeam.addMember({
+      requestId: requestId('config-feedback-add'), workspaceId, handle: 'builder',
+      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [],
+      model: { provider: 'mock', model: 'first-model' },
+    })
+    const agent = ctx.agents.get(added.status.member.sessionId)!
+    adapter.enqueue(textResponse('first response'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Say hello.' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(adapter.requests.at(-1)?.model).toBe('first-model')
+
+    await ctx.agentTeam.updateMember({
+      requestId: requestId('config-feedback-edit'), memberId: added.status.member.memberId,
+      handle: 'builder', description: 'Builds the implementation',
+      model: { provider: 'mock', model: 'second-model' },
+    })
+
+    // The edit reaches the Session's own record, so the selector and the next
+    // request agree instead of the UI keeping the older choice. This fixture
+    // mounts no Session controller, so the projection unit is absent here; the
+    // durable event it folds is the contract that matters.
+    const logged = agent.session.ownEvents().filter(event => event.type === 'model/selection')
+    expect(logged.at(-1)?.data).toMatchObject({ provider: 'mock', model: 'second-model' })
+
+    adapter.enqueue(textResponse('second response'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Say hello again.' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(adapter.requests.at(-1)?.model).toBe('second-model')
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it.each([
+    { name: 'different provider and model', chosen: { provider: 'mock-other', model: 'picked-model' }, edit: 'none' },
+    { name: 'effort only', chosen: { provider: 'mock', model: 'configured-model', reasoningEffort: ReasoningEffortId('max') }, edit: 'none' },
+    { name: 'later Member edit', chosen: { provider: 'mock-other', model: 'picked-model' }, edit: 'model' },
+    { name: 'Member changes away and back', chosen: { provider: 'mock-other', model: 'picked-model' }, edit: 'cycle' },
+    { name: 'unrelated Member edit', chosen: { provider: 'mock-other', model: 'picked-model' }, edit: 'description' },
+  ])('restores the latest model action after a cold Host restart: $name', async ({ chosen, edit }) => {
+    const options = { sqlite: true, modelSelection: true }
+    const beforeAdapter = new ScriptedAdapter()
+    const before = await realHarness(beforeAdapter, 'jsonl', undefined, options)
+    const configured = { provider: 'mock', model: 'configured-model' }
+    const added = await before.ctx.agentTeam.addMember({
+      requestId: requestId('cold-pick-add'), workspaceId: before.workspaceId, handle: 'builder',
+      description: '', presetId: 'team-member', channelRefs: [], model: configured,
+    })
+    const sessionId = added.status.member.sessionId
+    const agent = before.ctx.agents.get(sessionId)!
+    agent.session.append('model/selection', chosen)
+    beforeAdapter.enqueue(textResponse('consume the Session choice'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Use my choice.' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(beforeAdapter.requests.at(-1)).toMatchObject(chosen)
+    expect(sessionModelChoice(agent.ctx, agent).pending).toBeUndefined()
+    expect(sessionModelChoice(agent.ctx, agent).lastUsed).toEqual(chosen)
+    let expected = chosen
+    let expectedMemberModel = configured
+    if (edit !== 'none') {
+      await before.ctx.agentTeam.suspendMember({ requestId: requestId('cold-pick-suspend'), memberId: added.status.member.memberId })
+      const model = edit === 'description' ? undefined : { provider: 'mock', model: 'later-model' }
+      await before.ctx.agentTeam.updateMember({ requestId: requestId('cold-pick-edit'), memberId: added.status.member.memberId,
+        handle: 'builder', description: 'changed description', ...model === undefined ? {} : { model } })
+      if (model !== undefined) expected = expectedMemberModel = model
+      if (edit === 'cycle') {
+        await before.ctx.agentTeam.updateMember({ requestId: requestId('cold-pick-cycle'), memberId: added.status.member.memberId,
+          handle: 'builder', description: '', model: configured })
+        expected = expectedMemberModel = configured
+      }
+    }
+    // No runtime objects or projection cache survive. Both the operation ledger
+    // and Session are reopened from disk in a different Host context.
+    await before.shutdown()
+    const afterAdapter = new ScriptedAdapter()
+    const after = await realHarness(afterAdapter, 'jsonl', { root: before.root }, options)
+    if (edit !== 'none') await after.ctx.agentTeam.resumeMember({ requestId: requestId('cold-pick-resume'), memberId: added.status.member.memberId })
+    const resumed = await waitFor(() => after.ctx.agents.get(sessionId))
+    expect(resumed).not.toBe(agent)
+    expect(resumed.session).not.toBe(agent.session)
+    expect(after.ctx.agentTeam.members().find(row => row.member.memberId === added.status.member.memberId)?.member.model).toEqual(expectedMemberModel)
+    const routes = Reflect.get(after.ctx.agentTeam, 'modelRoutes') as Map<SessionId, MemberModelRoute>
+    expect.soft(routes.get(sessionId)?.ref.current).toEqual(expected)
+    afterAdapter.enqueue(textResponse('after the cold restart'))
+    resumed.followup(createUserMessage({ content: [{ type: 'text', text: 'Keep my choice.' }], source: { kind: 'user' } }))
+    await resumed.whenIdle()
+    expect(afterAdapter.requests.at(-1)).toMatchObject(expected)
+    after.ctx.agentTeam.validateLedger()
+  })
+
+  it('blocks a picked-model request when its source cannot be persisted, then retries without reverting', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter, 'jsonl', undefined, { modelSelection: true })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('route-write-failure-add'), workspaceId,
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [], model: { provider: 'mock', model: 'configured-model' } })
+    const agent = ctx.agents.get(added.status.member.sessionId)!
+    const ledger = Reflect.get(ctx.agentTeam, 'ledger') as AgentTeamLedger
+    const write = vi.spyOn(ledger, 'recordMemberModelRoute').mockRejectedValue(new Error('route storage unavailable'))
+    try {
+      agent.session.append('model/selection', { provider: 'mock', model: 'picked-model' })
+      agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Do not silently fall back.' }], source: { kind: 'user' } }))
+      await agent.whenIdle()
+      expect(adapter.requests).toEqual([])
+      expect(ctx.agentTeam.members().find(row => row.member.memberId === added.status.member.memberId)?.diagnostic?.detail).toContain('route storage unavailable')
+      expect(sessionModelChoice(agent.ctx, agent).pending?.model).toBe('picked-model')
+    } finally { write.mockRestore() }
+    adapter.enqueue(textResponse('write recovered'))
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Retry the same choice.' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+    expect(adapter.requests.at(-1)?.model).toBe('picked-model')
+    ctx.agentTeam.validateLedger()
+  })
+
+  it('deduplicates route records per bound Session without waking shared projections', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('route-ownership-add'), workspaceId,
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+    const ledger = Reflect.get(ctx.agentTeam, 'ledger') as AgentTeamLedger
+    const memberId = added.status.member.memberId
+    const source = { kind: 'session' as const, sessionVersion: 1, memberModelVersion: ledger.memberModelVersion(memberId) }
+    const count = ledger.status().operationCount
+    const cursor = ledger.projectionSequence()
+    await ledger.recordMemberModelRoute(memberId, added.status.member.sessionId, source)
+    await ledger.recordMemberModelRoute(memberId, added.status.member.sessionId, source)
+    expect(ledger.status().operationCount).toBe(count + 1)
+    expect(ledger.projectionSequence()).toBe(cursor)
+    await expect(ledger.recordMemberModelRoute(memberId, SessionId('session:not-bound'), source)).rejects.toThrow('invalid Member model route record')
+    await expect(ledger.recordMemberModelRoute(memberId, added.status.member.sessionId, { ...source, sessionVersion: 0 })).rejects.toThrow('invalid Member model route record')
+    ctx.agentTeam.validateLedger()
   })
 
   it('keeps a persisted Member session active after switching its model and restarting', async () => {

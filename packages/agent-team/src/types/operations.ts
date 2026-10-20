@@ -12,6 +12,7 @@ import type {
   AgentTeamHumanTodo,
   AgentTeamInboxDelta,
   AgentTeamMemberId,
+  AgentTeamMemberRouteSource,
   AgentTeamMemberScopeKey,
   AgentTeamMemberScopeSession,
   AgentTeamMessage,
@@ -538,6 +539,16 @@ export interface AgentTeamDmSentOperation extends AgentTeamOperationBase {
   }
 }
 
+/** Runtime acknowledgement of the model action governing one bound Session. */
+export interface AgentTeamMemberModelRouteRecordedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/member-model-route-recorded'
+  readonly data: {
+    readonly memberId: AgentTeamMemberId
+    readonly sessionId: SessionId
+    readonly source: AgentTeamMemberRouteSource
+  }
+}
+
 /** Closed union of durable Agent Team operations. */
 export type AgentTeamOperation =
   | AgentTeamInitializedOperation
@@ -555,6 +566,7 @@ export type AgentTeamOperation =
   | AgentTeamChannelWorkingDirectoriesUpdatedOperation
   | AgentTeamChannelMemberWorkingDirectoriesUpdatedOperation
   | AgentTeamMemberUpdatedOperation
+  | AgentTeamMemberModelRouteRecordedOperation
   | AgentTeamChannelMemberAddedOperation
   | AgentTeamChannelMemberRemovedOperation
   | AgentTeamMemberWorkspaceJoinedOperation
