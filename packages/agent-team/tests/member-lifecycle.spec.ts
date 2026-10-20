@@ -388,6 +388,28 @@ describe('Agent Team Member lifecycle', () => {
     ctx.agentTeam.validateLedger()
   })
 
+  it('opens the new Channel work domain for an initial Member as the Channel is created', async () => {
+    const { ctx, workspaceId } = await realHarness()
+    const seeded = await ctx.agentTeam.createChannel({ requestId: requestId('provision-seed'), workspaceId,
+      name: 'seed', description: 'Seeded participation' })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('provision-add'), workspaceId,
+      handle: 'seeded', description: '', presetId: 'team-member', channelRefs: [seeded.channel.channelRef] })
+    expect(added.status.availability, JSON.stringify(added.status)).toBe('active')
+    const memberId = added.status.member.memberId
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(seeded.channel.channelRef))).toBeDefined()
+
+    const named = await ctx.agentTeam.createChannel({ requestId: requestId('provision-named'), workspaceId,
+      name: 'named', description: 'Names an existing Member', memberIds: [memberId] })
+
+    // Nothing runs the startup reconciliation between these two lines, and this
+    // case must never let it: a pass that backfilled the binding would keep the
+    // assertion below green after the create-time call was deleted, which is the
+    // only thing this case exists to catch. Membership granted and context
+    // provisioned are one Human intent, so this domain is bound here or nowhere.
+    const bound = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(named.channel.channelRef))
+    expect(bound).toBeDefined()
+  })
+
   it('archives a Member: session disposed and archived, private memory kept, claims released', async () => {
     const { ctx, workspaceId, archived } = await realHarness()
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('archive-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })

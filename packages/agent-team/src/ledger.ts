@@ -1203,9 +1203,18 @@ export class AgentTeamLedger {
     readonly actor: AgentTeamHumanActor
   } | undefined {
     // Membership is recorded on the Member's own creation, which carries the
-    // Channel set it was granted. Scanning forward keeps the FIRST grant, which
-    // is the act that made this membership.
+    // Channel set it was granted, or on the Channel's creation, which carries
+    // the Members it was granted to. Both are Human acts and both name the
+    // membership, so both are admissible origins; scanning forward keeps the
+    // FIRST grant, which is the act that made this membership.
     for (const operation of this.state.ordered) {
+      if (operation.kind === 'team/channel-created') {
+        const created = (operation as AgentTeamChannelCreatedOperation).data
+        if (created.channel.channelRef !== channelRef || !created.memberIds.includes(memberId)) continue
+        if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) return undefined
+        if (operation.actor.kind !== 'human') return undefined
+        return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
+      }
       if (operation.kind !== 'team/member-added') continue
       const data = (operation as AgentTeamMemberAddedOperation).data
       if (data.member.memberId !== memberId || !data.channelRefs.includes(channelRef)) continue
