@@ -207,9 +207,9 @@ const memberScopeSessionBound: Op<'team/member-scope-session-bound'> = {
   data: {
     memberId,
     binding: {
-      scopeKey: `thread:${memberThread}` as AgentTeamMemberScopeKey,
-      scopeKind: 'thread',
-      scopeRef: memberThread,
+      scopeKey: `channel:${channelRef}` as AgentTeamMemberScopeKey,
+      scopeKind: 'channel',
+      scopeRef: channelRef,
       sessionId: SessionId('session:protocol-scope'),
       workingDirectories: ['/tmp/protocol-domain', '/tmp/protocol-shared'],
     },
@@ -224,9 +224,9 @@ const memberScopeSessionBoundLegacy: Op<'team/member-scope-session-bound'> = {
   data: {
     memberId,
     binding: {
-      scopeKey: `thread:${memberThread}` as AgentTeamMemberScopeKey,
-      scopeKind: 'thread',
-      scopeRef: memberThread,
+      scopeKey: `channel:${channelRef}` as AgentTeamMemberScopeKey,
+      scopeKind: 'channel',
+      scopeRef: channelRef,
       sessionId: SessionId('session:protocol-scope-legacy'),
     },
   },

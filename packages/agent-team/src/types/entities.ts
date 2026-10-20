@@ -109,21 +109,23 @@ export interface AgentTeamMemberCapabilities {
 
 /**
  * Which work domain one Member Session bucket belongs to — the namespace its
- * key encodes. `thread` is the granularity the Human fixed (one discussion, one
- * bucket); a discussion's Task does not split it further.
+ * key encodes. `channel` is the granularity the Human fixed (one Channel, one
+ * bucket); the discussions inside it share that bucket, so a Task or a Thread
+ * does not split it further.
  */
-export type AgentTeamMemberScopeKind = 'thread' | 'default'
+export type AgentTeamMemberScopeKind = 'channel' | 'default'
 
 /**
- * Stable key of one Member Session bucket: `thread:<threadRef>` for one
- * discussion, or `default` for facts that belong to no discussion (Member
- * lifecycle, recovery, delivery) — including the single Session a ledger
- * recorded before buckets holds.
+ * Stable key of one Member Session bucket: `channel:<channelRef>` for one
+ * Channel, or `default` for facts that belong to no Channel (Member lifecycle,
+ * recovery, delivery) — including the single Session a ledger recorded before
+ * buckets holds.
  *
  * Built from immutable refs only: a Channel name or a Member handle would move
- * the key under a rename. It is deliberately not derived from a Task, because a
- * taskless discussion becomes taskful in place (`promoteThread`), and the domain
- * must not change identity when it does.
+ * the key under a rename. It is deliberately not derived from a Thread or a
+ * Task: every discussion in the Channel shares one domain, so promoting a
+ * taskless discussion (`promoteThread`) must not change its identity, and a
+ * Channel rename leaves both the ref and the key untouched.
  */
 export type AgentTeamMemberScopeKey = Branded<'AgentTeamMemberScopeKey'>
 
@@ -135,16 +137,30 @@ export type AgentTeamMemberScopeKey = Branded<'AgentTeamMemberScopeKey'>
 export interface AgentTeamMemberScopeSession {
   readonly scopeKey: AgentTeamMemberScopeKey
   readonly scopeKind: AgentTeamMemberScopeKind
-  /** The immutable ref the kind names; absent on the `default` domain. */
+  /** The immutable ref the kind names: the `channelRef` on a `channel` domain; absent on `default`. */
   readonly scopeRef?: string | undefined
   /** The Session this domain runs on; every domain has its own context. */
   readonly sessionId: SessionId
-  /** Ordered absolute roots snapshotted on first Thread binding; absent for `default` and pre-snapshot legacy bindings. */
+  /** Ordered absolute roots snapshotted on first Channel binding; absent for `default` and pre-snapshot legacy bindings. */
   readonly workingDirectories?: AgentTeamWorkingDirectorySet | undefined
 }
 
 /** Ordered absolute directory paths configured for one work domain (one to four; Host validates writes). */
 export type AgentTeamWorkingDirectorySet = readonly string[]
+
+/**
+ * What a running generation can say about its work domain.
+ *
+ * `not-a-work-domain` and `unbound` are not the same absence: the first is a
+ * Session outside the Member domain table at all, the second is a Session that
+ * IS a Member domain and whose durable binding is gone. Only the second is a
+ * defect, and a projection that cannot tell them apart has no way to report it
+ * without inventing a binding.
+ */
+export type AgentTeamWorkDomainState =
+  | { readonly kind: 'not-a-work-domain' }
+  | { readonly kind: 'unbound'; readonly memberId: AgentTeamMemberId; readonly scopeKey: AgentTeamMemberScopeKey }
+  | { readonly kind: 'bound'; readonly binding: AgentTeamMemberScopeSession }
 
 /** Durable identity and lifecycle intent of one team-managed Agent. */
 export interface AgentTeamAgentMember {
@@ -223,6 +239,7 @@ export type AgentTeamMemberDiagnosticClass =
   | 'runtime' // live runtime or compaction failure
   | 'activation' // unclassified activation failure
   | 'capability-apply' // post-commit configuration apply failed at the runtime
+  | 'domain-unattributed' // a work domain could not be created because its originating act is unrecorded
 
 /** One Member failure's structured reason; rendered, never persisted. */
 export interface AgentTeamMemberDiagnostic {

@@ -68,6 +68,13 @@ async function addLedgerMember(ledger: AgentTeamLedger, channelRef: AgentTeamCha
  * One Team service plus its storage pool, exposed so a test can dispose the
  * service and boot a second one over the same durable records.
  */
+/** Sequence of the newest operation in the pool: the cursor's own definition. */
+function lastStoredSequence(pool: MemoryMediaPool): number {
+  const operations = [...pool.media.get('agent_team')!.tables.get('operations')!.values()]
+    .map(record => record as { readonly sequence: number })
+  return Math.max(...operations.map(operation => operation.sequence))
+}
+
 async function restartHarness(pool: MemoryMediaPool): Promise<{ readonly ctx: Context; readonly facility: DomainFacility; readonly fiber: { dispose: () => Promise<void> } }> {
   const ctx = new Context()
   await ctx.plugin(Storage)
@@ -222,10 +229,18 @@ describe('scoped Team change notifications', () => {
     // The Human's read through the service really commits (there is something
     // unread) and yet moves no cursor: it is private read progress.
     const second = await restartHarness(pool)
-    expect((await changeBaseline(second.ctx.agentTeam)).version).toBe(reply.receipt.sequence)
+    // Startup reconciliation appends the work domain the Member joined without
+    // (its record was written straight to the ledger). The cursor is defined as
+    // the sequence of the ledger's LAST stored operation, so the assertion is an
+    // equality against that record — an inequality would also hold for an
+    // arbitrary large number and could not tell a derived cursor from a wrong one.
+    const baseline = (await changeBaseline(second.ctx.agentTeam)).version
+    expect(baseline).toBe(lastStoredSequence(pool))
     const read = await second.ctx.agentTeam.readThread({ requestId: requestId('restart-read'), workspaceId: alpha, taskRef: thread.taskRef })
     expect(read.receipt).toBeDefined()
-    expect((await changeBaseline(second.ctx.agentTeam)).version).toBe(reply.receipt.sequence)
+    // The read commits but moves no cursor: the position is unchanged from the
+    // one the restart derived above, which is the property this asserts.
+    expect((await changeBaseline(second.ctx.agentTeam)).version).toBe(baseline)
     await second.fiber.dispose()
 
     // A further restart re-derives the same position from the records: neither
@@ -233,7 +248,9 @@ describe('scoped Team change notifications', () => {
     // advanced). A Client that parked before it is not answered by the restart.
     const third = await restartHarness(pool)
     const after = (await changeBaseline(third.ctx.agentTeam)).version
-    expect(after).toBe(reply.receipt.sequence)
+    // Same derivation on the next boot: the appended binding is already durable,
+    // so reconciliation adds nothing and the position repeats exactly.
+    expect(after).toBe(baseline)
     const parked = nextChange(third.ctx.agentTeam)
     expect(await staysPending(parked)).toBe(true)
 

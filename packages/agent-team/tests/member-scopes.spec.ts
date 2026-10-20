@@ -19,7 +19,7 @@ import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.
 import { AgentTeamLedger, agentTeamHumanActor, memberScopeBindRequestId } from '../src/ledger.ts'
 import type { AgentTeamLedgerResult, AgentTeamMemberScopeBoundResult } from '../src/ledger.ts'
 import { agentTeamDomainSpec } from '../src/spec.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY, parseMemberScopeKey, threadMemberScopeKey } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, parseMemberScopeKey } from '../src/member-scope.ts'
 import type {
   AgentTeamAgentMember,
   AgentTeamChannelRef,
@@ -49,14 +49,16 @@ interface ScopeFixture {
   readonly facility: DomainFacility
   readonly memberId: AgentTeamAgentMember['memberId']
   readonly channelRef: AgentTeamChannelRef
-  /** A taskless discussion: the domain a first delivery would bind. */
+  /** The first discussion of the fixture Channel: a source of facts, never a domain of its own. */
   readonly threadRef: AgentTeamThreadRef
   readonly revision: number
-  /** A second discussion of the same Member, for the "one domain per Thread" cases. */
+  /** A second discussion in the SAME Channel; it shares the Channel's domain with `threadRef`. */
   readonly otherThreadRef: AgentTeamThreadRef
+  /** A second Channel of the same Workspace — the only thing that makes a second domain. */
+  readonly otherChannelRef: AgentTeamChannelRef
 }
 
-/** One Member, one Channel, two discussions — no bucket bound yet. */
+/** One Member, two Channels; the first Channel carries two discussions. No bucket bound yet. */
 async function fixture(): Promise<ScopeFixture> {
   const ctx = new Context()
   await ctx.plugin(Storage)
@@ -90,7 +92,12 @@ async function fixture(): Promise<ScopeFixture> {
   const other = applied(await ledger.sendMessage({ requestId: requestId('message-other'), actor, workspaceId,
     channelRef: channel.channel.channelRef, body: 'The second discussion', asTask: false }))
   if (other.kind !== 'committed') throw new Error(`second seed message committed as '${other.kind}'`)
-  return { ledger, facility, memberId, channelRef: channel.channel.channelRef, threadRef: sent.thread.threadRef, revision: sent.thread.revision, otherThreadRef: other.thread.threadRef }
+  // A second Channel of the same Workspace: the fixture's only source of a
+  // second work domain, because a Thread no longer splits one Channel's domain.
+  const otherChannel = applied(await ledger.createChannel({ requestId: requestId('channel-other'), actor: agentTeamHumanActor(), workspaceId,
+    name: 'scopes-other', description: 'A second Scope fixture Channel', memberIds: [memberId] }))
+  return { ledger, facility, memberId, channelRef: channel.channel.channelRef, threadRef: sent.thread.threadRef,
+    revision: sent.thread.revision, otherThreadRef: other.thread.threadRef, otherChannelRef: otherChannel.channel.channelRef }
 }
 
 /** A media pool preloaded with stored records: the raw bytes a Host restart reads. */
@@ -146,14 +153,14 @@ function bind(fixture: ScopeFixture, scopeKey: AgentTeamMemberScopeKey, sessionI
 }
 
 describe('Member work-domain keys', () => {
-  it('keys a discussion from immutable refs alone', () => {
-    const threadRef = 'thread:abc' as AgentTeamThreadRef
+  it('keys a Channel from immutable refs alone', () => {
+    const channelRef = 'channel:abc' as AgentTeamChannelRef
     // The ref already names its own kind; the key adds the domain namespace so
     // a key can never be read as some other kind of ref.
-    expect(threadMemberScopeKey(threadRef)).toBe('thread:thread:abc')
+    expect(channelMemberScopeKey(channelRef)).toBe('channel:channel:abc')
     expect(DEFAULT_MEMBER_SCOPE_KEY).toBe('default')
     for (const [key, kind, ref] of [
-      ['thread:thread:abc', 'thread', 'thread:abc'],
+      ['channel:channel:abc', 'channel', 'channel:abc'],
       ['default', 'default', undefined],
     ] as const) {
       expect(parseMemberScopeKey(key), `key '${key}' round-trips`).toEqual({ scopeKind: kind, ...(ref === undefined ? {} : { scopeRef: ref }) })
@@ -162,18 +169,18 @@ describe('Member work-domain keys', () => {
 
   it('rejects a key it did not write instead of defaulting an unknown domain into the legacy Session', () => {
     expect(() => parseMemberScopeKey('task:task:abc')).toThrow(/unknown scope kind 'task'/)
-    // A discussion is the only work domain this bundle writes, so the two
-    // namespaces a narrower design might have used are refused, not accepted as
-    // domains whose facts no reader could resolve.
-    expect(() => parseMemberScopeKey('channel:channel:def')).toThrow(/unknown scope kind 'channel'/)
+    // A Channel is the only work domain this bundle writes. A Thread key is no
+    // longer readable at all: a ledger carrying one is corrupt, and reading it
+    // as some unknown live domain would deliver facts no reader can resolve.
+    expect(() => parseMemberScopeKey('thread:thread:abc')).toThrow(/unknown scope kind 'thread'/)
     expect(() => parseMemberScopeKey('dm:member:peer')).toThrow(/unknown scope kind 'dm'/)
-    expect(() => parseMemberScopeKey('thread:')).toThrow(/carries no ref/)
+    expect(() => parseMemberScopeKey('channel:')).toThrow(/carries no ref/)
     expect(() => parseMemberScopeKey('nocolon')).toThrow(/carries no namespace/)
   })
 })
 
 describe('Member work-domain directory snapshots', () => {
-  it('applies Channel defaults and Member overrides only when a Thread first binds, and replays the snapshot', async () => {
+  it('applies Channel defaults and Member overrides when a Channel first binds, and replays the snapshot', async () => {
     const test = await fixture()
     const channelDefaults = ['/tmp/channel-first', '/tmp/channel-shared']
     const memberOverride = ['/tmp/member-first', '/tmp/member-extra']
@@ -183,7 +190,7 @@ describe('Member work-domain directory snapshots', () => {
       actor: agentTeamHumanActor(), workspaceId, channelRef: test.channelRef, memberId: test.memberId, workingDirectories: memberOverride }))
     expect(overrideResult.workingDirectories).toEqual(memberOverride)
 
-    const firstKey = threadMemberScopeKey(test.threadRef)
+    const firstKey = channelMemberScopeKey(test.channelRef)
     const first = applied(await bind(test, firstKey, SessionId('session:dirs-first'))).binding
     expect(first.workingDirectories).toEqual(memberOverride)
 
@@ -195,33 +202,34 @@ describe('Member work-domain directory snapshots', () => {
     applied(await test.ledger.updateChannelMemberWorkingDirectories({ requestId: requestId('dirs-member-clear'), actor: agentTeamHumanActor(),
       workspaceId, channelRef: test.channelRef, memberId: test.memberId, workingDirectories: null }))
 
-    const secondKey = threadMemberScopeKey(test.otherThreadRef)
+    // A second domain is now a second CHANNEL, so it resolves that Channel's own
+    // defaults rather than the edits made to the first one.
+    const otherDefaults = ['/tmp/other-channel', '/tmp/channel-shared']
+    applied(await test.ledger.updateChannelWorkingDirectories({ requestId: requestId('dirs-other-channel'), actor: agentTeamHumanActor(),
+      workspaceId, channelRef: test.otherChannelRef, workingDirectories: otherDefaults }))
+    const secondKey = channelMemberScopeKey(test.otherChannelRef)
     const second = applied(await bind(test, secondKey, SessionId('session:dirs-second'))).binding
-    expect(second.workingDirectories).toEqual(channelLater)
+    expect(second.workingDirectories).toEqual(otherDefaults)
     expect(test.ledger.memberScopeSessionFor(test.memberId, firstKey)?.workingDirectories).toEqual(memberOverride)
 
     const retry = await bind(test, firstKey, SessionId('session:dirs-first'))
     expect(retry.committed).toBe(false)
     expect(retry.value.binding.workingDirectories).toEqual(memberOverride)
 
-    // Clearing the Channel default restores its Workspace-root fallback, without
-    // changing either previously bound domain.
-    applied(await test.ledger.updateChannelWorkingDirectories({ requestId: requestId('dirs-channel-clear'), actor: agentTeamHumanActor(),
-      workspaceId, channelRef: test.channelRef, workingDirectories: null }))
-    const third = applied(await test.ledger.sendMessage({ requestId: requestId('dirs-third-message'), actor: { kind: 'member', memberId: test.memberId, handle: 'scoped' },
-      workspaceId, channelRef: test.channelRef, body: 'A third discussion', asTask: false }))
-    if (third.kind !== 'committed') throw new Error(`third seed message committed as '${third.kind}'`)
-    const thirdBinding = applied(await bind(test, threadMemberScopeKey(third.thread.threadRef), SessionId('session:dirs-third'))).binding
-    expect(thirdBinding.workingDirectories).toEqual([workspaceRoot])
+    // Clearing a Channel's default restores its Workspace-root fallback for the
+    // domains bound after the clear, without changing an already bound one.
+    applied(await test.ledger.updateChannelWorkingDirectories({ requestId: requestId('dirs-other-clear'), actor: agentTeamHumanActor(),
+      workspaceId, channelRef: test.otherChannelRef, workingDirectories: null }))
 
-    expect(test.ledger.channelWorkingDirectorySettings({ workspaceId, channelRef: test.channelRef })).toEqual({
-      channelRef: test.channelRef, defaultWorkingDirectories: null, memberOverrides: [],
+    expect(test.ledger.channelWorkingDirectorySettings({ workspaceId, channelRef: test.otherChannelRef })).toEqual({
+      channelRef: test.otherChannelRef, defaultWorkingDirectories: null, memberOverrides: [],
     })
     const cold = await restart(test)
     expect(cold.memberScopeSessionFor(test.memberId, firstKey)?.workingDirectories).toEqual(memberOverride)
-    expect(cold.memberScopeSessionFor(test.memberId, secondKey)?.workingDirectories).toEqual(channelLater)
-    expect(cold.memberScopeSessionFor(test.memberId, threadMemberScopeKey(third.thread.threadRef))?.workingDirectories).toEqual([workspaceRoot])
-    expect(cold.channelWorkingDirectorySettings({ workspaceId, channelRef: test.channelRef }).defaultWorkingDirectories).toBeNull()
+    expect(cold.memberScopeSessionFor(test.memberId, secondKey)?.workingDirectories).toEqual(otherDefaults)
+    // The FIRST Channel keeps its edited default; the second is the one cleared.
+    expect(cold.channelWorkingDirectorySettings({ workspaceId, channelRef: test.channelRef }).defaultWorkingDirectories).toEqual(channelLater)
+    expect(cold.channelWorkingDirectorySettings({ workspaceId, channelRef: test.otherChannelRef }).defaultWorkingDirectories).toBeNull()
     const coldRetry = await bind({ ...test, ledger: cold }, firstKey, SessionId('session:dirs-first'))
     expect(coldRetry.committed).toBe(false)
     expect(coldRetry.value.binding.workingDirectories).toEqual(memberOverride)
@@ -256,9 +264,9 @@ describe('Member work-domain bindings', () => {
       { scopeKey: 'default', scopeKind: 'default', sessionId: SessionId('session:scoped-default') },
     ])
 
-    const scopeKey = threadMemberScopeKey(test.threadRef)
+    const scopeKey = channelMemberScopeKey(test.channelRef)
     const bound = applied(await bind(test, scopeKey, SessionId('session:scoped-thread'))).binding
-    expect(bound).toEqual({ scopeKey, scopeKind: 'thread', scopeRef: test.threadRef, sessionId: SessionId('session:scoped-thread'), workingDirectories: [workspaceRoot] })
+    expect(bound).toEqual({ scopeKey, scopeKind: 'channel', scopeRef: test.channelRef, sessionId: SessionId('session:scoped-thread'), workingDirectories: [workspaceRoot] })
 
     // The Member record is not the binding: the default domain keeps its Session.
     expect(test.ledger.getMember(test.memberId)?.sessionId).toBe(SessionId('session:scoped-default'))
@@ -273,7 +281,7 @@ describe('Member work-domain bindings', () => {
 
   it('cold reopen: a bound domain round-trips the durable schema and replay', async () => {
     const test = await fixture()
-    const scopeKey = threadMemberScopeKey(test.threadRef)
+    const scopeKey = channelMemberScopeKey(test.channelRef)
     await bind(test, scopeKey, SessionId('session:scoped-thread'))
 
     // The Host's own mount path: a fresh ledger over the same records, with the
@@ -281,7 +289,7 @@ describe('Member work-domain bindings', () => {
     // its key, or a namespace the schema does not know, fails right here.
     const cold = await restart(test)
     expect(cold.memberScopeSessionFor(test.memberId, scopeKey)).toEqual({
-      scopeKey, scopeKind: 'thread', scopeRef: test.threadRef, sessionId: SessionId('session:scoped-thread'), workingDirectories: [workspaceRoot],
+      scopeKey, scopeKind: 'channel', scopeRef: test.channelRef, sessionId: SessionId('session:scoped-thread'), workingDirectories: [workspaceRoot],
     })
     // Replaying the same records twice is idempotent.
     await restart(test)
@@ -289,7 +297,7 @@ describe('Member work-domain bindings', () => {
 
   it('cold reopen: accepts a binding recorded before workspaceId and directory snapshots existed', async () => {
     const test = await fixture()
-    const scopeKey = threadMemberScopeKey(test.threadRef)
+    const scopeKey = channelMemberScopeKey(test.channelRef)
     await bind(test, scopeKey, SessionId('session:legacy-thread'))
 
     const records = [...test.facility.get('agent_team')!.table('operations').entries()].map(([key, operation]) => {
@@ -312,13 +320,13 @@ describe('Member work-domain bindings', () => {
 
     const cold = await reopen(records)
     expect(cold.memberScopeSessionFor(test.memberId, scopeKey)).toEqual({
-      scopeKey, scopeKind: 'thread', scopeRef: test.threadRef, sessionId: SessionId('session:legacy-thread'),
+      scopeKey, scopeKind: 'channel', scopeRef: test.channelRef, sessionId: SessionId('session:legacy-thread'),
     })
   })
 
   it('keeps a discussion in one domain across promoteThread', async () => {
     const test = await fixture()
-    const scopeKey = threadMemberScopeKey(test.threadRef)
+    const scopeKey = channelMemberScopeKey(test.channelRef)
     await bind(test, scopeKey, SessionId('session:scoped-thread'))
     const before = test.ledger.memberScopeSessions(test.memberId)
 
@@ -329,39 +337,39 @@ describe('Member work-domain bindings', () => {
 
     expect(test.ledger.memberScopeSessions(test.memberId)).toEqual(before)
     expect(test.ledger.memberScopeSessionFor(test.memberId, scopeKey)?.sessionId).toBe(SessionId('session:scoped-thread'))
-    expect(test.ledger.memberScopeSessionFor(test.memberId, threadMemberScopeKey(test.otherThreadRef))).toBeUndefined()
+    expect(test.ledger.memberScopeSessionFor(test.memberId, channelMemberScopeKey(test.otherChannelRef))).toBeUndefined()
     await restart(test)
   })
 
   it('refuses a binding that would give one Session two domains, or bind the default domain twice', async () => {
     const test = await fixture()
-    const scopeKey = threadMemberScopeKey(test.threadRef)
+    const scopeKey = channelMemberScopeKey(test.channelRef)
     await bind(test, scopeKey, SessionId('session:scoped-thread'))
 
     // The default domain IS the Member's own Session.
     await expect(bind(test, DEFAULT_MEMBER_SCOPE_KEY, SessionId('session:scoped-default'))).rejects.toThrow(/default Member scope is the Member Session itself/)
     // One Session holds one context: two domains must never share it.
     await expect(test.ledger.bindMemberScopeSession({ requestId: requestId('alias'), workspaceId, memberId: test.memberId,
-      binding: { scopeKey: threadMemberScopeKey(test.otherThreadRef), scopeKind: 'thread', scopeRef: test.otherThreadRef,
+      binding: { scopeKey: channelMemberScopeKey(test.otherChannelRef), scopeKind: 'channel', scopeRef: test.otherChannelRef,
         sessionId: SessionId('session:scoped-thread') }, actor: agentTeamHumanActor() })).rejects.toThrow(/invalid Member scope binding/)
     // Nor may a domain alias the Member's default Session: that is no isolation.
     await expect(test.ledger.bindMemberScopeSession({ requestId: requestId('alias-default'), workspaceId, memberId: test.memberId,
-      binding: { scopeKey: threadMemberScopeKey(test.otherThreadRef), scopeKind: 'thread', scopeRef: test.otherThreadRef,
+      binding: { scopeKey: channelMemberScopeKey(test.otherChannelRef), scopeKind: 'channel', scopeRef: test.otherChannelRef,
         sessionId: SessionId('session:scoped-default') }, actor: agentTeamHumanActor() })).rejects.toThrow(/invalid Member scope binding/)
     // A domain is bound once; only a Session transition moves it afterwards.
     await expect(test.ledger.bindMemberScopeSession({ requestId: requestId('rebind'), workspaceId, memberId: test.memberId,
-      binding: { scopeKey, scopeKind: 'thread', scopeRef: test.threadRef, sessionId: SessionId('session:scoped-other') },
+      binding: { scopeKey, scopeKind: 'channel', scopeRef: test.channelRef, sessionId: SessionId('session:scoped-other') },
       actor: agentTeamHumanActor() })).rejects.toThrow(/invalid Member scope binding/)
     // A domain for a ref this ledger never recorded is state no reader can resolve.
     await expect(test.ledger.bindMemberScopeSession({ requestId: requestId('unknown-ref'), workspaceId, memberId: test.memberId,
-      binding: { scopeKey: threadMemberScopeKey('thread:missing' as AgentTeamThreadRef), scopeKind: 'thread',
-        scopeRef: 'thread:missing' as AgentTeamThreadRef, sessionId: SessionId('session:scoped-missing') },
-      actor: agentTeamHumanActor() })).rejects.toThrow(/invalid Member scope binding ref/)
+      binding: { scopeKey: channelMemberScopeKey('channel:missing' as AgentTeamChannelRef), scopeKind: 'channel',
+        scopeRef: 'channel:missing' as AgentTeamChannelRef, sessionId: SessionId('session:scoped-missing') },
+      actor: agentTeamHumanActor() })).rejects.toThrow(/names unknown Channel/)
   })
 
   it('transitions one domain onto a new Session without touching the Member row', async () => {
     const test = await fixture()
-    const scopeKey = threadMemberScopeKey(test.threadRef)
+    const scopeKey = channelMemberScopeKey(test.channelRef)
     await bind(test, scopeKey, SessionId('session:scoped-thread'))
 
     applied(await test.ledger.renewMemberSession({ requestId: requestId('renew-scope'), actor: agentTeamHumanActor(), workspaceId,
@@ -386,7 +394,7 @@ describe('Member work-domain bindings', () => {
   it('rejects a scoped transition on a domain that holds no Session', async () => {
     const test = await fixture()
     await expect(test.ledger.renewMemberSession({ requestId: requestId('renew-unbound'), actor: agentTeamHumanActor(), workspaceId,
-      memberId: test.memberId, sessionId: SessionId('session:nowhere'), scopeKey: threadMemberScopeKey(test.threadRef) }))
+      memberId: test.memberId, sessionId: SessionId('session:nowhere'), scopeKey: channelMemberScopeKey(test.channelRef) }))
       .rejects.toThrow(/holds no Session for work domain/)
     // A domain the ledger cannot parse is refused before any record lands.
     await expect(test.ledger.renewMemberSession({ requestId: requestId('renew-bad-key'), actor: agentTeamHumanActor(), workspaceId,
@@ -395,7 +403,7 @@ describe('Member work-domain bindings', () => {
     // The key's namespace is the binding path's business: a key this module
     // never wrote is refused there, by the same parser replay uses.
     await expect(test.ledger.bindMemberScopeSession({ requestId: requestId('bind-bad-key'), workspaceId, memberId: test.memberId,
-      binding: { scopeKey: 'task:task:abc' as AgentTeamMemberScopeKey, scopeKind: 'thread', scopeRef: 'task:abc',
+      binding: { scopeKey: 'task:task:abc' as AgentTeamMemberScopeKey, scopeKind: 'channel', scopeRef: 'task:abc',
         sessionId: SessionId('session:nowhere') }, actor: agentTeamHumanActor() }))
       .rejects.toThrow(/unknown scope kind 'task'/)
   })

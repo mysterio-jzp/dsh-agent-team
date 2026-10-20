@@ -1,8 +1,8 @@
 import type {
+  AgentTeamChannelRef,
   AgentTeamMemberScopeKey,
   AgentTeamMemberScopeKind,
   AgentTeamMemberScopeSession,
-  AgentTeamThreadRef,
   AgentTeamWorkingDirectorySet,
 } from './types.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -19,12 +19,13 @@ export const DEFAULT_MEMBER_SCOPE_KEY = 'default' as AgentTeamMemberScopeKey
 const SCOPE_KEY_SEPARATOR = ':'
 
 /**
- * The bucket of one discussion. A taskless discussion and the same discussion
- * after `promoteThread` share this key: the Task is the domain's mutable
- * overlay, never its identity.
+ * The bucket of one Channel: every discussion inside it shares this key. A
+ * taskless discussion and the same discussion after `promoteThread` share it
+ * too, because a Thread is a source of messages inside the Channel, never a
+ * domain boundary of its own.
  */
-export function threadMemberScopeKey(threadRef: AgentTeamThreadRef): AgentTeamMemberScopeKey {
-  return scopeKey('thread', threadRef)
+export function channelMemberScopeKey(channelRef: AgentTeamChannelRef): AgentTeamMemberScopeKey {
+  return scopeKey('channel', channelRef)
 }
 
 function scopeKey(kind: AgentTeamMemberScopeKind, ref: string): AgentTeamMemberScopeKey {
@@ -37,9 +38,10 @@ function scopeKey(kind: AgentTeamMemberScopeKind, ref: string): AgentTeamMemberS
  * rather than silently defaulted into the `default` domain, which would mix an
  * unknown domain's facts into the Member's legacy Session.
  *
- * `thread` is the only isolation this bundle grants today, because a discussion
- * is the only kind of fact a Member's unread work is carried by. A Channel or
- * DM namespace would be a second key shape with no producer and no consumer.
+ * `channel` is the only isolation this bundle grants, because a Channel is the
+ * only kind of fact a Member's unread work is carried by. Removing a former
+ * namespace narrows what parses; it never widens it, so a key written by an
+ * older bundle reads back as corruption rather than as a live domain.
  */
 export function parseMemberScopeKey(scopeKey: string): { readonly scopeKind: AgentTeamMemberScopeKind; readonly scopeRef?: string | undefined } {
   if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) return { scopeKind: 'default' }
@@ -48,7 +50,7 @@ export function parseMemberScopeKey(scopeKey: string): { readonly scopeKind: Age
   const namespace = scopeKey.slice(0, separator)
   const scopeRef = scopeKey.slice(separator + 1)
   if (scopeRef === '') throw new Error(`Member scope key '${scopeKey}' carries no ref`)
-  if (namespace !== 'thread') {
+  if (namespace !== 'channel') {
     throw new Error(`Member scope key '${scopeKey}' names unknown scope kind '${namespace}'`)
   }
   return { scopeKind: namespace, scopeRef }

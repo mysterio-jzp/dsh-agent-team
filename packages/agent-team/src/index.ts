@@ -51,7 +51,7 @@ import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, creat
 import { AGENT_TEAM_HUMAN_MEMBER_ID, AgentTeamLedger, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
 import { claimMessageArtifacts, MESSAGE_ARTIFACTS_PROJECTION_KEY, NOTHING_CLAIMED, presentedDeliveriesProjection, type ClaimedArtifacts } from './message-artifacts.ts'
 import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, memberMemoryDirectoryPath, MemberRuntime } from './member-runtime.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY, memberScopeSession } from './member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession, parseMemberScopeKey } from './member-scope.ts'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
 import { classifyRecoverableError, failureDetail, RecoveryCoordinator, type RecoveryFact } from './recovery.ts'
 import { StoredSessionReadError, StoredSessionReader, sessionFailureOf } from './stored-session-reader.ts'
@@ -117,6 +117,7 @@ import type {
   AgentTeamMemberId,
   AgentTeamMemberScopeKey,
   AgentTeamMemberScopeSession,
+  AgentTeamWorkDomainState,
   AgentTeamMemberResult,
   AgentTeamMembersRequest,
   AgentTeamMessageRef,
@@ -178,6 +179,7 @@ import type {
   AgentTeamThreadObservationsRequest,
   AgentTeamUpdateChannelRequest,
   AgentTeamUpdateChannelResult,
+  AgentTeamChannelRef,
   AgentTeamUpdateChannelWorkingDirectoriesRequest,
   AgentTeamUpdateChannelWorkingDirectoriesResult,
   AgentTeamUpdateChannelMemberWorkingDirectoriesRequest,
@@ -720,14 +722,15 @@ export default class AgentTeam extends TypertRemoteService {
        * deployment choice, never a failure — and the read is lazy, so a key
        * written after this Host mounted still answers on the next step.
        *
-       * Only the Member's own `default` domain is offered the judge. The gate's
-       * remedy is a fresh context generation, and that is exactly what a
-       * discussion's domain cannot start yet (see `requestNewContext`): holding
-       * a step behind a remedy the surface would refuse would stall the domain
-       * instead of relieving it. A domain without the judge still gets the
-       * handoff-budget notice and the in-place reduction it names.
+       * Every domain that can start a new generation is offered the judge, and
+       * only those: the gate's remedy is a fresh context, so holding a step
+       * behind a remedy the surface would refuse would stall the domain instead
+       * of relieving it. This must stay in step with `requestNewContext` — the
+       * Member's own domain and a Channel domain both renew, and a Channel
+       * domain without the judge would keep only the in-place reduction while
+       * its container grew without bound.
        */
-      judgeForAgent: agent => this.scopeKeyOfSession(agent.session.id) === DEFAULT_MEMBER_SCOPE_KEY ? this.contextJudge.judge() : undefined,
+      judgeForAgent: agent => this.renewsContextForAgent(agent) ? this.contextJudge.judge() : undefined,
       failed: (sessionId, diagnostic) => {
         const memberId = this.memberOfSession(sessionId)
         if (memberId === undefined) return
@@ -1108,6 +1111,9 @@ export default class AgentTeam extends TypertRemoteService {
     // would repeat the same I/O linearly during startup.
     const persistedSessions = new Set((await this.persistedSessionHeaders()).map(snapshot => snapshot.header.id))
     await this.sweepWorkspaceParticipations(ledger)
+    // After the sweep, so a membership withdrawn because its Workspace is gone
+    // is not reopened here.
+    await this.reconcileChannelWorkDomains(ledger)
     for (const member of ledger.listMembers()) {
       if (member.state === 'enabled') {
         // A renewal or rollover that committed but never finished leaves no
@@ -1133,6 +1139,30 @@ export default class AgentTeam extends TypertRemoteService {
         } catch (error) {
           this.ctx.logger.warn(`agent-team: could not converge member '${member.handle}' to its '${member.state}' state: ${error instanceof Error ? error.message : String(error)}`)
         }
+      }
+    }
+  }
+
+  /**
+   * Backfill work domains for Channel memberships a previous run committed but
+   * never bound — a crash between the membership commit and the domain it opens
+   * leaves the Member joined with no context to read.
+   *
+   * Idempotent per (Member, Channel): the bind request id is derived from those
+   * two refs, so a pass over an already-bound membership returns the recorded
+   * binding instead of appending a second one. That is what lets this run on
+   * every boot without accumulating one Session per startup.
+   */
+  private async reconcileChannelWorkDomains(ledger: AgentTeamLedger): Promise<void> {
+    for (const { memberId, channelRef } of ledger.channelMemberships()) {
+      const scopeKey = channelMemberScopeKey(channelRef)
+      if (ledger.memberScopeSessionFor(memberId, scopeKey) !== undefined) continue
+      try {
+        await this.openChannelWorkDomain(memberId, channelRef)
+      } catch (error) {
+        // One un-attributable or unopenable membership must not fail the boot:
+        // it leaves a readable failure on that Member and is retried next start.
+        this.ctx.logger.warn(`agent-team: could not open the work domain of '${memberId}' for '${channelRef}': ${error instanceof Error ? error.message : String(error)}`)
       }
     }
   }
@@ -1272,6 +1302,61 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   /**
+   * Provision one Member's work domain for a Channel as soon as the membership
+   * exists, so joining a Channel yields a context the Member can read without
+   * waiting for someone to post there first.
+   *
+   * Idempotent by construction: the bind request id is derived from the two
+   * refs that identify the domain, never from the clock or a random value, so a
+   * retried or replayed addition returns the existing binding instead of
+   * appending a second one. That is the only thing standing between a startup
+   * reconciliation pass and a loop that adds one Session per boot.
+   */
+  private async openChannelWorkDomain(memberId: AgentTeamMemberId, channelRef: AgentTeamChannelRef): Promise<void> {
+    const scopeKey = channelMemberScopeKey(channelRef)
+    const ledger = this.requireLedger()
+    const member = ledger.getMember(memberId)
+    if (member === undefined || member.state !== 'enabled') return
+    await this.enqueueLifecycle(memberId, async () => {
+      this.requireAccepting()
+      // Re-read inside the chain: a sibling membership of the same request may
+      // have opened it already, and a retried request must not bind twice.
+      if (ledger.memberScopeSessionFor(memberId, scopeKey) !== undefined) return
+      const current = this.requireLedger().getMember(memberId)
+      if (current === undefined || current.state !== 'enabled') return
+      const workspaceId = this.requireLedger().workspaceForMemberScope(memberId, scopeKey)
+      if (workspaceId === undefined) throw new Error(`Channel '${channelRef}' is not in a Workspace '${memberId}' participates in`)
+      // Attribution is the human whose act created this membership, carried on
+      // the addition operation itself. A placeholder actor here would make the
+      // ledger unable to distinguish a real signature from a backfilled one,
+      // so an un-attributable membership fails visibly instead.
+      const origin = this.requireLedger().channelMembershipOrigin(memberId, channelRef)
+      if (origin === undefined) {
+        this.setActivationDiagnostic(memberId, {
+          class: 'domain-unattributed',
+          // Shown to a user as-is: the cause without internal vocabulary. The
+          // domain ref stays, so an operator can name which Channel is affected.
+          detail: `This Member's session for Channel ${channelRef} could not be created, because the record of when it joined that Channel is missing. It was left uncreated rather than credited to someone who did not approve it.`,
+        })
+        const failed = this.requireLedger().getMember(memberId)
+        if (failed !== undefined) this.emitMemberPresenceChanged(failed)
+        return
+      }
+      const bound = await this.requireLedger().bindMemberScopeSession({
+        requestId: `agent-team:scope-bound:${memberId}:${scopeKey}` as AgentTeamRequestId,
+        workspaceId, workspaceRoot: this.ctx.workspaceRegistry.get(workspaceId)?.path,
+        memberId, binding: memberScopeSession(scopeKey, SessionId(`agent-team-${randomUUID()}`)),
+        actor: origin.actor,
+        sourceOperationId: origin.operationId,
+      })
+      if (!bound.committed) return
+      this.emitCommitted(bound.value.receipt)
+      const boundMember = this.requireLedger().getMember(memberId)
+      if (boundMember !== undefined) await this.activateMember(boundMember, bound.value.binding)
+    })
+  }
+
+  /**
    * The delivery state of one live surface: its Member and work domain, never
    * the Session, so a renewed Session starts with the facts its domain has not
    * delivered rather than inheriting a signature from the generation before it.
@@ -1405,7 +1490,14 @@ export default class AgentTeam extends TypertRemoteService {
     const ledger = this.requireLedger()
     if (!ledger.hasCommitted(request.requestId)) this.assertChannelMembersAvailable(request.memberIds)
     const result = await ledger.createChannel({ ...request, actor: agentTeamHumanActor() })
-    if (result.committed) this.emitCommitted(result.value.receipt)
+    if (!result.committed) return result.value
+    this.emitCommitted(result.value.receipt)
+    // Membership granted and context provisioned are two halves of one Human
+    // intent: a Member added here must be able to read this Channel without
+    // anyone having to send a Message first. Opening the domains duplicates
+    // nothing on a retried request — the derived id makes it idempotent.
+    const channelRef = result.value.channel.channelRef
+    for (const memberId of result.value.memberIds) await this.openChannelWorkDomain(memberId, channelRef)
     return result.value
   }
 
@@ -1485,6 +1577,10 @@ export default class AgentTeam extends TypertRemoteService {
       if (result.committed) this.emitCommitted(result.value.receipt)
       const stored = result.value.member
       await this.restoreMemberDomains(stored, workspace.path)
+      // The declared initial Channels are part of the same Human intent as the
+      // Member itself: each membership opens its own work domain now, so the
+      // Member can read those Channels without a first Message having to arrive.
+      for (const channelRef of request.channelRefs ?? []) await this.openChannelWorkDomain(stored.memberId, channelRef)
       // Creation seeds exactly the creation Workspace participation; attach it
       // here (like membersForClient) so the Client never synthesizes it.
       return Object.freeze({ receipt: result.value.receipt, status: this.memberStatus(stored), workspaceIds: ledger.workspacesOf(stored.memberId) })
@@ -2738,16 +2834,43 @@ export default class AgentTeam extends TypertRemoteService {
     })))
   }
 
-  /** A live generation's durable work-domain binding, with the legacy Thread-root fallback. */
-  workDomainForAgent(agent: Agent): AgentTeamMemberScopeSession | undefined {
+  /**
+   * The domain a running generation belongs to, separating the two reasons a
+   * caller may find no binding: the Session is not a Member work domain at all
+   * (`unbound`), or it is one whose ledger binding is missing (`unbound` with
+   * the scope the Session claimed). Collapsing both into `undefined` makes
+   * "this Session holds no domain" indistinguishable from "this domain lost its
+   * binding", and only the second is a defect a projection must be able to
+   * report.
+   */
+  workDomainStateForAgent(agent: Agent): AgentTeamWorkDomainState {
     const live = this.surfaceOfSession(agent.session.id)
-    if (live === undefined || live.handle.agent !== agent) return undefined
+    if (live === undefined || live.handle.agent !== agent) return Object.freeze({ kind: 'not-a-work-domain' })
     const ledger = this.requireLedger()
-    const binding = ledger.memberScopeSessionFor(live.memberId, live.scopeKey)
-    if (binding === undefined || live.scopeKey === DEFAULT_MEMBER_SCOPE_KEY || binding.workingDirectories !== undefined) return binding
-    // A pre-snapshot Thread binding keeps its historical Workspace-root cwd; do
-    // not silently upgrade it to a directory configuration added later.
-    const workspaceId = ledger.workspaceForMemberScope(live.memberId, live.scopeKey)
+    const scopeKey = live.scopeKey
+    const memberId = live.memberId
+    const binding = ledger.memberScopeSessionFor(memberId, scopeKey)
+    if (binding === undefined) return Object.freeze({ kind: 'unbound', memberId, scopeKey })
+    return Object.freeze({ kind: 'bound', binding: this.withWorkspaceRootFallback(ledger, binding, memberId) })
+  }
+
+  /**
+   * The bound domain, or `undefined` when there is none — for callers that only
+   * render domain context and cannot act on the distinction. Callers that must
+   * report a missing binding use `workDomainStateForAgent`.
+   */
+  workDomainForAgent(agent: Agent): AgentTeamMemberScopeSession | undefined {
+    const state = this.workDomainStateForAgent(agent)
+    return state.kind === 'bound' ? state.binding : undefined
+  }
+
+  private withWorkspaceRootFallback(
+    ledger: AgentTeamLedger, binding: AgentTeamMemberScopeSession, memberId: AgentTeamMemberId,
+  ): AgentTeamMemberScopeSession {
+    if (binding.scopeKey === DEFAULT_MEMBER_SCOPE_KEY || binding.workingDirectories !== undefined) return binding
+    // A pre-snapshot binding keeps its historical Workspace-root cwd; do not
+    // silently upgrade it to a directory configuration added later.
+    const workspaceId = ledger.workspaceForMemberScope(memberId, binding.scopeKey)
     const workspacePath = workspaceId === undefined ? undefined : this.ctx.workspaceRegistry.get(workspaceId)?.path
     return workspacePath === undefined ? binding : memberScopeSession(binding.scopeKey, binding.sessionId, [workspacePath])
   }
@@ -3275,18 +3398,33 @@ export default class AgentTeam extends TypertRemoteService {
    * lifecycle effect — the actual transition reacts to the successful tool
    * result through the context-management coordinator.
    */
+  /**
+   * Whether this Agent's domain may start a new context generation. The
+   * pressure judge and the renewal gate must answer identically: a domain the
+   * judge offers a remedy the gate refuses would be held behind a request that
+   * always throws, and a domain the gate allows but the judge never reaches
+   * would grow without the relief this classification exists to give it.
+   */
+  private renewsContextForAgent(agent: Agent): boolean {
+    const scopeKey = this.scopeKeyOfSession(agent.session.id)
+    if (scopeKey === undefined || scopeKey === DEFAULT_MEMBER_SCOPE_KEY) return true
+    return parseMemberScopeKey(scopeKey).scopeKind === 'channel'
+  }
+
   async requestNewContext(agent: Agent, request: AgentTeamNewContextToolRequest): Promise<AgentTeamNewContextToolOutcome> {
     const member = this.memberForAgent(agent)
     if (member === undefined || member.state !== 'enabled') throw new Error('context_rollover requires an active Team Member')
-    // A Discussion's work domain has no rollover: its Session exists to carry
-    // one Thread's facts, its generation swap would move that Thread's context
-    // out from under the Thread it belongs to, and nothing in the discussion
-    // lifecycle drives a replacement. Refused here, at the one entry the tool
-    // and the pressure gate both use, rather than failing after a swap was
-    // announced as scheduled.
+    // Renewal is decided per domain kind. A Channel domain is a long-lived
+    // context shared by every discussion in that Channel, so it needs the same
+    // renewal the Member default has: without it the container only grows.
+    // Anything else is refused HERE — at the one entry the tool and the
+    // pressure gate both use — so an unsupported domain fails before a swap is
+    // announced as scheduled rather than after. The refusal must stay a throw:
+    // returning an empty outcome would report a renewal that never happens.
     const scopeKey = this.scopeKeyOfSession(agent.session.id)
-    if (scopeKey !== undefined && scopeKey !== DEFAULT_MEMBER_SCOPE_KEY) {
-      throw new Error('context_rollover is not supported in a discussion\'s work domain; the Member\'s own Session is the one that starts a new context')
+    if (scopeKey !== undefined && scopeKey !== DEFAULT_MEMBER_SCOPE_KEY
+      && parseMemberScopeKey(scopeKey).scopeKind !== 'channel') {
+      throw new Error(`context_rollover is not supported in work domain '${scopeKey}'; only the Member's own Session and a Channel domain start a new context`)
     }
     if (this.contextManagement.isTransitioning(member.memberId)) throw new Error('a context rollover is already scheduled for this Member; wait for it to finish before requesting another')
     if (this.runningAgents.has(agent.id) !== true) {
@@ -4226,7 +4364,7 @@ export default class AgentTeam extends TypertRemoteService {
       return
     }
     const notificationKey = this.notificationKeyOf(memberId, live.scopeKey)
-    const notifications = this.requireLedger().notificationFacts(memberId)
+    const notifications = this.requireLedger().notificationFacts(memberId, undefined, live.scopeKey)
     const scope = this.memberScope(memberId, agent.id)
     const causeText = this.notificationCauseText(cause)
     if (notifications.length === 0) {

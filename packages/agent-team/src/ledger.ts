@@ -15,6 +15,7 @@ import type {
   AgentTeamArchiveChannelResult,
   AgentTeamArchiveMemberRequest,
   AgentTeamArchiveMemberResult,
+  AgentTeamActor,
   AgentTeamChannel,
   AgentTeamChangeScope,
   AgentTeamChannelArchivedOperation,
@@ -234,6 +235,13 @@ export interface AgentTeamAuthorizedBindMemberScopeRequest {
   /** Current root of the domain's Workspace, used only when no configured set overrides it. */
   readonly workspaceRoot?: string | undefined
   readonly actor: AgentTeamHumanActor
+  /**
+   * The operation whose consequence this binding is — the Channel addition a
+   * reconciliation pass is backfilling. Recorded so a backfilled binding can be
+   * traced to the act that made the membership, instead of reading as a
+   * spontaneous record.
+   */
+  readonly sourceOperationId?: AgentTeamOperationId | undefined
 }
 
 /**
@@ -1110,11 +1118,12 @@ export class AgentTeamLedger {
       if (!this.participatesIn(request.memberId, request.workspaceId)) throw new Error(`Agent Member '${member.handle}' does not participate in this Workspace`)
       const scope = memberScopeSession(request.binding.scopeKey, request.binding.sessionId)
       this.assertMemberScopeBinding(this.state, request.memberId, scope)
-      if (scope.scopeKind !== 'thread' || scope.scopeRef === undefined) throw new Error('only a Thread work domain can bind a scoped Session')
-      const channelRef = this.channelRefForThreadFrom(this.state, scope.scopeRef as AgentTeamThreadRef)
-      if (channelRef === undefined) throw new Error(`Thread '${scope.scopeRef}' has no active Channel`)
+      if (scope.scopeKind !== 'channel' || scope.scopeRef === undefined) throw new Error('only a Channel work domain can bind a scoped Session')
+      // On a Channel domain the ref IS the Channel: there is no Thread to
+      // resolve through, because every discussion in the Channel shares it.
+      const channelRef = scope.scopeRef as AgentTeamChannelRef
       const channel = this.requireActiveChannel(request.workspaceId, channelRef)
-      if (channel.workspaceId !== request.workspaceId) throw new Error(`Thread '${scope.scopeRef}' belongs to another Workspace`)
+      if (channel.workspaceId !== request.workspaceId) throw new Error(`Channel '${scope.scopeRef}' belongs to another Workspace`)
       const workingDirectories = this.effectiveWorkingDirectories(this.state, channelRef, request.memberId, request.workspaceRoot)
       // Namespace metadata and the effective ordered path set are derived at
       // the one durable bind. Retries return this snapshot even after config edits.
@@ -1122,7 +1131,10 @@ export class AgentTeamLedger {
       this.assertMemberScopeBinding(this.state, request.memberId, binding, request.workspaceId)
       const operation: AgentTeamMemberScopeSessionBoundOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/member-scope-session-bound',
-        data: Object.freeze({ memberId: request.memberId, workspaceId: request.workspaceId, binding }),
+        data: Object.freeze({
+          memberId: request.memberId, workspaceId: request.workspaceId, binding,
+          ...(request.sourceOperationId === undefined ? {} : { sourceOperationId: request.sourceOperationId }),
+        }),
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
@@ -1172,6 +1184,53 @@ export class AgentTeamLedger {
    */
   previousSessionForMember(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY): SessionId | undefined {
     return this.state.previousSessions.get(memberId)?.get(scopeKey)
+  }
+
+  /**
+   * The operation that added this Member to this Channel, which is the only
+   * admissible attribution for a reconciliation pass that backfills a missing
+   * domain binding. Attribution is not a formality: a backfilled binding must
+   * name the person whose act created the membership.
+   *
+   * A ledger recorded before Channel membership was explicit carries no such
+   * operation, and the caller must treat that absence as un-attributable rather
+   * than inventing an actor — a fabricated signature makes the ledger unable to
+   * tell a real binding from a backfilled one.
+   */
+  channelMembershipOrigin(memberId: AgentTeamMemberId, channelRef: AgentTeamChannelRef): {
+    readonly operationId: AgentTeamOperationId
+    readonly sequence: number
+    readonly actor: AgentTeamHumanActor
+  } | undefined {
+    // Membership is recorded on the Member's own creation, which carries the
+    // Channel set it was granted. Scanning forward keeps the FIRST grant, which
+    // is the act that made this membership.
+    for (const operation of this.state.ordered) {
+      if (operation.kind !== 'team/member-added') continue
+      const data = (operation as AgentTeamMemberAddedOperation).data
+      if (data.member.memberId !== memberId || !data.channelRefs.includes(channelRef)) continue
+      // A later removal retires this grant for attribution purposes; the
+      // membership it described is not the one being backfilled.
+      if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) return undefined
+      // Only a human act can authorize the binding downstream, and the ledger
+      // refuses any other initiator; an operation attributed to a Member is
+      // therefore not an admissible origin for a backfill.
+      if (operation.actor.kind !== 'human') return undefined
+      return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
+    }
+    return undefined
+  }
+
+  private membershipWasRemovedAfter(
+    memberId: AgentTeamMemberId, channelRef: AgentTeamChannelRef, sequence: number,
+  ): boolean {
+    for (const operation of this.state.ordered) {
+      if (operation.sequence <= sequence) continue
+      if (operation.kind !== 'team/channel-member-removed') continue
+      const data = (operation as AgentTeamChannelMemberRemovedOperation).data
+      if (data.memberId === memberId && data.channelRef === channelRef) return true
+    }
+    return false
   }
 
   /**
@@ -2184,8 +2243,19 @@ export class AgentTeamLedger {
     return refs
   }
 
-  /** Model-visible notification material derived from the recipient's current durable unread state. */
-  notificationFacts(memberId: AgentTeamMemberId, request?: AgentTeamInboxRequest): readonly {
+  /**
+   * Model-visible notification material derived from the recipient's current
+   * durable unread state, optionally narrowed to one work domain.
+   *
+   * A Channel domain must not be told about facts it does not hold: with more
+   * than one domain live, every activation would otherwise read the Member's
+   * whole Inbox and whichever domain activated first would claim facts that
+   * belong to another Channel's context. `scopeKey` therefore filters by the
+   * Channel a Thread lives in; the `default` domain keeps the whole Inbox,
+   * which is what a Member with no Channel domains has always seen.
+   */
+  notificationFacts(memberId: AgentTeamMemberId, request?: AgentTeamInboxRequest,
+    scopeKey?: AgentTeamMemberScopeKey): readonly {
     readonly item: AgentTeamInboxItem
     readonly facts: readonly AgentTeamThreadReadFact[]
   }[] {
@@ -2193,7 +2263,12 @@ export class AgentTeamLedger {
     if (request !== undefined && !this.participatesIn(memberId, request.workspaceId)) throw new Error('Member cannot inspect another Workspace')
     const actor = { kind: 'member' as const, memberId, handle: member.handle }
     const inbox = request === undefined ? this.memberInbox(actor, {}) : this.inbox(actor, request)
-    return Object.freeze(inbox.items.map(item => Object.freeze({ item,
+    const domain = scopeKey === undefined ? undefined : parseMemberScopeKey(scopeKey)
+    const channelRef = domain?.scopeKind === 'channel' ? domain.scopeRef : undefined
+    const items = channelRef === undefined
+      ? inbox.items
+      : inbox.items.filter(item => item.channelRef === channelRef)
+    return Object.freeze(items.map(item => Object.freeze({ item,
       facts: this.unreadFor(memberId, item.thread.threadRef) })))
   }
 
@@ -4797,6 +4872,29 @@ export class AgentTeamLedger {
     return false
   }
 
+  /**
+   * Every (Member, Channel) membership recorded durably, for the startup
+   * reconciliation pass that backfills work domains a crash may have left
+   * unbound. Reading the membership table alone keeps the pass to facts that
+   * were actually committed, rather than inferring membership from Thread
+   * participation.
+   */
+  channelMemberships(): readonly {
+    readonly memberId: AgentTeamMemberId
+    readonly channelRef: AgentTeamChannelRef
+  }[] {
+    const pairs: { readonly memberId: AgentTeamMemberId; readonly channelRef: AgentTeamChannelRef }[] = []
+    for (const [channelRef, members] of this.state.memberships) {
+      const channel = this.state.channels.get(channelRef)
+      if (channel === undefined || channel.state === 'archived') continue
+      for (const memberId of members) {
+        if (memberId === AGENT_TEAM_HUMAN_MEMBER_ID) continue
+        pairs.push({ memberId, channelRef })
+      }
+    }
+    return Object.freeze(pairs)
+  }
+
   /** Every Thread of the Channel, taskful or taskless — the scope both cleanup validators replay against. */
   private channelThreadRefs(channelRef: AgentTeamChannelRef): Set<AgentTeamThreadRef> {
     return this.channelThreadRefsFrom(this.state, channelRef)
@@ -5332,9 +5430,8 @@ export class AgentTeamLedger {
     if (member === undefined) return undefined
     if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) return member.workspaceId
     const { scopeKind, scopeRef } = parseMemberScopeKey(scopeKey)
-    if (scopeKind !== 'thread' || scopeRef === undefined) return undefined
-    const channelRef = this.channelRefForThreadFrom(projection, scopeRef as AgentTeamThreadRef)
-    return channelRef === undefined ? undefined : projection.channels.get(channelRef)?.workspaceId
+    if (scopeKind !== 'channel' || scopeRef === undefined) return undefined
+    return projection.channels.get(scopeRef as AgentTeamChannelRef)?.workspaceId
   }
 
   private effectiveWorkingDirectories(
@@ -5397,19 +5494,31 @@ export class AgentTeamLedger {
       || [...scopes?.values() ?? []].some(other => other.sessionId === binding.sessionId)) {
       throw new Error('invalid Member scope binding')
     }
-    const channelRef = scopeRef === undefined || scopeKind !== 'thread'
-      ? undefined
-      : this.channelRefForThreadFrom(projection, scopeRef as AgentTeamThreadRef)
-    const channel = channelRef === undefined ? undefined : projection.channels.get(channelRef)
+    // The ref IS the Channel on a Channel domain, so a missing one is the only
+    // resolution failure left; each later condition reports its own reason
+    // instead of sharing one message that points at the wrong cause.
+    if (scopeRef === undefined) throw new Error(`Member scope binding '${binding.scopeKey}' carries no Channel ref`)
+    const channelRef = scopeRef as AgentTeamChannelRef
+    const channel = projection.channels.get(channelRef)
+    if (channel === undefined) throw new Error(`Member scope binding '${binding.scopeKey}' names unknown Channel '${channelRef}'`)
+    if (channel.state !== 'active') throw new Error(`Member scope binding '${binding.scopeKey}' names Channel '${channelRef}', which is ${channel.state}`)
     const resolvedWorkspaceId = this.workspaceForScopeFrom(projection, memberId, binding.scopeKey)
+    if (resolvedWorkspaceId === undefined) throw new Error(`Member scope binding '${binding.scopeKey}' resolves no Workspace`)
+    if (workspaceId !== undefined && resolvedWorkspaceId !== workspaceId) {
+      throw new Error(`Member scope binding '${binding.scopeKey}' belongs to Workspace '${resolvedWorkspaceId}', not '${workspaceId}'`)
+    }
+    if (!this.participatesInFrom(projection, memberId, channel.workspaceId)) {
+      throw new Error(`Member '${memberId}' does not participate in the Workspace of Channel '${channelRef}'`)
+    }
+    if (projection.memberships.get(channelRef)?.has(memberId) !== true) {
+      throw new Error(`Member '${memberId}' is not a member of Channel '${channelRef}'`)
+    }
     const legacySnapshot = binding.workingDirectories === undefined && workspaceId === undefined
-    if (channelRef === undefined || channel === undefined || channel.state !== 'active' || resolvedWorkspaceId === undefined
-      || (workspaceId !== undefined && resolvedWorkspaceId !== workspaceId)
-      || !this.participatesInFrom(projection, memberId, channel.workspaceId)
-      || projection.memberships.get(channelRef)?.has(memberId) !== true
-      || (!legacySnapshot && binding.workingDirectories === undefined)
-      || (binding.workingDirectories !== undefined && workspaceId === undefined)) {
-      throw new Error('invalid Member scope binding ref or Workspace')
+    if (!legacySnapshot && binding.workingDirectories === undefined) {
+      throw new Error(`Member scope binding '${binding.scopeKey}' carries no working directories outside the legacy shape`)
+    }
+    if (binding.workingDirectories !== undefined && workspaceId === undefined) {
+      throw new Error(`Member scope binding '${binding.scopeKey}' carries working directories but no Workspace`)
     }
   }
 

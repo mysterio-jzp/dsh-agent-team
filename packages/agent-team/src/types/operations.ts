@@ -6,6 +6,7 @@ import type {
   AgentTeamChannelRef,
   AgentTeamContextCheckpointRef,
   AgentTeamOperationBase,
+  AgentTeamOperationId,
   AgentTeamClaim,
   AgentTeamClaimActivity,
   AgentTeamClaimsReleasedActivity,
@@ -200,6 +201,12 @@ export interface AgentTeamMemberScopeSessionBoundOperation extends AgentTeamOper
     readonly workspaceId?: WorkspaceId | undefined
     /** The domain and the Session it runs on; its namespace fields agree with its key by construction. */
     readonly binding: AgentTeamMemberScopeSession
+    /**
+     * The operation this binding is the consequence of, present when a
+     * reconciliation pass backfilled a missing binding. Absent on a binding
+     * made in the same breath as the act that caused it, which needs no pointer.
+     */
+    readonly sourceOperationId?: AgentTeamOperationId | undefined
   }
 }
 

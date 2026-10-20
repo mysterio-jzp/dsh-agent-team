@@ -2706,10 +2706,16 @@ describe('AgentTeam durable Thread read progress', () => {
     const revived = await harness(pool)
     revived.ctx.agentTeam.validateLedger()
 
-    // Loading normalizes the projection, never the record: an installation that
-    // upgrades keeps every ledger byte it already committed, and the legacy
-    // read stays a legacy read.
-    expect([...pool.media.get('agent_team')!.tables.get('operations')!.entries()]).toEqual(snapshots)
+    // Loading normalizes the projection, never an existing record: an
+    // installation that upgrades keeps every ledger byte it already committed,
+    // and the legacy read stays a legacy read. Startup reconciliation may
+    // APPEND the work domain a joined Member never got, which is a new record
+    // rather than a rewrite of this one — so the stored prefix is compared and
+    // any appended operations are checked to be domain bindings alone.
+    const storedEntries = [...pool.media.get('agent_team')!.tables.get('operations')!.entries()]
+    expect(storedEntries.slice(0, snapshots.length)).toEqual(snapshots)
+    expect(storedEntries.slice(snapshots.length).map(([, operation]) => (operation as AgentTeamOperation).kind))
+      .toEqual(storedEntries.slice(snapshots.length).map(() => 'team/member-scope-session-bound'))
     const stored = [...pool.media.get('agent_team')!.tables.get('operations')!.values()]
       .map(operation => operation as AgentTeamOperation).find(operation => operation.kind === 'team/thread-read')
     if (stored?.kind !== 'team/thread-read') throw new Error('expected the Thread read record to survive the boot')

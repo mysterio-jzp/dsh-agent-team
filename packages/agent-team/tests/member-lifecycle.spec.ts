@@ -28,7 +28,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import { AgentTeamLedger } from '../src/ledger.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey } from '../src/member-scope.ts'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
@@ -953,10 +953,20 @@ describe('Agent Team Member lifecycle', () => {
     // Straight after the boot the Member has already been woken by the
     // restart, so it is working rather than still marked failed — the error
     // presence returns once that turn settles on the same durable failure.
+    // The Member joined a Channel, so the failure it must re-derive lives in
+    // that Channel's domain: the wake starts that domain, not the Member's own,
+    // because a domain is only told about the facts it holds. The Member row
+    // reports the domain it owns, so it stays `available` while the Channel
+    // domain carries the turn.
     const booting = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
     expect(booting?.availability).toBe('active')
-    expect(booting?.presence).toBe('working')
-    const agent = ctx.agents.get(booting!.member.sessionId)!
+    const channelDomain = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channel.channel.channelRef))!
+    // The wake itself is the property under test, and it needs its own
+    // assertion: `whenIdle()` returns immediately for an Agent that never
+    // started, so a later `error` alone would not prove the restart woke
+    // anything — a different path could produce that error on an idle Agent.
+    const agent = ctx.agents.get(channelDomain.sessionId)!
+    expect(agent.status).toBe('running')
     await agent.whenIdle()
     const after = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
     expect(after?.presence).toBe('error')

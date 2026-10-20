@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { renderMemberIdentity, renderMemberMemory, renderMemberWorkDomain } from '../src/member-context.ts'
-import { threadMemberScopeKey } from '../src/member-scope.ts'
-import type { AgentTeamMemberScopeSession, AgentTeamThreadRef } from '../src/types.ts'
+import { channelMemberScopeKey } from '../src/member-scope.ts'
+import type { AgentTeamChannelRef, AgentTeamMemberScopeSession } from '../src/types.ts'
 
 describe('Team Member private memory context', () => {
   it('escapes framing and preserves a bounded private index', () => {
@@ -60,10 +60,10 @@ describe('Team Member identity context', () => {
 })
 
 describe('Team Member work-domain context', () => {
-  it('renders only the bound Thread domain snapshot and never adds directories to the default scope', () => {
-    const threadRef = 'thread:current' as AgentTeamThreadRef
+  it('renders only the bound Channel domain snapshot and never adds directories to the default scope', () => {
+    const channelRef = 'channel:current' as AgentTeamChannelRef
     const binding: AgentTeamMemberScopeSession = {
-      scopeKey: threadMemberScopeKey(threadRef), scopeKind: 'thread', scopeRef: threadRef,
+      scopeKey: channelMemberScopeKey(channelRef), scopeKind: 'channel', scopeRef: channelRef,
       sessionId: SessionId('session:current'), workingDirectories: ['/workspace/project', '/workspace/shared'],
     }
     const rendered = renderMemberWorkDomain(binding)
