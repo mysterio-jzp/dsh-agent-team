@@ -1,4 +1,6 @@
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: brings `ctx.sidebarRight` onto the Context this file already uses.
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
 import type {
   AgentTeamAddMemberRequest,
@@ -33,6 +35,7 @@ import type {
   AgentTeamUpdateChannelRequest,
   AgentTeamUpdateMemberRequest,
   AgentTeamViewRequest,
+  AgentTeamMessageAttachment,
 } from '@contexera/dsh-agent-team/types'
 import agentTeamRemote from '@contexera/dsh-agent-team/remote'
 import type {} from '@deepseek-ai/dsh-client-connection/client'
@@ -57,6 +60,7 @@ import { TeamReplyCapabilities, type TeamReplyCapabilitiesFace } from './reply-c
 import { TeamEnvironmentCheck } from './environment-check.ts'
 import { bytesToBase64 } from './attachment-preview.ts'
 import { openMemberPersonaPath } from './member-persona-path.ts'
+import { openAttachmentInSidebar } from './attachment-open.ts'
 import { TEAM_ENTRY_ID, TeamNavigation } from './navigation.ts'
 import { TeamChangeStream, TeamReadStream, type TeamChangeListener, type TeamChangeScope } from './team-changes.ts'
 import { TeamQueries, type TeamQueryIdentity } from './team-queries.ts'
@@ -359,6 +363,20 @@ function teamSeatInject(
       sendMessage: (request: AgentTeamSendMessageRequest) => ctx.remote.agentTeam.sendMessage(request),
       putAttachment: (request: AgentTeamPutAttachmentRequest) => ctx.remote.agentTeam.putAttachment(request),
       getAttachment: (request: AgentTeamGetAttachmentRequest) => ctx.remote.agentTeam.getAttachment(request),
+      // The Sidebar face is read at click time, not captured here: which
+      // Session is on screen changes as the Human moves around, and an
+      // address built against a stale Session would open in the wrong place
+      // or in none.
+      // Read per click, and optionally: a host without the right Sidebar still
+      // renders the block (the manifest inject is what makes the service
+      // available there, while declaring it in `inject` here would suspend the
+      // whole client on hosts that do not ship one). Absent, the gesture says
+      // there is nothing on screen to open the file in.
+      openAttachment: (attachment: AgentTeamMessageAttachment) => openAttachmentInSidebar({
+        mounted: () => ctx.reflect.get('sidebarRight', false)?.mounted.getSnapshot() as string | undefined,
+        open: address => { ctx.reflect.get('sidebarRight', false)?.openResource(address) },
+        openTabs: () => ctx.reflect.get('sidebarRight', false)?.openTabs.getSnapshot() ?? [],
+      }, ctx.remote.agentTeam, attachment),
       reply: (request: AgentTeamReplyRequest) => ctx.remote.agentTeam.reply(request),
       changeTask: (request: AgentTeamTaskRequest) => ctx.remote.agentTeam.changeTask(request),
       promoteThread: (request: AgentTeamPromoteThreadRequest) => ctx.remote.agentTeam.promoteThread(request),

@@ -6,6 +6,7 @@ import type { AgentTeamChannelRef, AgentTeamClientMember, AgentTeamMemberId, Age
 import type { TeamConversationProps } from './slots.ts'
 import type { ResolvedMemberRef } from './refs.ts'
 import { cachedAttachmentDataUrl, formatByteSize, loadAttachmentDataUrl } from './attachment-preview.ts'
+import type { AttachmentOpenFailure } from './attachment-open.ts'
 import { cachedResolvedTaskRef, resolveUnknownTaskRefs, useResolvedTaskRefVersion, type ResolvedTaskRef } from './refs.ts'
 import { cachedResolvedThreadRef, resolveUnknownThreadRefs, useResolvedThreadRefVersion, type ResolvedThreadRef } from './refs.ts'
 import { formatMessageTime, isSingleBrandedRef, memberHue, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, type MentionHandle } from './team-formatters.ts'
@@ -74,6 +75,8 @@ export interface TeamMessageProps {
   readonly memberByHandle?: ReadonlyMap<string, AgentTeamClientMember> | undefined
   /** Cache readback for thumbnails; absent on surfaces without the remotes. */
   readonly loadAttachment?: TeamConversationProps['getAttachment'] | undefined
+  /** Opens a non-image attachment in the right Sidebar; absent where the Sidebar is not reachable. */
+  readonly openAttachment?: TeamConversationProps['openAttachment'] | undefined
   readonly t?: TeamConversationProps['t'] | undefined
   /** Resolve a branded ref found in the body; absent surfaces render refs as plain text. */
   readonly onOpenRef?: ((ref: string) => void) | undefined
@@ -135,7 +138,7 @@ function initialOfName(name: string): string {
   return name.replace('@', '').slice(0, 1).toUpperCase()
 }
 
-export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, memberAvatarRef, memberAvatars, memberByHandle, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, loadAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
+export const TeamMessage = memo(function TeamMessage({ senderName, memberId, human, avatarUrl, memberAvatarRef, memberAvatars, memberByHandle, body, occurredAt, mentionNames, senderTitle, grouped, mentionsHuman, readerName, replyTo, onReply, onOpenReplyTo, messageRef, replyTarget, replyFlash, showGroupedTime, attachments, loadAttachment, openAttachment, t, onOpenRef, onResolveTaskRefs, onResolveThreadRefs, channelNameOf, memberOf, onOpenMemberSession, children }: TeamMessageProps) {
   const avatarStyle = human ? undefined : { '--team-avatar-hue': memberHue(memberId) } as CSSProperties
   // A seat may draw a picture, but only its own author's: the Human's row reads
   // the profile's bytes and a Member's row reads that Member's. The two sources
@@ -372,6 +375,8 @@ export const TeamMessage = memo(function TeamMessage({ senderName, memberId, hum
           {attachments !== undefined && attachments.length > 0 && <TeamAttachmentStrip
             attachments={attachments}
             {...(loadAttachment === undefined ? {} : { loadAttachment })}
+            {...(openAttachment === undefined ? {} : { openAttachment })}
+            {...(occurredAt === undefined ? {} : { sentAt: occurredAt })}
             {...(t === undefined ? {} : { t })}
           />}
           {children}
@@ -596,9 +601,11 @@ function renderRefs(text: string, onOpenRef: ((ref: string) => void) | undefined
 }
 
 /** One message's attachment strip: image thumbnails with a large view, or name chips when bytes are gone. */
-function TeamAttachmentStrip({ attachments, loadAttachment, t }: {
+function TeamAttachmentStrip({ attachments, loadAttachment, openAttachment, sentAt, t }: {
   readonly attachments: readonly AgentTeamMessageAttachment[]
   readonly loadAttachment?: TeamConversationProps['getAttachment'] | undefined
+  readonly openAttachment?: TeamConversationProps['openAttachment'] | undefined
+  readonly sentAt?: string | undefined
   readonly t?: TeamConversationProps['t'] | undefined
 }) {
   const [zoomed, setZoomed] = useState<AgentTeamMessageAttachment>()
@@ -607,6 +614,8 @@ function TeamAttachmentStrip({ attachments, loadAttachment, t }: {
       key={attachment.attachmentId}
       attachment={attachment}
       {...(loadAttachment === undefined ? {} : { loadAttachment })}
+      {...(openAttachment === undefined ? {} : { openAttachment })}
+      {...(sentAt === undefined ? {} : { sentAt })}
       {...(t === undefined ? {} : { t })}
       onZoom={setZoomed}
     />)}
@@ -616,14 +625,18 @@ function TeamAttachmentStrip({ attachments, loadAttachment, t }: {
   </div>
 }
 
-function TeamAttachment({ attachment, loadAttachment, t, onZoom }: {
+function TeamAttachment({ attachment, loadAttachment, openAttachment, sentAt, t, onZoom }: {
   readonly attachment: AgentTeamMessageAttachment
   readonly loadAttachment?: TeamConversationProps['getAttachment'] | undefined
+  readonly openAttachment?: TeamConversationProps['openAttachment'] | undefined
+  readonly sentAt?: string | undefined
   readonly t?: TeamConversationProps['t'] | undefined
   readonly onZoom: (attachment: AgentTeamMessageAttachment) => void
 }) {
   const wantsPreview = loadAttachment !== undefined && attachment.mediaType.startsWith('image/')
   const [dataUrl, setDataUrl] = useState<string | null | undefined>(wantsPreview ? cachedAttachmentDataUrl(attachment.attachmentId) : null)
+  const [opening, setOpening] = useState(false)
+  const [failure, setFailure] = useState<AttachmentOpenFailure | null>(null)
   useEffect(() => {
     if (!wantsPreview || dataUrl !== undefined) return
     let mounted = true
@@ -636,8 +649,63 @@ function TeamAttachment({ attachment, loadAttachment, t, onZoom }: {
       <img src={dataUrl} alt={attachment.name} />
     </button>
   }
-  return <span className={css.attachmentChip} title={wantsPreview ? expired : `${attachment.name} · ${formatByteSize(attachment.byteSize)}`}>
-    <span className={css.attachmentChipName}>{attachment.name}</span>
-    <span className={css.attachmentChipSize}>{wantsPreview ? expired : formatByteSize(attachment.byteSize)}</span>
-  </span>
+  const size = formatByteSize(attachment.byteSize)
+  // An image whose bytes are gone is settled already: it was known to be an
+  // image and the Host no longer caches it, so offering an open gesture would
+  // only report the expiry again. Non-image attachments cannot know that until
+  // the Host answers, which is why only they get the button.
+  const expiredPreview = wantsPreview && dataUrl === null
+  if (expiredPreview || openAttachment === undefined) {
+    return <span className={css.attachmentChip} title={expiredPreview ? expired : `${attachment.name} · ${size}`}>
+      <span className={css.attachmentChipName}>{attachment.name}</span>
+      <span className={css.attachmentChipSize}>{expiredPreview ? expired : size}</span>
+    </span>
+  }
+  // Said on the block itself, because the Sidebar's own title belongs to the
+  // viewer plugin: what this line promises cannot be taken away from it later.
+  // A cached attachment is a snapshot taken when the file was sent, so the
+  // copy a reader opens may already differ from the original on disk.
+  const copyLine = sentAt === undefined
+    ? t?.('attachmentCopyIsCopy') ?? 'Cached copy'
+    : t?.('attachmentCopyLine', { name: formatMessageTime(sentAt) }) ?? `Copy sent ${formatMessageTime(sentAt)}`
+  const status = opening
+    ? t?.('attachmentOpening') ?? 'Opening…'
+    : failure === null ? undefined : openFailureText(failure, t)
+  return <>
+    <button
+      type="button"
+      className={css.attachmentChip}
+      title={`${attachment.name} · ${size}`}
+      aria-busy={opening || undefined}
+      onClick={() => {
+        if (opening) return
+        setOpening(true)
+        setFailure(null)
+        void openAttachment(attachment).then(outcome => {
+          setOpening(false)
+          setFailure(outcome)
+        })
+      }}
+    >
+      <span className={css.attachmentChipName}>{attachment.name}</span>
+      <span className={css.attachmentChipSize}>{size}</span>
+      {/* Always present: that this is a cached copy is a fact about the block,
+          not something to show only when the time happens to be known. */}
+      <span className={css.attachmentChipCopy}>{copyLine}</span>
+    </button>
+    {status !== undefined && <span className={css.attachmentChipStatus} role="status">{status}</span>}
+  </>
+}
+
+/** What each refusal means for the reader's next step; every case is a different action. */
+function openFailureText(failure: AttachmentOpenFailure, t: TeamConversationProps['t'] | undefined): string {
+  switch (failure) {
+    case 'expired': return t?.('attachmentOpenExpired') ?? 'That copy is gone — ask the sender to send it again'
+    case 'unsupported': return t?.('attachmentOpenUnsupported') ?? 'No viewer here can show this file — try another format'
+    case 'no-session': return t?.('attachmentOpenNoSession') ?? 'Open a conversation first, then try again'
+    // The rail neither raised nor recorded the tab, so this call cannot say
+    // why. Naming a cause here would be a guess dressed as an answer.
+    case 'unknown': return t?.('attachmentOpenUnknown') ?? 'Could not confirm the file opened — try again'
+    case 'refused': return t?.('attachmentOpenRefused') ?? 'The host would not hand this file over'
+  }
 }

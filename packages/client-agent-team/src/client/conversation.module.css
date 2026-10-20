@@ -802,6 +802,53 @@
   padding: 3px 8px;
 }
 
+/* The chip is also a button when the block opens the file: the whole block is
+   the target, so the border it inherits from `button` is dropped and the
+   keyboard focus ring is kept — that ring is the only thing telling a keyboard
+   reader which attachment Enter will open. */
+button.attachmentChip {
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.attachmentChip:hover {
+  background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-interactive-bg-hover));
+}
+
+button.attachmentChip:disabled,
+button.attachmentChip[aria-busy='true'] {
+  cursor: progress;
+}
+
+/* Said on the block, never in the Sidebar's title: that title belongs to the
+   viewer plugin, so a copy's age has to live where Team owns the text. */
+.attachmentChipCopy {
+  /* Secondary, not tertiary: at 11px this line is body text, and tertiary
+     measured 2.99:1 on the light theme's chip fill — below the 4.5:1 that
+     size needs. Secondary measures 5.22:1 there and 5.09:1 in the dark
+     theme, so one alias serves both. */
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 17px;
+  white-space: nowrap;
+}
+
+/* Why nothing opened, next to the block rather than inside it: the button keeps
+   one shape whether the gesture worked or not, so a second click is the same
+   gesture and not a moving target. */
+.attachmentChipStatus {
+  align-self: center;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.attachmentChipStatus[role='status'] {
+  flex-basis: 100%;
+}
+
 .attachmentChipName {
   font-size: 12px;
   line-height: 17px;

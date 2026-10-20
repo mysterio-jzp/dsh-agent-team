@@ -66,6 +66,7 @@ import type {
   AgentTeamViewRequest,
 } from '@contexera/dsh-agent-team/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import type { OpenAttachment } from './attachment-open.ts'
 import type { TeamNavigationActions, TeamNavigationSnapshot } from './navigation.ts'
 import type { TeamChangeListener, TeamChangeScope } from './team-changes.ts'
 import type { TeamDraftStore } from './drafts.ts'
@@ -186,6 +187,14 @@ export type TeamConversationProps = PropsRuntime<'main'> & PropsLocale<'team'> &
   subscribeChanges: SubscribeTeamChanges
   putAttachment: (request: AgentTeamPutAttachmentRequest) => Promise<RemoteResult<AgentTeamPutAttachmentResult>>
   getAttachment: (request: AgentTeamGetAttachmentRequest) => Promise<RemoteResult<AgentTeamGetAttachmentResult>>
+  /**
+   * Open one cached attachment in the right Sidebar.
+   *
+   * Optional because some surfaces — and any host that does not mount the
+   * right Sidebar — cannot open anything; the block then stays inert rather
+   * than offering a gesture that could not work.
+   */
+  openAttachment?: OpenAttachment | undefined
   sendMessage: (request: AgentTeamSendMessageRequest) => Promise<RemoteResult<AgentTeamSendMessageResult>>
   reply: (request: AgentTeamReplyRequest) => Promise<RemoteResult<AgentTeamReplyResult | AgentTeamConfirmationRequired>>
   changeTask: (request: AgentTeamTaskRequest) => Promise<RemoteResult<AgentTeamTaskResult>>

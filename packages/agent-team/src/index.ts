@@ -2260,7 +2260,14 @@ export default class AgentTeam extends TypertRemoteService {
   async getAttachment(request: AgentTeamGetAttachmentRequest): Promise<AgentTeamGetAttachmentResult> {
     const stored = await readAttachment(attachmentsRoot(), request.attachmentId)
     if (stored === undefined) throw new RemoteError('team/attachment-not-found', `attachment '${request.attachmentId}' is no longer cached`, { attachmentId: request.attachmentId })
-    return Object.freeze({ name: stored.name, mediaType: stored.mediaType, byteSize: stored.byteSize, bytesBase64: stored.bytes.toString('base64') })
+    return Object.freeze({
+      name: stored.name,
+      mediaType: stored.mediaType,
+      byteSize: stored.byteSize,
+      bytesBase64: stored.bytes.toString('base64'),
+      path: stored.path,
+      uploadedAt: stored.uploadedAt,
+    })
   }
 
   /**

@@ -41,6 +41,7 @@ interface TeamChannelPageProps {
   readonly loadInbox: TeamConversationProps['loadInbox']
   readonly drafts: TeamDraftStore
   readonly getAttachment: TeamConversationProps['getAttachment']
+  readonly openAttachment?: TeamConversationProps['openAttachment'] | undefined
   readonly putAttachment: TeamConversationProps['putAttachment']
   readonly sendMessage: TeamConversationProps['sendMessage']
   readonly selectThread: TeamConversationProps['selectThread']
@@ -100,7 +101,7 @@ function unreadCounts(inbox: AgentTeamInbox): ReadonlyMap<AgentTeamThreadRef, nu
   return new Map(inbox.items.filter(item => item.unreadCount > 0).map(item => [item.thread.threadRef, item.unreadCount]))
 }
 
-export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvatarUrl, memberAvatars, loadChannels, subscribeChanges, loadMembers, loadInbox, drafts, putAttachment, getAttachment, sendMessage, selectThread, selectChannel, backToChannels, resolveTaskRefs, resolveThreadRefs, openMemberSession, t }: TeamChannelPageProps) {
+export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvatarUrl, memberAvatars, loadChannels, subscribeChanges, loadMembers, loadInbox, drafts, putAttachment, getAttachment, openAttachment, sendMessage, selectThread, selectChannel, backToChannels, resolveTaskRefs, resolveThreadRefs, openMemberSession, t }: TeamChannelPageProps) {
   const [view, setView] = useState<AgentTeamView>()
   const [members, setMembers] = useState<readonly AgentTeamClientMemberStatus[]>([])
   const [unreadByThread, setUnreadByThread] = useState<ReadonlyMap<AgentTeamThreadRef, number>>(new Map())
@@ -434,6 +435,7 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
                 body={item.message.body}
                 attachments={item.message.attachments}
                 loadAttachment={getAttachment}
+                {...(openAttachment === undefined ? {} : { openAttachment })}
                 t={t}
                 occurredAt={item.message.occurredAt}
                 mentionNames={mentionNamesOf(item.mentions, handleByMember, humanName)}

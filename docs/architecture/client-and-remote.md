@@ -58,3 +58,28 @@ The Team sidebar keeps Channels/Agents ordering as a browser-only `localStorage`
 An embedded Member Session uses the shipped composer unmodified: the Team registers no member-session composer surface — no seat shadow, no trigger sources, no dock strip. rc.1 moved the trigger-menu overlay into `conversation.composer.bar`'s children, where a shadowing entry would inherit — and strand — the overlay. The Team's own command/member reference entry points carried no irreplaceable value over the shipped vocabulary, so they were removed together.
 
 Ordinary and member sessions share the same composer and vocabulary. Reuse public primitives and `--dsw-*` tokens, keep CSS in CSS Modules, and preserve Team mode restoration and narrow layouts.
+
+## Opening a cached attachment in the right rail
+A non-image attachment block opens its cached copy in the Shell's right rail. The read is `getAttachment` against the Host's cache; the address is a `dsh-resource://file/…` in the Session scope, so the rail's fallback text type claims it and dispatches by extension.
+
+`ctx.sidebarRight.openResource` returns `void` and reports nothing: for a Session that is on screen but was never adopted it records no tab and raises no error, which makes "the rail took the address" and "nothing happened" indistinguishable at the call site.
+
+The block therefore reads the rail's own `openTabs` record after opening and looks for the addressed tab. The record decides this, never the tab count: the rail focuses an existing tab instead of adding one, so a second click on the same attachment leaves the count unchanged while opening exactly as asked.
+
+Three outcomes stay separate, because only the first is a fact the call established:
+
+- **The addressed tab is recorded** — opened.
+- **A registered type refuses the address or none claims it** — `unsupported`, stated as no available viewer.
+- **Neither an error nor a recorded tab** — `unknown`. `open` answers nothing, so this call cannot say why; it says only that it could not confirm the open.
+
+**The `unknown` branch is covered by unit tests only — there is no real-interface reading of it**, because reaching that state on the real surface needs a forged Host selection state. Do not read it as machine-verified.
+
+Three layers stay distinct, and the wording keeps them distinct:
+
+- **No registered type claims the address** — `openResource` throws, and the block says the format has no available viewer.
+- **A viewer claimed the address and could not decode the bytes** — the viewer states this inside its own panel; Team never sees it. A binary, non-UTF-8 file lands here, because the Host routes unknown extensions to plain-text reading rather than refusing them.
+- **The cache entry is gone** — `team/attachment-not-found`, rendered as an expired copy the sender must re-send.
+
+The Host's viewer says 「该格式文件暂时无法预览」 where the block says 「这个格式没有可用的查看器」. The two phrasings stay different on purpose: the viewer knows it claimed the file and could not decode it, while Team only knows nobody claimed it. Unifying the wording would make one side assert something it does not know.
+
+The rail's header shows the viewer-supplied absolute cache path, which contains the Host user name. Team does not mask it — the path is the viewer's own presentation — and sharing a screenshot of it outside the team discloses the user name and local directory layout.

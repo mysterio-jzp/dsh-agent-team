@@ -166,6 +166,15 @@ export interface StoredAttachment {
   readonly mediaType: string
   readonly byteSize: number
   readonly uploadedAt: string
+  /**
+   * Absolute path of the cached payload.
+   *
+   * Resolved here, where the payload entry is already read, so the path a
+   * reader is handed names the same file whose bytes `readAttachment`
+   * returns. A second place computing it could disagree with this one, and
+   * that disagreement would not raise: it would just open nothing.
+   */
+  readonly path: string
   readonly bytes: Buffer
 }
 
@@ -182,8 +191,9 @@ export async function readAttachment(root: string, attachmentId: AgentTeamAttach
   const entries = await readdir(dir)
   const payload = entries.filter(entry => entry !== 'meta.json')[0]
   if (payload === undefined) return undefined
-  const bytes = await readFile(join(dir, payload))
-  return { name: meta.name, mediaType: meta.mediaType, byteSize: bytes.byteLength, uploadedAt: meta.uploadedAt, bytes }
+  const payloadPath = join(dir, payload)
+  const bytes = await readFile(payloadPath)
+  return { name: meta.name, mediaType: meta.mediaType, byteSize: bytes.byteLength, uploadedAt: meta.uploadedAt, path: payloadPath, bytes }
 }
 
 export interface CacheEntryScan {
