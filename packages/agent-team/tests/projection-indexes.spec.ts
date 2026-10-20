@@ -357,6 +357,9 @@ describe('large-ledger projection equivalence (issue #21)', () => {
         presetId: 'team-member', privateMemoryPath: '/tmp/bucket-owner', state: 'enabled' },
     })
 
+    // Creating a Claim is the President's write: designate the only Claimant
+    // once here, the same Human act production requires.
+    await ledger.setPresident({ requestId: requestId('bucket-president'), actor: human, memberId })
     // 24 in-flight Tasks with two Claims each: enough shared Claim history
     // that a per-Task read walking every Claim would show cross-Task leakage.
     const expected = new Map<AgentTeamTaskRef, AgentTeamClaimRef[]>()

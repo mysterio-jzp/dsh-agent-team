@@ -32,6 +32,7 @@ import type {
   AgentTeamRemoveThreadMemberRequest,
   AgentTeamUpdateChannelRequest,
   AgentTeamUpdateMemberRequest,
+  AgentTeamSetPresidentRequest,
   AgentTeamViewRequest,
 } from '@contexera/dsh-agent-team/types'
 import agentTeamRemote from '@contexera/dsh-agent-team/remote'
@@ -302,6 +303,7 @@ function teamSharedRemotes(
     updateChannel: (request: AgentTeamUpdateChannelRequest) => ctx.remote.agentTeam.updateChannel(request),
     archiveChannel: (request: AgentTeamArchiveChannelRequest) => ctx.remote.agentTeam.archiveChannel(request),
     updateMember: (request: AgentTeamUpdateMemberRequest) => ctx.remote.agentTeam.updateMember(request),
+    setPresident: (request: AgentTeamSetPresidentRequest) => ctx.remote.agentTeam.setPresident(request),
     putMemberAvatar: (request: AgentTeamPutMemberAvatarRequest) => ctx.remote.agentTeam.putMemberAvatar(request),
     getMemberAvatar: (request: AgentTeamGetMemberAvatarRequest) => ctx.remote.agentTeam.getMemberAvatar(request),
     removeMemberAvatar: (request: AgentTeamRemoveMemberAvatarRequest) => ctx.remote.agentTeam.removeMemberAvatar(request),

@@ -13,6 +13,7 @@ import type {
   AgentTeamThreadRef,
 } from '@contexera/dsh-agent-team/types'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AgentTeamContextAdvice } from '@contexera/dsh-agent-team/types'
 
 export const name = 'wowyuarm-agent-team-tools'
@@ -175,7 +176,7 @@ function requestId(agentId: string, callId: string): AgentTeamRequestId {
  * or a next-write token.
  */
 function rejectionLines(
-  noun: 'message' | 'Claim mutation',
+  noun: 'message' | 'Claim mutation' | 'proposal',
   value: { readonly kind: string; readonly threadRef?: string; readonly taskRef?: string; readonly unreadCount?: number; readonly directCount?: number; readonly memberIds?: string[] },
 ): string[] {
   const identity = [
@@ -495,9 +496,21 @@ function adviceLines(advice: ContextAdviceView): string[] {
   return [`Context guidance — ${summary}`, `Action: ${advice.action}. ${advice.guidance}`]
 }
 
-const teamMessage = markAgentTeamPreset(defineTool({
+/**
+ * The one `team_message` definition.
+ *
+ * Task creation is the President's write, so the surface is a FUNCTION of the
+ * calling Member's live authority rather than two tool copies: for a Member
+ * without the office the `asTask` key is ABSENT — not present-and-disabled,
+ * which would still advertise a capability it cannot use — and the prose says
+ * what to do instead. The Host hands the surface in at mount and re-composes it
+ * whenever the office moves, so the definition never has to guess.
+ */
+const teamMessageFor = (canCreateTask: boolean) => markAgentTeamPreset(defineTool({
   name: 'team_message',
-  description: 'Start a top-level Thread, reply to an existing Thread, or send a direct message (DM). Read the Thread first: a reply needs the current next-write token from a fully drained team_thread read (or your own last committed mutation), and unread work rejects before staleness is even checked — and a mention only delivers its Message and restores Attention, never the Thread\'s earlier facts, so entering a Thread whose facts have left your context means reading back through it first. start defaults to a taskless Thread; pass asTask true to create a Task in the same send. A top-level start may mention related Agents directly; in replies, only a Human can invite a Member the Thread has never carried. Mention by writing `@Handle` in body — the `@` is required, matching ignores case, and each named Member is delivered to and renders as a mention chip; `@all` reaches every Member of the Channel. Naming a Member this Thread has never carried still commits, delivers nothing to that Member, and reports them under undeliveredMentions: ask the Human to invite them, or reach them with a dm. dm sends a private direct message to one enabled Agent Member in your Workspace: use it for quick clarifications and status syncs — never for task work, decisions, or anything that needs team visibility or traceability (use a Thread); if a DM exchange with the same Member exceeds about 3 exchanges, move it to a Thread, because every DM costs the recipient a full agent turn.',
+  description: (canCreateTask
+    ? 'Start a top-level Thread, reply to an existing Thread, or send a direct message (DM).'
+    : 'Start a top-level Thread, reply to an existing Thread, or send a direct message (DM). Creating a Task is the team President\'s write: this tool carries no asTask switch, so propose a Task with team_propose instead of starting one yourself.') + ' Read the Thread first, reply to an existing Thread, or send a direct message (DM). Read the Thread first: a reply needs the current next-write token from a fully drained team_thread read (or your own last committed mutation), and unread work rejects before staleness is even checked — and a mention only delivers its Message and restores Attention, never the Thread\'s earlier facts, so entering a Thread whose facts have left your context means reading back through it first. start defaults to a taskless Thread; pass asTask true to create a Task in the same send. A top-level start may mention related Agents directly; in replies, only a Human can invite a Member the Thread has never carried. Mention by writing `@Handle` in body — the `@` is required, matching ignores case, and each named Member is delivered to and renders as a mention chip; `@all` reaches every Member of the Channel. Naming a Member this Thread has never carried still commits, delivers nothing to that Member, and reports them under undeliveredMentions: ask the Human to invite them, or reach them with a dm. dm sends a private direct message to one enabled Agent Member in your Workspace: use it for quick clarifications and status syncs — never for task work, decisions, or anything that needs team visibility or traceability (use a Thread); if a DM exchange with the same Member exceeds about 3 exchanges, move it to a Thread, because every DM costs the recipient a full agent turn.',
   parameters: {
     action: { type: 'string', required: true, enum: ['start', 'reply', 'dm'] },
     channelRef: { type: 'string', description: "Full branded Channel ref exactly as returned by Team tools, including the 'channel:' prefix. An unambiguous abbreviation of the first 6+ UUID hex characters also resolves." },
@@ -505,7 +518,9 @@ const teamMessage = markAgentTeamPreset(defineTool({
     taskRef: { type: 'string', description: "Optional Task ref alias for reply on a Taskful Thread. Prefer threadRef; an unambiguous abbreviation of the first 6+ UUID hex characters also resolves." },
     replyToMessageRef: { type: 'string', description: "Optional: the full branded Message ref you are answering (as rendered by team_thread or an inbox notice). Reply on the Thread you are already replying to; the Message must be one this Thread recorded. The Host links the reply to it, and its author is then delivered to like a mention, so answering a peer reaches them without typing their handle. Use it when the link is the point — the reader needs to know which Message you are answering. A Message that only continues the Thread's conversation needs neither this nor a mention: the Thread already delivers to the Members on it, so the link would announce a delivery that was going to happen anyway." },
     memberRef: { type: 'string', description: "Full branded Member ref exactly as returned by Team tools, including the 'member:' prefix. An unambiguous abbreviation of the first 6+ UUID hex characters also resolves. Required for dm; the Member must be an enabled Agent in your Workspace (the Human cannot be DMed)." },
-    asTask: { type: 'boolean', description: 'When true, start creates a Task with the Thread. Default false creates a taskless Thread.' },
+    // Absent for a Member without the President office: the capability is
+    // withheld from the schema, not merely refused at execution.
+    ...(canCreateTask ? { asTask: { type: 'boolean' as const, description: 'When true, start creates a Task with the Thread. Default false creates a taskless Thread.' } } : {}),
     body: { type: 'string', required: true, description: "Markdown body. Lead with the conclusion or state. Mention the Human only when they must know or decide; when a decision is owed, say plainly what needs deciding and what happens by default if nobody answers — no fixed template. Keep it the shortest useful message for the recipients; mechanical detail follows below. Cite Team refs exactly as returned, as bare text with one colon (e.g. task:0f0a…) — never a double colon, never inside backticks or quotes. Unambiguous UUID abbreviations (first 6+ hex chars) also resolve. Mention a Member by writing `@Handle` (`@` required, case-insensitive) in the prose: that is what delivers the Message to them and renders the mention chip, and `@all` reaches the whole Channel." }, baseRevision: { type: 'number', description: "The next-write token from your latest fully drained team_thread read (or your own last committed mutation) on this Thread. Copy the explicitly rendered value verbatim; never increment, derive, compare, or cite it — it is an opaque concurrency token, not a fact about the Thread." },
     attachments: { type: 'array', items: { type: 'string' }, description: 'Absolute file paths to share, e.g. screenshots or generated artifacts; images render as thumbnails for recipients. The Host validates each path and copies the file into the attachment cache, and members also receive one cached path per attachment; if any path fails validation the whole send is rejected.' },
     workspace: workspaceParam,
@@ -607,6 +622,62 @@ function messageOutcome(result: Awaited<ReturnType<AgentTeam['sendMessageForAgen
     expectedRevision: result.expectedRevision, revision: result.revision }
   throw new Error('Agents cannot receive invitation confirmations')
 }
+
+/**
+ * The proposal tool, composed ONLY for a Member that may not create a Task.
+ *
+ * It posts an ordinary Channel Message: no Task, no Claim, no DM. That is what
+ * makes it work while the office is VACANT — there is nobody to DM — and what
+ * keeps the proposal in front of the whole team. The Host decides who is
+ * mentioned; the tool never re-derives the President itself.
+ */
+const teamPropose = markAgentTeamPreset(defineTool({
+  name: 'team_propose',
+  description: 'Propose a Task or a Claim direction to the team President. Task and Claim creation are the President\'s writes, so this tool is how a Member without that office puts a direction forward: it posts a Channel Message carrying your summary (the President is mentioned when one holds the office and takes part in that Channel), and it creates neither a Task nor a Claim. Repeats are visible as separate proposals, so state the direction once. Use it instead of asking the Human to relay, and instead of team_message with asTask, which this surface does not carry.',
+  parameters: {
+    kind: { type: 'string', required: true, enum: ['task', 'claim'], description: "'task' proposes a new Task; 'claim' proposes claiming an existing Task." },
+    summary: { type: 'string', required: true, description: 'The direction you propose, in your own words: what the Task is, or which Task you want to claim and what angle you would take. Keep it to the few sentences the President needs to decide; it is posted verbatim as the Message body.' },
+    channelRef: { type: 'string', required: true, description: "The Channel the proposal belongs in — the one the Task lives in, or the one the work would start in. Full branded Channel ref exactly as returned by Team tools, including the 'channel:' prefix." },
+    taskRef: { type: 'string', description: "Required for kind 'claim': the Task the Claim would be about. Full branded Task ref exactly as returned by Team tools, including the 'task:' prefix." },
+    workspace: workspaceParam,
+  },
+  output: {
+    schema: { type: 'object', additionalProperties: false, properties: {
+      kind: { type: 'string', required: true },
+      threadRef: { type: 'string' },
+      messageRef: { type: 'string' },
+      memberIds: { type: 'array', items: { type: 'string' } },
+      occurredAt: { type: 'string' },
+    } },
+    render: (_args, value) => {
+      if (value.kind === 'committed') {
+        return [{ type: 'text', text: [
+          'Proposal recorded as a Channel Message — no Task or Claim was created.',
+          [value.messageRef, value.threadRef].filter(part => part !== undefined).join(' · '),
+          'The team President decides; if the office is vacant the Human has to designate one first.',
+        ].join('\n') }]
+      }
+      return [{ type: 'text', text: rejectionLines('proposal', value).join('\n') }]
+    },
+  },
+  async execute(args, exec) {
+    const agent = exec.agent
+    if (agent === undefined) throw new Error('team_propose requires an Agent session')
+    const host = service(agent)
+    if (args.kind === 'claim' && args.taskRef === undefined) throw new Error("a claim proposal must name the Task it is about: pass taskRef")
+    if (args.kind === 'task' && args.taskRef !== undefined) throw new Error("a task proposal does not accept taskRef")
+    const result = await host.proposeForAgent(agent, {
+      requestId: requestId(agent.id, exec.callId), workspaceId: workspaceOf(args, agent),
+      channelRef: args.channelRef as never, kind: args.kind === 'claim' ? 'claim' : 'task', summary: args.summary,
+      ...(args.taskRef === undefined ? {} : { taskRef: args.taskRef as AgentTeamTaskRef }),
+    })
+    if (result.kind === 'committed') {
+      return { kind: result.kind, threadRef: result.thread.threadRef, messageRef: result.message.messageRef, occurredAt: result.receipt.occurredAt }
+    }
+    if (result.kind === 'member_not_following') return { kind: result.kind, memberIds: [...result.memberIds] }
+    throw new Error('the proposal was refused; read the Thread again and retry')
+  },
+}))
 
 const teamClaim = defineTool({
   name: 'team_claim',
@@ -955,9 +1026,60 @@ const teamView = defineTool({
 export function apply(ctx: Context): void {
   ctx.tools.register(teamInbox)
   ctx.tools.register(teamThread)
-  ctx.tools.register(teamMessage)
+  // The conservative messaging surface is the ROSTER's: a `team_message` with
+  // no `asTask`, for every scope. A President gets the Task switch from an
+  // agent-scoped registration that shadows this one (see below); a Member
+  // without the office gets `team_propose` the same way. Registering both
+  // variants per agent would hide the proposal tool from nobody and the Task
+  // switch from everybody, because a global tool is visible to every agent.
+  ctx.tools.register(teamMessageFor(false))
   ctx.tools.register(teamClaim)
   ctx.tools.register(teamTodo)
   ctx.tools.register(teamView)
   registerContextTools(ctx)
+  registerMessagingSurface(ctx)
+}
+
+/**
+ * Compose the messaging surface for each Member agent as it is created.
+ *
+ * The preset mounts this plugin ABOVE the agent scope — `apply(ctx)` runs with
+ * no agent identity at all, and `ctx.get('agentTeam')` is not even reachable
+ * here — so the surface a Member may compose can only be decided once an agent
+ * exists. `agent/created` is that moment: it runs before the agent's first
+ * request, `agent.ctx` resolves the Team Host, and a tool registered there
+ * shadows the global one for that scope alone.
+ *
+ * A later move of the President office re-registers the same agent-scoped pair
+ * through the Host's listener, so the change reaches a running Session on its
+ * next request without a restart and without a Session-local snapshot of who
+ * holds the office.
+ */
+function registerMessagingSurface(ctx: Context): void {
+  // Registry-only contexts (the render harness) have no agent registry.
+  const events = ctx as unknown as { on?: (name: string, listener: (payload: { agent: Agent }) => void) => () => void }
+  if (typeof events.on !== 'function') return
+  events.on('agent/created', ({ agent }) => {
+    const host = agent.ctx.get('agentTeam', false) as AgentTeam | undefined
+    if (host === undefined) return
+    const surface = host.memberToolSurfaceForAgent(agent)
+    // No recorded surface means this agent is not an Agent Team Member: the
+    // globals stay as they are and every Team tool rejects at execution.
+    if (surface === undefined) return
+    let disposeScoped: (() => void) | undefined
+    const compose = (canCreateTask: boolean): void => {
+      disposeScoped?.()
+      // The President's Task switch rides on a shadowing definition; the
+      // proposal path belongs to everyone else.
+      disposeScoped = canCreateTask
+        ? agent.ctx.tools.register(teamMessageFor(true))
+        : agent.ctx.tools.register(teamPropose)
+    }
+    compose(surface.canCreateTask)
+    const stop = host.onMemberToolSurfaceChanged(agent, next => { compose(next.canCreateTask) })
+    agent.ctx.effect(() => () => {
+      stop()
+      disposeScoped?.()
+    })
+  })
 }

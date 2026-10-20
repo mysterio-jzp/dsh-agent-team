@@ -158,6 +158,15 @@ async function addLedgerMember(
   await ledger.addMember({ requestId: requestId(`add:${memberId}`), actor: agentTeamHumanActor(), member, handle: member.handle,
     description: member.description, presetId: member.presetId, workspaceId: alpha,
     channelRefs: channelRef === undefined ? [] : [channelRef as never] })
+  // Task and Claim creation are the President's writes. These fixtures exercise
+  // Claim/Task semantics rather than the authority that gates them, so the
+  // Member just created takes the office while it is vacant — the same Human
+  // designation production needs, performed once here instead of in every test.
+  // A test that adds a SECOND Member keeps the first in office, so a scenario
+  // needing two Claim owners moves the office explicitly.
+  if (ledger.presidentState().kind === 'vacant') {
+    await ledger.setPresident({ requestId: requestId(`president:${memberId}`), actor: agentTeamHumanActor(), memberId: member.memberId })
+  }
   return { member, actor: { kind: 'member', memberId: member.memberId, handle: member.handle } }
 }
 
@@ -173,7 +182,8 @@ describe('AgentTeam durable Thread Attention ledger', () => {
     expect(joined.committed).toBe(true)
     expect((await ledger.joinWorkspace(joinRequest)).committed).toBe(false)
     await expect(ledger.joinWorkspace({ ...joinRequest, workspaceId: alpha })).rejects.toThrow()
-    expect(ledger.getMember(member.memberId)).toEqual(member)
+    // The fixture designates this Member as President (see addLedgerMember).
+    expect(ledger.getMember(member.memberId)).toEqual({ ...member, president: true })
     expect(ledger.view({ workspaceId: beta }, member.memberId).workspaces).toEqual([
       { workspaceId: alpha, default: true }, { workspaceId: beta, default: false },
     ])
@@ -184,7 +194,7 @@ describe('AgentTeam durable Thread Attention ledger', () => {
     expect(sent.message.sender).toBe(member.memberId)
     const replay = replayLedger(test)
     expect(replay.workspacesOf(member.memberId)).toEqual([alpha, beta])
-    expect(replay.getMember(member.memberId)).toEqual(member)
+    expect(replay.getMember(member.memberId)).toEqual({ ...member, president: true })
     expect(replay.view({ workspaceId: beta }, member.memberId).channels).toContainEqual(channel)
     replay.validate()
   })
@@ -210,7 +220,8 @@ describe('AgentTeam durable Thread Attention ledger', () => {
     expect(left.value.removedAttention).toContainEqual({ memberId: member.memberId, threadRef: claims[1]!.sent.thread.threadRef })
     expect((await ledger.leaveWorkspace(leaveRequest)).committed).toBe(false)
     expect(ledger.workspacesOf(member.memberId)).toEqual([alpha])
-    expect(ledger.getMember(member.memberId)).toEqual(member)
+    // The fixture designates this Member as President (see addLedgerMember).
+    expect(ledger.getMember(member.memberId)).toEqual({ ...member, president: true })
     expect(ledger.listClaims(actor, { workspaceId: alpha, taskRef: claims[0]!.sent.task.taskRef }).claims[0]?.state).toBe('active')
     expect(() => ledger.view({ workspaceId: beta }, member.memberId)).toThrow(/another Workspace/)
     expect(ledger.view({ workspaceId: beta }).members).not.toContainEqual({ channelRef: claims[1]!.channel.channelRef, memberId: member.memberId })
@@ -424,9 +435,13 @@ describe('AgentTeam durable Thread Attention ledger', () => {
     const readDone1 = (await ledger.readThread({ requestId: requestId('read-done-1'), workspaceId: alpha, taskRef: started.task.taskRef, actor })).value
     committed((await ledger.changeClaim({ requestId: requestId('done-1'), workspaceId: alpha, taskRef: started.task.taskRef,
       action: 'done', claimRef: firstClaim.claim.claimRef, baseRevision: readDone1.thread.revision, actor })).value)
+    // Creating a Claim is the President's write, and this scenario needs two
+    // owners: the office moves to the second Member for its Claim and back.
+    await ledger.setPresident({ requestId: requestId('president-fix'), actor: agentTeamHumanActor(), memberId: actorTwo.memberId })
     const secondRead = (await ledger.readThread({ requestId: requestId('read-claim-2'), workspaceId: alpha, taskRef: started.task.taskRef, actor: actorTwo })).value
     const activeClaim = committed((await ledger.changeClaim({ requestId: requestId('claim-2'), workspaceId: alpha, taskRef: started.task.taskRef,
       action: 'claim', direction: 'two', baseRevision: secondRead.thread.revision, actor: actorTwo })).value)
+    await ledger.setPresident({ requestId: requestId('president-ship'), actor: agentTeamHumanActor(), memberId: actor.memberId })
     // The finished owner claims a second direction and finishes it too: both
     // done Claims belong to the same owner and must produce ONE marker.
     const thirdRead = (await ledger.readThread({ requestId: requestId('read-claim-3'), workspaceId: alpha, taskRef: started.task.taskRef, actor })).value
@@ -2158,6 +2173,9 @@ describe('AgentTeam Channel archival ledger', () => {
     const second = await addLedgerMember(ledger, channelRef, 'member:second')
     const firstClaim = committed((await ledger.changeClaim({ requestId: requestId('ch-arch-claim-1'), workspaceId: alpha, taskRef: started.task.taskRef,
       action: 'claim', direction: 'first direction', baseRevision: started.thread.revision, actor: first.actor })).value)
+    // Two owners are the point here; creating a Claim is the President's write,
+    // so the office moves to the second owner for its Claim.
+    await ledger.setPresident({ requestId: requestId('ch-arch-president'), actor: agentTeamHumanActor(), memberId: second.member.memberId })
     committed((await ledger.changeClaim({ requestId: requestId('ch-arch-claim-2'), workspaceId: alpha, taskRef: started.task.taskRef,
       action: 'claim', direction: 'second direction', baseRevision: firstClaim.thread.revision, actor: second.actor })).value)
     expect(ledger.view({ workspaceId: alpha }).tasks[0]).toMatchObject({ status: 'in_progress' })
@@ -3163,6 +3181,9 @@ describe('body-authored mentions', () => {
       action: 'follow', actor: outsider.actor })).value
     expect(followed?.attention).toBeDefined()
 
+    // Claim creation is the President's write, and this scenario is about
+    // Channel-less participation: the office moves to the outsider first.
+    await ledger.setPresident({ requestId: requestId('outsider-president'), actor: agentTeamHumanActor(), memberId: outsider.member.memberId })
     const claimed = committed((await ledger.changeClaim({ requestId: requestId('outsider-claim'), workspaceId: alpha, taskRef: sent.task.taskRef,
       action: 'claim', direction: 'Fix the regression', baseRevision: replied.thread.revision, actor: outsider.actor })).value)
     expect(claimed.task.status).toBe('in_progress')

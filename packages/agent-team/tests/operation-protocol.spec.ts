@@ -273,6 +273,13 @@ const memberUpdated: Op<'team/member-updated'> = {
   data: { member: fixtureMember },
 }
 
+const presidentSet: Op<'team/president-set'> = {
+  ...opBase('operation:protocol-35', 'request:protocol-president-set', 35),
+  previousOperationId,
+  kind: 'team/president-set',
+  data: { presidentMemberId: memberId },
+}
+
 const channelMemberAdded: Op<'team/channel-member-added'> = {
   ...opBase('operation:protocol-13', 'request:protocol-channel-member-added', 13),
   previousOperationId,
@@ -937,6 +944,20 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
         handle: 'protocol-agent-two',
         description: memberUpdated.data.member.description,
       }),
+    },
+    legacy: { normalize: 'none', repair: 'none' },
+    intent: { scopes: 'derived', inbox: 'none' },
+  },
+  'team/president-set': {
+    stored: presidentSet,
+    legacyShapes: [],
+    retry: {
+      same: async () => {
+        const out = await ledger.setPresident({ requestId: presidentSet.requestId, actor: human, memberId })
+        expect(out.value.president?.memberId, 'the designation mapper answers with the stored holder').toBe(memberId)
+        return out
+      },
+      changed: () => ledger.setPresident({ requestId: presidentSet.requestId, actor: human, memberId: null }),
     },
     legacy: { normalize: 'none', repair: 'none' },
     intent: { scopes: 'derived', inbox: 'none' },

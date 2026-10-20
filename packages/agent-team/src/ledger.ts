@@ -87,6 +87,9 @@ import type {
   AgentTeamMemberSuspendedOperation,
   AgentTeamMemberUpdatedOperation,
   AgentTeamMemberWorkspaceJoinedOperation,
+  AgentTeamPresidentResult,
+  AgentTeamPresidentSetOperation,
+  AgentTeamPresidentState,
   AgentTeamMemberWorkspaceLeftOperation,
   AgentTeamMessage,
   AgentTeamMessageRef,
@@ -117,6 +120,7 @@ import type {
   AgentTeamSendMessageRequest,
   AgentTeamSendMessageResult,
   AgentTeamSetMemberStateRequest,
+  AgentTeamSetPresidentRequest,
   AgentTeamStaleRevision,
   AgentTeamStatus,
   AgentTeamStoredMessage,
@@ -382,6 +386,10 @@ export interface AgentTeamAuthorizedArchiveChannelRequest extends AgentTeamArchi
 }
 
 export interface AgentTeamAuthorizedUpdateMemberRequest extends AgentTeamUpdateMemberRequest {
+  readonly actor: AgentTeamHumanActor
+}
+
+export interface AgentTeamAuthorizedSetPresidentRequest extends AgentTeamSetPresidentRequest {
   readonly actor: AgentTeamHumanActor
 }
 
@@ -973,6 +981,92 @@ export class AgentTeamLedger {
     })
   }
 
+  /**
+   * Designate, move, or clear the team's single President office.
+   *
+   * ONE record carries the move: the previous holder's flag clears and the new
+   * holder's flag sets inside the same durable operation. A failure therefore
+   * leaves the office exactly as it was — it can never produce a vacancy the
+   * caller did not ask for — and no reader can observe two holders or none in
+   * between. `memberId: null` records a deliberate vacancy (the office then
+   * stays empty until a Human designates someone; nothing is promoted
+   * automatically).
+   */
+  setPresident(request: AgentTeamAuthorizedSetPresidentRequest): Promise<AgentTeamLedgerResult<AgentTeamPresidentResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSamePresidentSet(existing, request)
+        return this.resolved(this.presidentResult(existing))
+      }
+      this.assertHumanActor(request.actor)
+      const current = this.presidentState()
+      if (request.memberId === null) {
+        if (current.kind === 'vacant') throw new Error('the team has no President to clear')
+        const operation: AgentTeamPresidentSetOperation = Object.freeze({
+          ...this.operationBase(request, this.nextSequence()), kind: 'team/president-set',
+          data: Object.freeze({
+            ...(current.kind === 'single' ? { previousMemberId: current.memberId } : {}),
+          }),
+        })
+        await this.table.put(operation.operationId, operation)
+        this.apply(operation)
+        return this.committed(this.presidentResult(operation))
+      }
+      // A conflicted ledger cannot be designated in one step: naming a holder
+      // here would have to choose for the operator which of two existing flags
+      // to keep, and this write path never picks between holders. The escape is
+      // the one that IS reachable — clear records a deliberate vacancy (nothing
+      // is inherited), and the following designation names the holder. Saying
+      // that is the difference between an operator who can act and one who
+      // retries into the same refusal.
+      if (current.kind === 'conflict') {
+        throw new Error(`the ledger records more than one President (${current.memberIds.join(', ')}); clear the office first, then designate the holder`)
+      }
+      const member = this.requireMember(request.memberId)
+      if (member.state !== 'enabled') throw new Error(`Agent Member '${member.handle}' is ${member.state} and cannot hold the President office`)
+      // Uniqueness is enforced here, at the one write that can create a holder.
+      // Being already the holder is refused rather than reported as success so
+      // a caller can never mistake a no-op for a move.
+      if (current.kind === 'single' && current.memberId === member.memberId) {
+        throw new Error(`'@${member.handle}' is already the President`)
+      }
+      const operation: AgentTeamPresidentSetOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/president-set',
+        data: Object.freeze({
+          presidentMemberId: member.memberId,
+          ...(current.kind === 'single' ? { previousMemberId: current.memberId } : {}),
+        }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.presidentResult(operation))
+    })
+  }
+
+  /**
+   * The office as the LIVE projection holds it. Read on every authorization
+   * decision — never captured when a Session started — so a designation takes
+   * effect for a running Member in its very next request.
+   */
+  presidentState(): AgentTeamPresidentState {
+    const holders: AgentTeamAgentMember[] = []
+    for (const member of this.state.members.values()) {
+      if (member.president === true && member.state !== 'inactive' && member.state !== 'archived') holders.push(member)
+    }
+    if (holders.length === 0) return Object.freeze({ kind: 'vacant' })
+    // Two flags are never produced by this write path; a ledger that carries
+    // them (older writer or a hand edit) is reported, never resolved by picking
+    // one — choosing for the operator would hand out Task authority silently.
+    if (holders.length > 1) return Object.freeze({ kind: 'conflict', memberIds: Object.freeze(holders.map(member => member.memberId)) })
+    const holder = holders[0]!
+    // A designated Member who is suspended or otherwise unable to act leaves
+    // the office vacant: nobody inherits it, and the vacancy is reported as
+    // such rather than as "the President is unavailable".
+    if (holder.state !== 'enabled') return Object.freeze({ kind: 'vacant' })
+    return Object.freeze({ kind: 'single', memberId: holder.memberId, handle: holder.handle })
+  }
+
   /** Last actual model edit; unrelated Member edits do not retire Session choices. */
   memberModelVersion(memberId: AgentTeamMemberId): number {
     this.requireMember(memberId)
@@ -1160,6 +1254,24 @@ export class AgentTeamLedger {
       memberScopeSession(DEFAULT_MEMBER_SCOPE_KEY, member.sessionId),
       ...this.state.memberScopes.get(memberId)?.values() ?? [],
     ])
+  }
+
+  /**
+   * The Member whose durable binding names this Session, in any work domain.
+   *
+   * The live handle map answers this for a RUNNING agent; during activation the
+   * handle is published only after the factory returns, so the tool plugin
+   * asking at `agent/created` needs the durable side instead. Session ids are
+   * unique per Member and domain, so this cannot be ambiguous.
+   */
+  memberOfBoundSession(sessionId: SessionId): AgentTeamAgentMember | undefined {
+    for (const member of this.state.members.values()) {
+      if (member.sessionId === sessionId) return member
+      for (const binding of this.state.memberScopes.get(member.memberId)?.values() ?? []) {
+        if (binding.sessionId === sessionId) return member
+      }
+    }
+    return undefined
   }
 
   /** The Session one work domain runs on, or undefined when it holds no binding. */
@@ -1455,9 +1567,14 @@ export class AgentTeamLedger {
         return this.resolved(this.messageResult(existing))
       }
       this.assertMentionTargets(channel, recipients)
-      // Top-level Task creation is open to every actor: mentioned Members join
-      // the new Thread as followers. Only existing-Thread invitations stay
+      // Creating a Task is the President's write. Checked here as well as on
+      // the sending path, because the ledger is the authority a direct caller
+      // reaches: a tool layer that merely hid the switch would leave this open.
+      // A Human stays free to create Tasks, and mentioned Members still join a
+      // new Thread as followers; only existing-Thread invitations are
       // Human-gated (reply path).
+      if (request.asTask === true && actor.kind === 'member') this.assertPresidentCreatingTask(actor)
+      // Top-level Task creation is open to the remaining actors.
       const sequence = this.nextSequence()
       const base = this.operationBase(request, sequence)
       const asTask = request.asTask === true
@@ -1606,6 +1723,21 @@ export class AgentTeamLedger {
       let activityKind: AgentTeamClaimActivity['kind']
       if (request.action === 'claim') {
         if (request.claimRef !== undefined) throw new Error('claim action does not accept claimRef')
+        // Creating a Claim is the President's write. Read from the LIVE
+        // projection at this queued write, never from what the caller believed
+        // when its Session started: a designation takes effect immediately,
+        // and a revoked holder cannot slip a Claim past a stale snapshot.
+        // `list`, and an author's own `done`/`release`, stay open to everyone.
+        const office = this.presidentState()
+        if (office.kind === 'conflict') {
+          throw new Error(`only the team President can create a Claim; the ledger records more than one President (${office.memberIds.join(', ')}), so the Human must resolve it first`)
+        }
+        if (office.kind === 'vacant') {
+          throw new Error('only the team President can create a Claim; the office is vacant, so the Human must designate one first — propose the direction to them instead')
+        }
+        if (office.memberId !== actor.memberId) {
+          throw new Error(`only the team President can create a Claim; @${office.handle} holds the office — propose the direction to them instead`)
+        }
         const direction = request.direction?.trim() ?? ''
         const normalizedDirection = this.normalizeDirection(direction)
         if (normalizedDirection === '') throw new Error('claim direction must not be empty')
@@ -2746,6 +2878,15 @@ export class AgentTeamLedger {
       case 'team/member-updated':
       case 'team/member-removed':
         return this.memberWorkspaceScopes(operation.data.member.memberId)
+      case 'team/president-set': {
+        // A roster change is visible in every Workspace either holder belongs
+        // to; the office itself is team-wide, so both sides wake.
+        const scopes = [
+          ...(operation.data.previousMemberId === undefined ? [] : this.memberWorkspaceScopes(operation.data.previousMemberId)),
+          ...(operation.data.presidentMemberId === undefined ? [] : this.memberWorkspaceScopes(operation.data.presidentMemberId)),
+        ]
+        return scopes.length === 0 ? undefined : scopes
+      }
       case 'team/member-scope-session-bound':
         // The binding is Member-private runtime state, but it is this Member's
         // surfaces that may have changed: the same Workspace scopes every other
@@ -2885,6 +3026,9 @@ export class AgentTeamLedger {
       case 'team/channel-member-added':
       case 'team/thread-read':
       case 'team/dm-sent':
+      // A membership change touches no Thread fact; the roster reader above
+      // is woken by the projection version instead.
+      case 'team/president-set':
         return []
       default:
         return assertUnhandledKind(operation)
@@ -3065,6 +3209,17 @@ export class AgentTeamLedger {
     }
     if (operation.kind === 'team/member-model-route-recorded') {
       this.assertModelRouteRecord(projection, operation)
+      return
+    }
+    if (operation.kind === 'team/president-set') {
+      assertHuman()
+      const { presidentMemberId, previousMemberId } = operation.data
+      const designated = presidentMemberId === undefined ? undefined : projection.members.get(presidentMemberId)
+      if (presidentMemberId !== undefined && (designated === undefined || designated.state !== 'enabled')) throw new Error('invalid President designation')
+      if (previousMemberId !== undefined && projection.members.get(previousMemberId) === undefined) throw new Error('invalid President designation')
+      // Replay accepts a ledger whose office is empty or already holds the
+      // designated Member; it never re-derives one from "whichever flag came
+      // first". A conflict carried in from outside is not repaired here.
       return
     }
     if (operation.kind === 'team/member-updated') {
@@ -3878,6 +4033,23 @@ export class AgentTeamLedger {
       this.applyInboxDelta(target, operation.data.inbox)
       return
     }
+    if (operation.kind === 'team/president-set') {
+      // One record moves the office: clear every flag it can reach, then set
+      // the one it names. Applying it twice is the same state, which is what
+      // makes replay safe.
+      for (const [memberId, member] of [...target.members]) {
+        if (member.president !== true) continue
+        const { president: _cleared, ...rest } = member
+        target.members.set(memberId, Object.freeze(rest))
+      }
+      const presidentMemberId = operation.data.presidentMemberId
+      if (presidentMemberId !== undefined) {
+        const holder = target.members.get(presidentMemberId)
+        if (holder === undefined) throw new Error('invalid President designation')
+        target.members.set(presidentMemberId, Object.freeze({ ...holder, president: true }))
+      }
+      return
+    }
     if (operation.kind === 'team/dm-sent') {
       // Audit-only: delivery is a transient runtime effect, so the durable
       // projection deliberately does not change.
@@ -4679,6 +4851,25 @@ export class AgentTeamLedger {
     return actor
   }
 
+  /**
+   * Refuse Task creation unless the LIVE ledger names this Member as the
+   * President. Read per call, never cached, so a designation lands on the very
+   * next request and a revoked holder cannot spend a stale permission. The
+   * refusal names the holder so the Member can route the idea instead of
+   * reporting a dead end.
+   */
+  private assertPresidentCreatingTask(actor: AgentTeamMemberActor): void {
+    const office = this.presidentState()
+    if (office.kind === 'single' && office.memberId === actor.memberId) return
+    if (office.kind === 'single') {
+      throw new Error(`only the team President can create a Task; @${office.handle} holds the office — propose the Task to them instead`)
+    }
+    if (office.kind === 'conflict') {
+      throw new Error('only the team President can create a Task; the ledger records more than one President, so the Human must resolve it first')
+    }
+    throw new Error('only the team President can create a Task; the office is vacant, so the Human must designate one first — send the idea as a normal Message instead')
+  }
+
   private assertHumanActor(actor: AgentTeamHumanActor): void {
     const initialization = this.initialization()
     // memberId is the durable Human authority; the handle is display-only.
@@ -4874,6 +5065,11 @@ export class AgentTeamLedger {
    * Channel); nothing new is ever enrolled. Deriving from Threads is what makes
    * a Member mentioned into a Thread see the Channel that Thread belongs to.
    */
+  /** Whether one Member participates in a Channel — the check a proposal makes before it mentions the President. */
+  memberInChannel(channelRef: AgentTeamChannelRef, memberId: AgentTeamMemberId): boolean {
+    return this.isChannelMember(channelRef, memberId)
+  }
+
   private isChannelMember(channelRef: AgentTeamChannelRef, memberId: AgentTeamMemberId): boolean {
     return this.isChannelMemberFrom(this.state, channelRef, memberId)
   }
@@ -5260,6 +5456,19 @@ export class AgentTeamLedger {
     if (operation.kind !== 'team/channel-updated' || !this.sameActor(operation.actor, request.actor)
       || operation.data.workspaceId !== request.workspaceId || operation.data.channel.channelRef !== request.channelRef
       || operation.data.channel.name !== request.name.trim() || operation.data.channel.description !== request.description.trim()) this.throwRequestCollision(request.requestId)
+  }
+
+  private assertSamePresidentSet(operation: AgentTeamOperation, request: AgentTeamAuthorizedSetPresidentRequest): asserts operation is AgentTeamPresidentSetOperation {
+    if (operation.kind !== 'team/president-set' || !this.sameActor(operation.actor, request.actor)
+      || (operation.data.presidentMemberId ?? null) !== request.memberId) this.throwRequestCollision(request.requestId)
+  }
+
+  private presidentResult(operation: AgentTeamPresidentSetOperation): AgentTeamPresidentResult {
+    const presidentMemberId = operation.data.presidentMemberId
+    return Object.freeze({
+      receipt: this.receipt(operation),
+      ...(presidentMemberId === undefined ? {} : { president: this.requireMember(presidentMemberId) }),
+    })
   }
 
   private assertSameMemberUpdate(operation: AgentTeamOperation, request: AgentTeamAuthorizedUpdateMemberRequest): asserts operation is AgentTeamMemberUpdatedOperation {

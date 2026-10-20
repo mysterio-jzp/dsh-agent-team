@@ -282,8 +282,11 @@ describe('Agent Team shipping contract', () => {
     expect(preset).toContain('past 16 KiB it is not injected at all')
     expect(preset).toContain('the bundled `member-memory-manager` skill')
     const toolSource = await readFile(resolve(root, 'packages/tool-agent-team/src/index.ts'), 'utf8')
+    // The propose tool sits beside the messaging tools because it is their
+    // counterpart for a Member without the President office; its presence here
+    // is the roster's, and the surface decides which of the two a Member gets.
     expect([...toolSource.matchAll(/name: '(team_[a-z]+)'/g)].map(match => match[1])).toEqual([
-      'team_inbox', 'team_thread', 'team_message', 'team_claim', 'team_todo', 'team_view',
+      'team_inbox', 'team_thread', 'team_message', 'team_propose', 'team_claim', 'team_todo', 'team_view',
     ])
     // Validation errors teach the same two token surfaces as the descriptions,
     // never a single-source story.
