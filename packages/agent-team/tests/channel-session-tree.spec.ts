@@ -142,4 +142,31 @@ describe('Channel rows in the Member session tree', () => {
     // the Client's generic sentence keys off.
     expect(rows[0]!.reason).toBe('a-code-from-a-newer-host')
   })
+
+  it('explains every unopenable row, not just one of them', async () => {
+    const { ctx } = await harness()
+    // Three Channels the Member joined with no originating operation: the
+    // `unopenable` population is the whole set, so "some row has a reason"
+    // cannot stand in for "every row has one".
+    const channelRefs = [await newChannelFor(ctx, nextChannelName()), await newChannelFor(ctx, nextChannelName()), await newChannelFor(ctx, nextChannelName())]
+    const memberId = await joinedWithoutOrigin(ctx, channelRefs[0]!, 'multi')
+    const memberships = ctx.agentTeam['ledger']!['state'].memberships
+    for (const channelRef of channelRefs.slice(1)) {
+      const members = memberships.get(channelRef) ?? new Set<AgentTeamMemberId>()
+      members.add(memberId)
+      memberships.set(channelRef, members)
+    }
+
+    await ctx.agentTeam['reconcileChannelWorkDomains'](ctx.agentTeam['ledger']!)
+
+    const rows = rowsOf(ctx, memberId)
+    const unopenable = rows.filter(row => row.state === 'unopenable')
+    // The population is asserted before it is measured: `every` is true on an
+    // empty array, so a selector or fixture that stopped producing failure rows
+    // would otherwise pass while proving nothing.
+    expect(unopenable).toHaveLength(channelRefs.length)
+    for (const row of unopenable) {
+      expect(row.reason, `row ${row.channelRef} must carry a reason code`).toBeDefined()
+    }
+  })
 })
