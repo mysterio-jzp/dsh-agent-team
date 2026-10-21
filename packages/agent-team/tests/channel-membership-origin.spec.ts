@@ -24,7 +24,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import { AgentTeamLedger, agentTeamHumanActor } from '../src/ledger.ts'
 import { agentTeamDomainSpec } from '../src/spec.ts'
-import type { AgentTeamOperation, AgentTeamOperationId } from '../src/types.ts'
+import type { AgentTeamChannelMemberAddedOperation, AgentTeamChannelMemberRemovedOperation, AgentTeamOperation, AgentTeamOperationId } from '../src/types.ts'
 import type { AgentTeamAgentMember } from '../src/types.ts'
 import type { AgentTeamChannelRef, AgentTeamMemberId, AgentTeamMessageRef, AgentTeamRequestId, AgentTeamThreadRef } from '../src/types.ts'
 
@@ -127,6 +127,46 @@ function seed(ledger: AgentTeamLedger, operations: readonly AgentTeamOperation[]
   (ledger['state'].ordered as AgentTeamOperation[]).push(...operations)
 }
 
+const emptyReleaseSnapshot = {
+  claims: [], activities: [], tasks: [], threads: [],
+  inbox: {
+    attention: { set: [], removed: [] },
+    directMarkers: { added: [], removed: [] },
+    activityMarkers: { added: [], removed: [] },
+  },
+}
+
+function channelMemberRemoved(
+  ledger: AgentTeamLedger, requestId: AgentTeamRequestId,
+  channelRef: AgentTeamChannelRef, memberId: AgentTeamMemberId,
+): AgentTeamChannelMemberRemovedOperation {
+  const sequence = ledger['nextSequence']()
+  return Object.freeze({
+    ...ledger['operationBase']({ requestId, actor: agentTeamHumanActor() }, sequence),
+    kind: 'team/channel-member-removed',
+    data: Object.freeze({ workspaceId: alpha, channelRef, memberId, ...emptyReleaseSnapshot }),
+  }) as AgentTeamChannelMemberRemovedOperation
+}
+
+function channelMemberAdded(
+  ledger: AgentTeamLedger, requestId: AgentTeamRequestId,
+  channelRef: AgentTeamChannelRef, memberId: AgentTeamMemberId,
+  actor: AgentTeamOperation['actor'], mentionedByMessageRef?: AgentTeamMessageRef,
+): AgentTeamChannelMemberAddedOperation {
+  const sequence = ledger['nextSequence']()
+  return Object.freeze({
+    ...ledger['operationBase']({ requestId, actor }, sequence),
+    kind: 'team/channel-member-added',
+    data: Object.freeze({ workspaceId: alpha, channelRef, memberId,
+      ...(mentionedByMessageRef === undefined ? {} : { mentionedByMessageRef }) }),
+  }) as AgentTeamChannelMemberAddedOperation
+}
+
+async function commitOperation(ledger: AgentTeamLedger, operation: AgentTeamOperation): Promise<void> {
+  await ledger['table'].put(operation.operationId, operation)
+  ledger['apply'](operation)
+}
+
 const created = (actor?: AgentTeamOperation['actor']): AgentTeamOperation => op(
   'operation:1',
   1,
@@ -157,13 +197,70 @@ describe('Channel membership attribution', () => {
     expect(ledger.channelMembershipOrigin(memberId, channelRef)?.operationId).toBe('operation:1')
   })
 
-  it('credits a Member granted, removed and granted again to the later grant', async () => {
-    const ledger = await ledgerWithOperations()
-    seed(ledger, [created(), removed(), addedBack()])
+  it('cold replay credits a rejoin to the later Human grant', async () => {
+    const test = await ledgerFixture()
+    const author = 'member:rejoined1' as AgentTeamMemberId
+    await test.ledger.addMember({
+      requestId: 'request:add-rejoined' as AgentTeamRequestId, workspaceId: alpha, handle: 'rejoined', description: '',
+      presetId: 'team-member', channelRefs: [], actor: agentTeamHumanActor(),
+      member: { ...member, memberId: author, handle: 'rejoined', sessionId: SessionId('session:rejoined'), privateMemoryPath: '/tmp/rejoined' },
+    })
+    const created = await test.ledger.createChannel({
+      requestId: 'request:create-rejoined' as AgentTeamRequestId, workspaceId: alpha, name: 'rejoined', description: '',
+      memberIds: [author], actor: agentTeamHumanActor(),
+    })
+    const liveChannelRef = created.value.channel.channelRef
+    await commitOperation(test.ledger, channelMemberRemoved(
+      test.ledger, 'request:remove-rejoined' as AgentTeamRequestId, liveChannelRef, author))
+    const renewed = channelMemberAdded(test.ledger, 'request:rejoin-rejoined' as AgentTeamRequestId,
+      liveChannelRef, author, agentTeamHumanActor())
+    await commitOperation(test.ledger, renewed)
 
-    // The retired create-time grant does not answer for a membership a later
-    // Human act made, and it does not silence that act either.
-    expect(ledger.channelMembershipOrigin(memberId, channelRef)?.operationId).toBe('operation:3')
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()]
+    const cold = await reopen(records)
+    expect(cold.channelMembershipOrigin(author, liveChannelRef)?.operationId,
+      'the old grant is retired and the rejoin names its own Human act').toBe(renewed.operationId)
+  })
+
+  it('cold replay rejects a Member enrolment after its Human grant was withdrawn', async () => {
+    const test = await ledgerFixture()
+    const author = 'member:retired2' as AgentTeamMemberId
+    const invited = 'member:named09' as AgentTeamMemberId
+    for (const [id, handle] of [[author, 'retired'], [invited, 'named09']] as const) {
+      await test.ledger.addMember({
+        requestId: `request:add-${handle}` as AgentTeamRequestId, workspaceId: alpha, handle, description: '',
+        presetId: 'team-member', channelRefs: [], actor: agentTeamHumanActor(),
+        member: { ...member, memberId: id, handle, sessionId: SessionId(`session:${handle}`), privateMemoryPath: `/tmp/${handle}` },
+      })
+    }
+    const created = await test.ledger.createChannel({
+      requestId: 'request:create-prefix' as AgentTeamRequestId, workspaceId: alpha, name: 'prefix', description: '',
+      memberIds: [author], actor: agentTeamHumanActor(),
+    })
+    const liveChannelRef = created.value.channel.channelRef
+    await commitOperation(test.ledger, channelMemberRemoved(
+      test.ledger, 'request:remove-prefix' as AgentTeamRequestId, liveChannelRef, author))
+    expect(test.ledger.channelMembershipOrigin(author, liveChannelRef), 'the old grant no longer answers').toBeUndefined()
+
+    // Workspace participation still permits this historical Message; only an
+    // enrolment resting on the withdrawn Channel grant must fail replay.
+    const sent = await test.ledger.sendMessage({
+      requestId: 'request:prefix-names' as AgentTeamRequestId, workspaceId: alpha, channelRef: liveChannelRef,
+      body: 'over to @named09', recipients: [], actor: { kind: 'member', memberId: author, handle: 'retired' },
+    })
+    if (sent.value.kind !== 'committed') throw new Error('the Message should commit despite the withdrawn Channel grant')
+    expect(test.ledger['state'].memberships.get(liveChannelRef)?.has(invited), 'the write guard withholds the enrolment').toBe(false)
+
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()]
+    const validCold = await reopen(records)
+    expect(validCold.channelMembershipOrigin(author, liveChannelRef)).toBeUndefined()
+
+    // Model the invalid durable row the pre-fix writer could have left behind.
+    // On cold replay this Member-authored enrolment must be rejected because
+    // its Message sender has no Human-root grant in the prefix.
+    const invalid = channelMemberAdded(test.ledger, 'request:invalid-enrolment' as AgentTeamRequestId,
+      liveChannelRef, invited, { kind: 'member', memberId: author, handle: 'retired' }, sent.value.message.messageRef)
+    await expect(reopen([...records, [invalid.operationId, invalid]])).rejects.toThrow(/no Human behind the enrolment/)
   })
 
   it('walks past a create-time grant an agent recorded instead of a Human', async () => {
@@ -307,6 +404,45 @@ describe('Enrolment by being named', () => {
     expect(cold.memberInChannel(liveChannelRef, invited), 'the enrolment a Member wrote replays').toBe(true)
     // The act still rests on the Human who put the author in the Channel.
     expect(cold.channelMembershipOrigin(invited, liveChannelRef), 'a Member-authored enrolment resolves to its Human root').toBeDefined()
+  })
+
+  it('naming someone does not enrol when the author has no Human root', async () => {
+    // The write must not commit a record the replay would reject: that shape is
+    // what took the whole domain down. The guard asks the SAME predicate the
+    // replay asks, so an author whose own membership reaches no Human leaves no
+    // enrolment behind — and nothing is left to discover at the next cold start.
+    const test = await ledgerFixture()
+    const rootless = 'member:rootless7' as AgentTeamMemberId
+    const invited = 'member:named07' as AgentTeamMemberId
+    for (const [id, handle] of [[rootless, 'rootless'], [invited, 'named07']] as const) {
+      await test.ledger.addMember({
+        requestId: `request:add-${handle}` as AgentTeamRequestId, workspaceId: alpha, handle, description: '',
+        presetId: 'team-member', channelRefs: [], actor: agentTeamHumanActor(),
+        member: { ...member, memberId: id, handle, sessionId: SessionId(`session:${handle}`), privateMemoryPath: `/tmp/${handle}` },
+      })
+    }
+    const created = await test.ledger.createChannel({
+      requestId: 'request:create-rootless' as AgentTeamRequestId, workspaceId: alpha, name: 'rootless', description: '',
+      memberIds: [], actor: agentTeamHumanActor(),
+    })
+    const liveChannelRef = created.value.channel.channelRef
+    // No Human act put the author in this Channel. `requireMemberChannel` checks
+    // Workspace participation only, so they may still send — and their Message
+    // is the rootless authority the guard must refuse to act on.
+    expect(test.ledger.channelMembershipOrigin(rootless, liveChannelRef), 'no Human act put them in it').toBeUndefined()
+
+    // The Message itself lands; only the enrolment it implies is withheld.
+    await test.ledger.sendMessage({
+      requestId: 'request:rootless-names' as AgentTeamRequestId, workspaceId: alpha, channelRef: liveChannelRef,
+      body: 'over to @named07', recipients: [], actor: { kind: 'member', memberId: rootless, handle: 'rootless' },
+    })
+    const enrolments = test.ledger['state'].ordered.filter(operation => operation.kind === 'team/channel-member-added'
+      && (operation as { data: { memberId: AgentTeamMemberId } }).data.memberId === invited)
+    expect(enrolments.length, 'no enrolment record was written').toBe(0)
+    // The decisive check: the log reopens, so no rejected record was committed.
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()]
+    const cold = await reopen(records)
+    expect(cold.channelMembershipOrigin(invited, liveChannelRef), 'and the log still replays').toBeUndefined()
   })
 
   it('writes one enrolment per named Member however often the send is retried', async () => {

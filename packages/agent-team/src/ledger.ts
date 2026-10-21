@@ -1404,7 +1404,7 @@ export class AgentTeamLedger {
         // this batch granted, removed, and later added back by its own creation
         // has a live grant further along, and stopping here would report it as
         // un-attributable despite that later Human act.
-        if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) continue
+        if (this.membershipWasRemovedAfter(source, memberId, channelRef, operation.sequence)) continue
         // Unreachable today: the only production writer of `team/channel-created`
         // is `createChannel`, which calls `assertHumanActor` before committing it.
         // A record like this is still handled as "this grant does not count"
@@ -1423,7 +1423,7 @@ export class AgentTeamLedger {
       if (operation.kind === 'team/channel-member-added') {
         const added = (operation as AgentTeamChannelMemberAddedOperation).data
         if (added.channelRef !== channelRef || added.memberId !== memberId) continue
-        if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) return undefined
+        if (this.membershipWasRemovedAfter(source, memberId, channelRef, operation.sequence)) return undefined
         if (operation.actor.kind === 'human') return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
         // A Message that named this Member enrolled them. The sender is not
         // thereby an approver — only the Human authorizes a Channel — so the
@@ -1443,7 +1443,7 @@ export class AgentTeamLedger {
       if (data.member.memberId !== memberId || !data.channelRefs.includes(channelRef)) continue
       // A later removal retires this grant for attribution purposes; the
       // membership it described is not the one being backfilled.
-      if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) return undefined
+      if (this.membershipWasRemovedAfter(source, memberId, channelRef, operation.sequence)) return undefined
       // Only a human act can authorize the binding downstream, and the ledger
       // refuses any other initiator; an operation attributed to a Member is
       // therefore not an admissible origin for a backfill.
@@ -1469,9 +1469,10 @@ export class AgentTeamLedger {
   }
 
   private membershipWasRemovedAfter(
+    source: Pick<Projection, 'ordered'>,
     memberId: AgentTeamMemberId, channelRef: AgentTeamChannelRef, sequence: number,
   ): boolean {
-    for (const operation of this.state.ordered) {
+    for (const operation of source.ordered) {
       if (operation.sequence <= sequence) continue
       if (operation.kind !== 'team/channel-member-removed') continue
       const data = (operation as AgentTeamChannelMemberRemovedOperation).data
@@ -1745,6 +1746,14 @@ export class AgentTeamLedger {
     actor: AgentTeamActor,
     invitingMessageRef: AgentTeamMessageRef,
   ): Promise<void> {
+    // A Message can only enrol where its own authority reaches. The sender
+    // holds a Membership the same predicate must be able to follow back to a
+    // Human: writing an enrolment the replay would reject would commit a
+    // record that breaks the whole domain on the next cold start. Asking the
+    // same question here and there is the point — one predicate, two call
+    // sites — not a second definition of who may authorise.
+    if (addressed.length > 0 && actor.kind !== 'human'
+      && this.channelMembershipOriginFrom(this.state, actor.memberId, channel.channelRef) === undefined) return
     for (const memberId of addressed) {
       if (this.state.memberships.get(channel.channelRef)?.has(memberId) === true) continue
       if (!this.state.members.has(memberId)) continue
