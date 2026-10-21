@@ -1423,7 +1423,7 @@ export class AgentTeamLedger {
       if (operation.kind === 'team/channel-member-added') {
         const added = (operation as AgentTeamChannelMemberAddedOperation).data
         if (added.channelRef !== channelRef || added.memberId !== memberId) continue
-        if (this.membershipWasRemovedAfter(source, memberId, channelRef, operation.sequence)) return undefined
+        if (this.membershipWasRemovedAfter(source, memberId, channelRef, operation.sequence)) continue
         if (operation.actor.kind === 'human') return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
         // A Message that named this Member enrolled them. The sender is not
         // thereby an approver — only the Human authorizes a Channel — so the
@@ -1441,9 +1441,9 @@ export class AgentTeamLedger {
       if (operation.kind !== 'team/member-added') continue
       const data = (operation as AgentTeamMemberAddedOperation).data
       if (data.member.memberId !== memberId || !data.channelRefs.includes(channelRef)) continue
-      // A later removal retires this grant for attribution purposes; the
-      // membership it described is not the one being backfilled.
-      if (this.membershipWasRemovedAfter(source, memberId, channelRef, operation.sequence)) return undefined
+      // A later removal retires this grant, but a later Human grant can replace
+      // it; keep scanning so a stale act cannot hide the current authority.
+      if (this.membershipWasRemovedAfter(source, memberId, channelRef, operation.sequence)) continue
       // Only a human act can authorize the binding downstream, and the ledger
       // refuses any other initiator; an operation attributed to a Member is
       // therefore not an admissible origin for a backfill.

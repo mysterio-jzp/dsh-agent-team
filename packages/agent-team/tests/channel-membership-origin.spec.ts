@@ -141,10 +141,13 @@ function channelMemberRemoved(
   channelRef: AgentTeamChannelRef, memberId: AgentTeamMemberId,
 ): AgentTeamChannelMemberRemovedOperation {
   const sequence = ledger['nextSequence']()
+  const projection = ledger['state']
+  const threadRefs = ledger['channelThreadRefsFrom'](projection, channelRef)
+  const inbox = ledger['removeMemberThreadInboxFrom'](projection, memberId, threadRefs)
   return Object.freeze({
     ...ledger['operationBase']({ requestId, actor: agentTeamHumanActor() }, sequence),
     kind: 'team/channel-member-removed',
-    data: Object.freeze({ workspaceId: alpha, channelRef, memberId, ...emptyReleaseSnapshot }),
+    data: Object.freeze({ workspaceId: alpha, channelRef, memberId, ...emptyReleaseSnapshot, inbox }),
   }) as AgentTeamChannelMemberRemovedOperation
 }
 
@@ -220,6 +223,82 @@ describe('Channel membership attribution', () => {
     const cold = await reopen(records)
     expect(cold.channelMembershipOrigin(author, liveChannelRef)?.operationId,
       'the old grant is retired and the rejoin names its own Human act').toBe(renewed.operationId)
+  })
+
+  it('cold replay keeps a regranted Member source after a Member-authored grant is withdrawn', async () => {
+    const test = await ledgerFixture()
+    const root = 'member:rootown1' as AgentTeamMemberId
+    const author = 'member:author01' as AgentTeamMemberId
+    const invited = 'member:invite01' as AgentTeamMemberId
+    for (const [id, handle] of [[root, 'rootowner'], [author, 'author01'], [invited, 'invite01']] as const) {
+      await test.ledger.addMember({
+        requestId: `request:add-${handle}` as AgentTeamRequestId, workspaceId: alpha, handle, description: '',
+        presetId: 'team-member', channelRefs: [], actor: agentTeamHumanActor(),
+        member: { ...member, memberId: id, handle, sessionId: SessionId(`session:${handle}`), privateMemoryPath: `/tmp/${handle}` },
+      })
+    }
+    const created = await test.ledger.createChannel({
+      requestId: 'request:create-member-grant' as AgentTeamRequestId, workspaceId: alpha, name: 'member-grant', description: '',
+      memberIds: [root], actor: agentTeamHumanActor(),
+    })
+    const liveChannelRef = created.value.channel.channelRef
+    await test.ledger.sendMessage({
+      requestId: 'request:root-names-author' as AgentTeamRequestId, workspaceId: alpha, channelRef: liveChannelRef,
+      body: 'welcome @author01', recipients: [], actor: { kind: 'member', memberId: root, handle: 'rootowner' },
+    })
+    const oldGrant = test.ledger['state'].ordered.find(operation => operation.kind === 'team/channel-member-added'
+      && (operation as AgentTeamChannelMemberAddedOperation).data.memberId === author) as AgentTeamChannelMemberAddedOperation | undefined
+    expect(oldGrant?.actor.kind, 'the retired source is a Member-authored enrolment').toBe('member')
+
+    await commitOperation(test.ledger, channelMemberRemoved(
+      test.ledger, 'request:remove-member-grant' as AgentTeamRequestId, liveChannelRef, author))
+    const renewed = channelMemberAdded(test.ledger, 'request:human-regrant-member' as AgentTeamRequestId,
+      liveChannelRef, author, agentTeamHumanActor())
+    await commitOperation(test.ledger, renewed)
+    await test.ledger.sendMessage({
+      requestId: 'request:author-renames-invite' as AgentTeamRequestId, workspaceId: alpha, channelRef: liveChannelRef,
+      body: 'welcome @invite01', recipients: [], actor: { kind: 'member', memberId: author, handle: 'author01' },
+    })
+
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()]
+    const cold = await reopen(records)
+    expect(cold.channelMembershipOrigin(author, liveChannelRef)?.operationId,
+      'the retired Member grant is skipped in favor of the Human regrant').toBe(renewed.operationId)
+  })
+
+  it('cold replay keeps a regranted Member source after a member-added grant is withdrawn', async () => {
+    const test = await ledgerFixture()
+    const author = 'member:author02' as AgentTeamMemberId
+    const invited = 'member:invite02' as AgentTeamMemberId
+    await test.ledger.addMember({
+      requestId: 'request:add-invite02' as AgentTeamRequestId, workspaceId: alpha, handle: 'invite02', description: '',
+      presetId: 'team-member', channelRefs: [], actor: agentTeamHumanActor(),
+      member: { ...member, memberId: invited, handle: 'invite02', sessionId: SessionId('session:invite02'), privateMemoryPath: '/tmp/invite02' },
+    })
+    const created = await test.ledger.createChannel({
+      requestId: 'request:create-member-added' as AgentTeamRequestId, workspaceId: alpha, name: 'member-added', description: '',
+      memberIds: [], actor: agentTeamHumanActor(),
+    })
+    const liveChannelRef = created.value.channel.channelRef
+    await test.ledger.addMember({
+      requestId: 'request:add-author02' as AgentTeamRequestId, workspaceId: alpha, handle: 'author02', description: '',
+      presetId: 'team-member', channelRefs: [liveChannelRef], actor: agentTeamHumanActor(),
+      member: { ...member, memberId: author, handle: 'author02', sessionId: SessionId('session:author02'), privateMemoryPath: '/tmp/author02' },
+    })
+    await commitOperation(test.ledger, channelMemberRemoved(
+      test.ledger, 'request:remove-member-added' as AgentTeamRequestId, liveChannelRef, author))
+    const renewed = channelMemberAdded(test.ledger, 'request:human-regrant-member-added' as AgentTeamRequestId,
+      liveChannelRef, author, agentTeamHumanActor())
+    await commitOperation(test.ledger, renewed)
+    await test.ledger.sendMessage({
+      requestId: 'request:author02-names-invite' as AgentTeamRequestId, workspaceId: alpha, channelRef: liveChannelRef,
+      body: 'welcome @invite02', recipients: [], actor: { kind: 'member', memberId: author, handle: 'author02' },
+    })
+
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()]
+    const cold = await reopen(records)
+    expect(cold.channelMembershipOrigin(author, liveChannelRef)?.operationId,
+      'the retired member-added grant is skipped in favor of the Human regrant').toBe(renewed.operationId)
   })
 
   it('cold replay rejects a Member enrolment after its Human grant was withdrawn', async () => {
