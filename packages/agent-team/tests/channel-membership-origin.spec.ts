@@ -272,6 +272,43 @@ describe('Enrolment by being named', () => {
     expect(cold.channelMembershipOrigin(invited, liveChannelRef), 'the enrolment is its own origin').toBeDefined()
   })
 
+  it('cold reopen: an enrolment a Member wrote by naming someone replays as valid', async () => {
+    const test = await ledgerFixture()
+    // The Host validates the log on the way back in, and this enrolment is
+    // authored by a Member rather than the Human. Its authority is the Human the
+    // author's own membership reaches, not the actor itself — a shape only
+    // reachable through this path, which is why it needs its own replay case.
+    const author = 'member:author05' as AgentTeamMemberId
+    const invited = 'member:named05' as AgentTeamMemberId
+    await test.ledger.addMember({
+      requestId: 'request:add-author' as AgentTeamRequestId, workspaceId: alpha, handle: 'author', description: '',
+      presetId: 'team-member', channelRefs: [], actor: agentTeamHumanActor(),
+      member: { ...member, memberId: author, handle: 'author', sessionId: SessionId('session:author'), privateMemoryPath: '/tmp/author' },
+    })
+    await test.ledger.addMember({
+      requestId: 'request:add-named' as AgentTeamRequestId, workspaceId: alpha, handle: 'named', description: '',
+      presetId: 'team-member', channelRefs: [], actor: agentTeamHumanActor(),
+      member: { ...member, memberId: invited, handle: 'named', sessionId: SessionId('session:named'), privateMemoryPath: '/tmp/named' },
+    })
+    const created = await test.ledger.createChannel({
+      requestId: 'request:create-named' as AgentTeamRequestId, workspaceId: alpha, name: 'named', description: '',
+      memberIds: [author], actor: agentTeamHumanActor(),
+    })
+    const liveChannelRef = created.value.channel.channelRef
+    await test.ledger.sendMessage({
+      requestId: 'request:author-names-named' as AgentTeamRequestId, workspaceId: alpha, channelRef: liveChannelRef,
+      body: 'over to @named', recipients: [], actor: { kind: 'member', memberId: author, handle: 'author' },
+    })
+    expect(test.ledger.memberInChannel(liveChannelRef, invited), 'naming enrols regardless of who wrote it').toBe(true)
+
+    const records = [...test.facility.get('agent_team')!.table('operations').entries()]
+    const cold = await reopen(records)
+
+    expect(cold.memberInChannel(liveChannelRef, invited), 'the enrolment a Member wrote replays').toBe(true)
+    // The act still rests on the Human who put the author in the Channel.
+    expect(cold.channelMembershipOrigin(invited, liveChannelRef), 'a Member-authored enrolment resolves to its Human root').toBeDefined()
+  })
+
   it('writes one enrolment per named Member however often the send is retried', async () => {
     const test = await ledgerFixture()
     const invited = 'member:retry04' as AgentTeamMemberId

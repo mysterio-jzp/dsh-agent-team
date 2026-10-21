@@ -1367,6 +1367,25 @@ export class AgentTeamLedger {
     readonly sequence: number
     readonly actor: AgentTeamHumanActor
   } | undefined {
+    return this.channelMembershipOriginFrom(this.state, memberId, channelRef, visited)
+  }
+
+  /**
+   * The same attribution over any operation sequence, so replay validation can
+   * ask it before the projection a live write reads is in place. One function
+   * answers both callers: a second copy of this chain would be a second
+   * definition of who approved a membership.
+   */
+  private channelMembershipOriginFrom(
+    source: Pick<Projection, 'ordered'>,
+    memberId: AgentTeamMemberId,
+    channelRef: AgentTeamChannelRef,
+    visited: Set<AgentTeamMemberId> = new Set(),
+  ): {
+    readonly operationId: AgentTeamOperationId
+    readonly sequence: number
+    readonly actor: AgentTeamHumanActor
+  } | undefined {
     // A Message can only credit a sender whose own membership has an origin,
     // so following senders terminates — but a corrupt log could name a cycle,
     // and a ledger read must not hang on one.
@@ -1377,7 +1396,7 @@ export class AgentTeamLedger {
     // the Members it was granted to. Both are Human acts and both name the
     // membership, so both are admissible origins; scanning forward keeps the
     // FIRST grant, which is the act that made this membership.
-    for (const operation of this.state.ordered) {
+    for (const operation of source.ordered) {
       if (operation.kind === 'team/channel-created') {
         const created = (operation as AgentTeamChannelCreatedOperation).data
         if (created.channel.channelRef !== channelRef || !created.memberIds.includes(memberId)) continue
@@ -1413,9 +1432,9 @@ export class AgentTeamLedger {
         // un-attributable, which is the honest answer: nobody approved it.
         const viaMessage = added.mentionedByMessageRef
         if (viaMessage === undefined) continue
-        const sender = this.messageSender(viaMessage)
+        const sender = this.messageSenderFrom(source, viaMessage)
         if (sender === undefined) continue
-        const approving = this.channelMembershipOrigin(sender, channelRef, new Set([...visited, memberId]))
+        const approving = this.channelMembershipOriginFrom(source, sender, channelRef, new Set([...visited, memberId]))
         if (approving === undefined) continue
         return { operationId: operation.operationId, sequence: operation.sequence, actor: approving.actor }
       }
@@ -1436,7 +1455,12 @@ export class AgentTeamLedger {
 
   /** Who wrote the Message a record cites, or `undefined` when the log holds none. */
   private messageSender(messageRef: AgentTeamMessageRef): AgentTeamMemberId | undefined {
-    for (const operation of this.state.ordered) {
+    return this.messageSenderFrom(this.state, messageRef)
+  }
+
+  /** The same lookup over any operation sequence; see `channelMembershipOriginFrom`. */
+  private messageSenderFrom(source: Pick<Projection, 'ordered'>, messageRef: AgentTeamMessageRef): AgentTeamMemberId | undefined {
+    for (const operation of source.ordered) {
       if (operation.kind !== 'team/message-sent' && operation.kind !== 'team/thread-replied') continue
       const data = (operation as AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation).data
       if (data.message.messageRef === messageRef) return data.message.sender
@@ -3375,7 +3399,31 @@ export class AgentTeamLedger {
       return
     }
     if (operation.kind === 'team/channel-member-added') {
-      assertHuman()
+      // Two admissible authors: the Human who adds a Member by hand, and the
+      // Member whose own Message named them. The second is only admissible
+      // because a Message that enrols someone cannot approve itself — the act
+      // still rests on the Human the sender's own membership reaches, which is
+      // exactly what attribution requires; without that chain the enrolment is
+      // rejected here rather than left to fail later as an un-attributable
+      // binding. The ordering checks below share both cases.
+      const viaMessage = operation.data.mentionedByMessageRef as AgentTeamMessageRef | undefined
+      if (operation.actor.kind === 'human') {
+        // A Human adding by hand, or a Human's own Message naming someone: both
+        // are the Human acting directly, so the authority is the actor itself.
+        assertHuman()
+      } else {
+        // A Member's Message named them. It cannot approve itself: the act rests
+        // on the Human the sender's own membership reaches, and a chain with no
+        // such root is rejected here rather than later as an un-attributable
+        // binding. The Message must be the sender's own, so the record cannot
+        // borrow another Member's standing.
+        assertMember()
+        if (viaMessage === undefined) throw new Error(`agent-team operation ${operation.sequence} adds a Member without Human authority`)
+        const sender = this.messageSenderFrom(projection, viaMessage)
+        if (sender === undefined) throw new Error(`agent-team operation ${operation.sequence} names a Message that does not exist`)
+        if (sender !== operation.actor.memberId) throw new Error(`agent-team operation ${operation.sequence} credits a Message sent by another Member`)
+        if (this.channelMembershipOriginFrom(projection, sender, operation.data.channelRef) === undefined) throw new Error(`agent-team operation ${operation.sequence} has no Human behind the enrolment`)
+      }
       const channel = projection.channels.get(operation.data.channelRef)
       const member = projection.members.get(operation.data.memberId)
       if (channel === undefined || member === undefined || !this.participatesInFrom(projection, member.memberId, channel.workspaceId) || operation.data.workspaceId !== channel.workspaceId || projection.memberships.get(channel.channelRef)?.has(member.memberId)) throw new Error('invalid Channel membership')
