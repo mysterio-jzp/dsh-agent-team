@@ -2,6 +2,7 @@ import type { WorkspaceId } from "@deepseek-ai/dsh-workspace"
 import type { SessionId as AgentTeamMemberSessionId, SessionLogOffset as AgentTeamMemberSessionLogOffset, SessionSeq as AgentTeamMemberSessionSeq } from "@deepseek-ai/dsh-session"
 import type {
   AgentTeamActivity,
+  AgentTeamActor,
   AgentTeamAgentMember,
   AgentTeamAgentMemberStatus,
   AgentTeamAttachmentId,
@@ -424,6 +425,34 @@ export interface AgentTeamJoinChannelRequest {
 }
 
 export interface AgentTeamJoinChannelResult {
+  readonly receipt: AgentTeamOperationReceipt
+  readonly channelRef: AgentTeamChannelRef
+  readonly memberId: AgentTeamMemberId
+}
+
+/**
+ * Human intent to record how one Member came to take part in one Channel, for
+ * Members whose participation predates recorded participation.
+ *
+ * This is history, not admission: it names a Message the ledger already holds
+ * and states that the Human stands behind that Member being in this Channel.
+ */
+export interface AgentTeamRecordChannelParticipationRequest {
+  readonly requestId: AgentTeamRequestId
+  readonly workspaceId: WorkspaceId
+  readonly channelRef: AgentTeamChannelRef
+  readonly memberId: AgentTeamMemberId
+  /** The Message that brought the Member in, exactly as it was written. */
+  readonly source: {
+    readonly messageRef: AgentTeamMessageRef
+    readonly threadRef: AgentTeamThreadRef
+    readonly sequence: number
+    readonly actor: AgentTeamActor
+    readonly deliveredMemberIds: readonly AgentTeamMemberId[]
+  }
+}
+
+export interface AgentTeamRecordChannelParticipationResult {
   readonly receipt: AgentTeamOperationReceipt
   readonly channelRef: AgentTeamChannelRef
   readonly memberId: AgentTeamMemberId

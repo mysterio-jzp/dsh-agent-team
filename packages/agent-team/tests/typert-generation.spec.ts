@@ -27,6 +27,7 @@ interface GeneratedRemote {
 // Keeping this list costs one line per method and buys the answer; treat an
 // edit to it as a statement about the public boundary, not as test maintenance.
 const EXPECTED_REMOTE_METHODS = [
+  'addChannelMember',
   'addMember',
   'archiveChannel',
   'archiveMember',

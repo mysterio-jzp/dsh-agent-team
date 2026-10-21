@@ -69,6 +69,8 @@ import type {
   AgentTeamInitializedOperation,
   AgentTeamJoinChannelRequest,
   AgentTeamJoinChannelResult,
+  AgentTeamRecordChannelParticipationRequest,
+  AgentTeamRecordChannelParticipationResult,
   AgentTeamMemberActor,
   AgentTeamMemberAddedOperation,
   AgentTeamMemberArchivedOperation,
@@ -564,6 +566,13 @@ interface Projection {
   readonly activityMarkersByMember: Map<AgentTeamMemberId, Map<AgentTeamThreadRef, AgentTeamActivityMarker[]>>
   /** Replay-order Attention observations per Thread, appended by committed Inbox deltas only. */
   readonly observationsByThread: Map<AgentTeamThreadRef, AgentTeamAttentionObservation[]>
+  /**
+   * Durable Channel participation per Channel, keyed by Member: the single
+   * answer to "who takes part in this Channel". Kept beside `memberships` rather
+   * than replacing it — a membership is a grant a work domain is attributed to,
+   * while a participation is the relation the tree, the Channel page and the
+   * write gate all read.
+   */
 }
 
 /** Minimal replay-time Attention observation; the read projection adds the current Task ref. */
@@ -582,7 +591,7 @@ function emptyProjection(): Projection {
     attentionByThread: new Map(), previousSessions: new Map(), rolloverSeeds: new Map(), memberScopes: new Map(),
     anchorByThread: new Map(), taskNumberByTask: new Map(), taskCountByChannel: new Map(), attentionThreadsByMember: new Map(),
     threadsByWriter: new Map(),
-    directMarkersByMember: new Map(), activityMarkersByMember: new Map(), observationsByThread: new Map() }
+    directMarkersByMember: new Map(), activityMarkersByMember: new Map(), observationsByThread: new Map(), }
 }
 
 /** Exhaustiveness guard for the closed operation union: adding a kind must update every dispatch. */
@@ -947,6 +956,34 @@ export class AgentTeamLedger {
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
       return this.committed(this.memberResult(operation))
+    })
+  }
+
+
+  /**
+   * Human admission of one existing Member to one Channel.
+   *
+   * This is the only way a Member joins a Channel. Participation is a durable
+   * record with an author, not a side effect of posting or of being mentioned:
+   * `f5c8587` removed this entry point while making participation a
+   * consequence of writing, and restored here it is the authorization the
+   * Channel write gate reads.
+   */
+  joinChannel(request: AgentTeamAuthorizedJoinChannelRequest): Promise<AgentTeamLedgerResult<AgentTeamJoinChannelResult>> {
+    return this.enqueue(async () => {
+      const existing = this.state.byRequest.get(request.requestId)
+      if (existing !== undefined) {
+        this.assertSameChannelJoin(existing, request)
+        return this.resolved(this.joinResult(existing))
+      }
+      this.assertHumanActor(request.actor)
+      const operation: AgentTeamChannelMemberAddedOperation = Object.freeze({
+        ...this.operationBase(request, this.nextSequence()), kind: 'team/channel-member-added',
+        data: Object.freeze({ workspaceId: request.workspaceId, channelRef: request.channelRef, memberId: request.memberId }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+      return this.committed(this.joinResult(operation))
     })
   }
 
@@ -1325,11 +1362,16 @@ export class AgentTeamLedger {
    * than inventing an actor — a fabricated signature makes the ledger unable to
    * tell a real binding from a backfilled one.
    */
-  channelMembershipOrigin(memberId: AgentTeamMemberId, channelRef: AgentTeamChannelRef): {
+  channelMembershipOrigin(memberId: AgentTeamMemberId, channelRef: AgentTeamChannelRef, visited: Set<AgentTeamMemberId> = new Set()): {
     readonly operationId: AgentTeamOperationId
     readonly sequence: number
     readonly actor: AgentTeamHumanActor
   } | undefined {
+    // A Message can only credit a sender whose own membership has an origin,
+    // so following senders terminates — but a corrupt log could name a cycle,
+    // and a ledger read must not hang on one.
+    if (visited.has(memberId)) return undefined
+    visited.add(memberId)
     // Membership is recorded on the Member's own creation, which carries the
     // Channel set it was granted, or on the Channel's creation, which carries
     // the Members it was granted to. Both are Human acts and both name the
@@ -1354,6 +1396,29 @@ export class AgentTeamLedger {
         if (operation.actor.kind !== 'human') continue
         return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
       }
+      // A Member's own creation names the Channels it was granted. A later
+      // enrolment into one Channel is the same kind of grant, and is what a
+      // repair or a Message that named the Member writes, so it is equally an
+      // origin: without it the very act of enrolling would leave the resulting
+      // binding un-attributable.
+      if (operation.kind === 'team/channel-member-added') {
+        const added = (operation as AgentTeamChannelMemberAddedOperation).data
+        if (added.channelRef !== channelRef || added.memberId !== memberId) continue
+        if (this.membershipWasRemovedAfter(memberId, channelRef, operation.sequence)) return undefined
+        if (operation.actor.kind === 'human') return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
+        // A Message that named this Member enrolled them. The sender is not
+        // thereby an approver — only the Human authorizes a Channel — so the
+        // credit goes to whoever the Message's own membership rests on. When
+        // that chain has no Human act at its root the enrolment stays
+        // un-attributable, which is the honest answer: nobody approved it.
+        const viaMessage = added.mentionedByMessageRef
+        if (viaMessage === undefined) continue
+        const sender = this.messageSender(viaMessage)
+        if (sender === undefined) continue
+        const approving = this.channelMembershipOrigin(sender, channelRef, new Set([...visited, memberId]))
+        if (approving === undefined) continue
+        return { operationId: operation.operationId, sequence: operation.sequence, actor: approving.actor }
+      }
       if (operation.kind !== 'team/member-added') continue
       const data = (operation as AgentTeamMemberAddedOperation).data
       if (data.member.memberId !== memberId || !data.channelRefs.includes(channelRef)) continue
@@ -1365,6 +1430,16 @@ export class AgentTeamLedger {
       // therefore not an admissible origin for a backfill.
       if (operation.actor.kind !== 'human') return undefined
       return { operationId: operation.operationId, sequence: operation.sequence, actor: operation.actor }
+    }
+    return undefined
+  }
+
+  /** Who wrote the Message a record cites, or `undefined` when the log holds none. */
+  private messageSender(messageRef: AgentTeamMessageRef): AgentTeamMemberId | undefined {
+    for (const operation of this.state.ordered) {
+      if (operation.kind !== 'team/message-sent' && operation.kind !== 'team/thread-replied') continue
+      const data = (operation as AgentTeamMessageSentOperation | AgentTeamThreadRepliedOperation).data
+      if (data.message.messageRef === messageRef) return data.message.sender
     }
     return undefined
   }
@@ -1576,7 +1651,7 @@ export class AgentTeamLedger {
       // Recipients are resolved before the request-id lookup: the stored
       // operation carries the merged set, so a retry has to re-derive the same
       // list for the collision check to prove it is the same request.
-      const recipients = this.mergeBodyMentions(actor.memberId, channel.channelRef, body, this.normalizeRecipients(request.actor, request.recipients))
+      const { recipients, addressed } = this.resolveMentions(actor.memberId, channel.channelRef, body, this.normalizeRecipients(request.actor, request.recipients))
       const existing = this.state.byRequest.get(request.requestId)
       if (existing !== undefined) {
         this.assertSameMessage(existing, request, recipients)
@@ -1617,8 +1692,46 @@ export class AgentTeamLedger {
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
+      // Naming a Member in a Channel's own Message enrolls them in it, recorded
+      // as the same enrolment a Human adds by hand rather than as a second kind
+      // of membership. Written after the Message because the recipient list
+      // above was resolved against the roster as it stood when it was sent.
+      await this.enrollAddressed(request.workspaceId, channel, addressed, request.actor, message.messageRef)
       return this.committed(this.messageResult(operation))
     })
+  }
+
+  /**
+   * Record the enrolments one Message implies, as ordinary Channel membership.
+   *
+   * Skipped for Members already in the Channel, so re-addressing someone is not
+   * a second enrolment. A failed enrolment does not fail the Message: it has
+   * already been delivered, and reporting a send as failed would invite the
+   * caller to send it twice.
+   *
+   * The actor stays whoever sent the Message. Writing the Human there instead
+   * would make the log say the Human enrolled someone they never named, and the
+   * whole point of recording the act is that it stays checkable. The Message is
+   * cited alongside so the act can be followed back to it.
+   */
+  private async enrollAddressed(
+    workspaceId: WorkspaceId,
+    channel: AgentTeamChannel,
+    addressed: readonly AgentTeamMemberId[],
+    actor: AgentTeamActor,
+    invitingMessageRef: AgentTeamMessageRef,
+  ): Promise<void> {
+    for (const memberId of addressed) {
+      if (this.state.memberships.get(channel.channelRef)?.has(memberId) === true) continue
+      if (!this.state.members.has(memberId)) continue
+      const operation: AgentTeamChannelMemberAddedOperation = Object.freeze({
+        ...this.operationBase({ requestId: `agent-team:enrol-on-mention:${randomUUID()}` as AgentTeamRequestId, actor }, this.nextSequence()),
+        kind: 'team/channel-member-added',
+        data: Object.freeze({ workspaceId, channelRef: channel.channelRef, memberId, mentionedByMessageRef: invitingMessageRef }),
+      })
+      await this.table.put(operation.operationId, operation)
+      this.apply(operation)
+    }
   }
 
   reply(request: AgentTeamAuthorizedReplyRequest): Promise<AgentTeamLedgerResult<AgentTeamReplyResult>> {
@@ -1637,7 +1750,7 @@ export class AgentTeamLedger {
       const answered = parent === undefined || parent.sender === actor.memberId || parent.sender === AGENT_TEAM_HUMAN_MEMBER_ID
         ? explicit
         : [...new Set([...explicit, parent.sender])].sort()
-      const recipients = this.mergeBodyMentions(actor.memberId, channelRef, body, answered)
+      const { recipients, addressed } = this.resolveMentions(actor.memberId, channelRef, body, answered)
       const existing = this.state.byRequest.get(request.requestId)
       if (existing !== undefined) {
         this.assertSameReply(existing, request, recipients)
@@ -1686,6 +1799,9 @@ export class AgentTeamLedger {
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
+      // A reply is a Message in the Channel too: naming someone in it enrols
+      // them the same way a top-level Message does.
+      await this.enrollAddressed(request.workspaceId, channel, addressed, request.actor, message.messageRef)
       return this.committed(this.replyResult(operation))
     })
   }
@@ -3950,7 +4066,8 @@ export class AgentTeamLedger {
       // Departure ends Channel memberships inside the left Workspace — unlike
       // archival, which keeps them hidden for a possible restore.
       for (const channel of target.channels.values()) {
-        if (channel.workspaceId === operation.data.workspaceId) target.memberships.get(channel.channelRef)?.delete(operation.data.memberId)
+        if (channel.workspaceId !== operation.data.workspaceId) continue
+        target.memberships.get(channel.channelRef)?.delete(operation.data.memberId)
       }
       this.applyReleaseSnapshot(target, operation, operation.data, operation.occurredAt)
       return
@@ -5098,18 +5215,28 @@ export class AgentTeamLedger {
     if (memberId === AGENT_TEAM_HUMAN_MEMBER_ID) return false
     const channel = projection.channels.get(channelRef)
     if (channel === undefined || !this.participatesInFrom(projection, memberId, channel.workspaceId)) return false
+    // Bridge for Ledgers written before a Message that named someone recorded
+    // the enrolment: from here on a named Member holds a real membership, so
+    // this derives nothing for them, and it exists only so the older rows keep
+    // the Channels they were already being shown. It is not a second definition
+    // of membership — remove it once those rows have been replayed.
     for (const threadRef of this.channelThreadRefsFrom(projection, channelRef)) {
       if (this.everParticipatedFrom(projection, threadRef, memberId)) return true
     }
     return false
   }
 
+  /** The Workspace a Channel belongs to; `undefined` for a Channel this ledger does not hold. */
+  workspaceOfChannel(channelRef: AgentTeamChannelRef): WorkspaceId | undefined {
+    return this.state.channels.get(channelRef)?.workspaceId
+  }
+
   /**
-   * Every (Member, Channel) membership recorded durably, for the startup
-   * reconciliation pass that backfills work domains a crash may have left
-   * unbound. Reading the membership table alone keeps the pass to facts that
-   * were actually committed, rather than inferring membership from Thread
-   * participation.
+   * Every (Member, Channel) pair recorded durably as a membership or as a
+   * recorded participation, for the startup reconciliation pass that backfills
+   * work domains a crash may have left unbound. Both are committed facts with an
+   * attributable author, which keeps the pass off anything merely inferred from
+   * Thread participation.
    */
   channelMemberships(): readonly {
     readonly memberId: AgentTeamMemberId
@@ -5318,6 +5445,25 @@ export class AgentTeamLedger {
     body: string,
     explicit: readonly AgentTeamMemberId[],
   ): readonly AgentTeamMemberId[] {
+    return this.resolveMentions(sender, channelRef, body, explicit).recipients
+  }
+
+  /**
+   * The recipients of one Message, plus the names its body called out by hand.
+   *
+   * `addressed` is what the written body names, with `@all` left out: `@all` is
+   * an address to whoever the Channel already holds, so reading it as an
+   * invitation would make the Channel enroll people as a side effect of
+   * addressing the room. Candidates come from Workspace participation, not
+   * Channel membership, so deciding who can be named never consults the
+   * membership this call may add to.
+   */
+  private resolveMentions(
+    sender: AgentTeamMemberId,
+    channelRef: AgentTeamChannelRef,
+    body: string,
+    explicit: readonly AgentTeamMemberId[],
+  ): { recipients: readonly AgentTeamMemberId[], addressed: readonly AgentTeamMemberId[] } {
     const candidates = this.mentionCandidatesFor(channelRef)
     const resolution = resolveBodyMentions(body, candidates, sender)
     // `@all` stands for its expansion as of this write: the Member set is
@@ -5327,7 +5473,8 @@ export class AgentTeamLedger {
     const authored = resolution.all ? this.allRecipientsFor(channelRef) : resolution.memberIds
     const merged = new Set([...explicit, ...authored])
     merged.delete(sender)
-    return Object.freeze([...merged].sort())
+    const addressed = Object.freeze([...new Set(resolution.memberIds)].filter(memberId => memberId !== sender).sort())
+    return { recipients: Object.freeze([...merged].sort()), addressed }
   }
 
   private everParticipatedFrom(projection: Projection, threadRef: AgentTeamThreadRef, memberId: AgentTeamMemberId): boolean {

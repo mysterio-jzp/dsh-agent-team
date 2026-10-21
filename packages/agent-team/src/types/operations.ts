@@ -1,6 +1,7 @@
 import type { SessionId, SessionLogOffset, SessionSeq } from "@deepseek-ai/dsh-session"
 import type { WorkspaceId } from "@deepseek-ai/dsh-workspace"
 import type {
+  AgentTeamActor,
   AgentTeamAgentMember,
   AgentTeamChannel,
   AgentTeamChannelRef,
@@ -17,6 +18,7 @@ import type {
   AgentTeamMemberScopeKey,
   AgentTeamMemberScopeSession,
   AgentTeamMessage,
+  AgentTeamMessageRef,
   AgentTeamStoredMessage,
   AgentTeamStoredThreadReadFact,
   AgentTeamTask,
@@ -273,6 +275,15 @@ export interface AgentTeamChannelMemberAddedOperation extends AgentTeamOperation
     readonly workspaceId: WorkspaceId
     readonly channelRef: AgentTeamChannelRef
     readonly memberId: AgentTeamMemberId
+    /**
+     * The Message that enrolled this Member by naming them, when one did.
+     *
+     * Absent for an enrolment a Human made by hand. Recorded so the act that
+     * invited someone stays readable after the fact: without it, an enrolment a
+     * Member's Message caused could only say "a Member did it", which is not an
+     * approval anyone can be pointed at.
+     */
+    readonly mentionedByMessageRef?: AgentTeamMessageRef
   }
 }
 
@@ -571,6 +582,26 @@ export interface AgentTeamMemberModelRouteRecordedOperation extends AgentTeamOpe
     readonly memberId: AgentTeamMemberId
     readonly sessionId: SessionId
     readonly source: AgentTeamMemberRouteSource
+  }
+}
+
+export interface AgentTeamChannelParticipationRecordedOperation extends AgentTeamOperationBase {
+  readonly kind: 'team/channel-participation-recorded'
+  readonly data: {
+    readonly workspaceId: WorkspaceId
+    readonly channelRef: AgentTeamChannelRef
+    readonly memberId: AgentTeamMemberId
+    /** The Message that invited the Member, frozen as it was written. */
+    readonly source: {
+      readonly messageRef: AgentTeamMessageRef
+      readonly threadRef: AgentTeamThreadRef
+      readonly sequence: number
+      readonly actor: AgentTeamActor
+      /** The recipients this Message delivered to, as the operation froze them. */
+      readonly deliveredMemberIds: readonly AgentTeamMemberId[]
+    }
+    /** The Human whose authority this participation rests on. */
+    readonly responsibleMemberId: AgentTeamMemberId
   }
 }
 

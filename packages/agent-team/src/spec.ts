@@ -529,7 +529,14 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/channel-member-added'),
-    data: z.object({ workspaceId: workspaceIdSchema, channelRef: channelRefSchema, memberId: memberIdSchema }).strict(),
+    data: z.object({
+      workspaceId: workspaceIdSchema,
+      channelRef: channelRefSchema,
+      memberId: memberIdSchema,
+      // Absent for enrolments a Human made by hand; present when a Message
+      // named the Member, so the inviting act stays readable.
+      mentionedByMessageRef: messageRefSchema.optional(),
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,

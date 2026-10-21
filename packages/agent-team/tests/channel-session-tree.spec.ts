@@ -22,7 +22,7 @@ import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
 import { channelMemberScopeKey } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
-import type { AgentTeamChannelRef, AgentTeamChannelRowReason, AgentTeamMemberId, AgentTeamRequestId } from '../src/types.ts'
+import type { AgentTeamChannelRef, AgentTeamChannelRowReason, AgentTeamMemberId, AgentTeamOperation, AgentTeamRequestId } from '../src/types.ts'
 
 const cleanups: Array<() => Promise<void>> = []
 const alpha = WorkspaceId('workspace:alpha')
@@ -124,6 +124,21 @@ async function participantThroughThreads(ctx: AgentTeamHarnessContext, channelRe
   return memberId
 }
 
+/**
+ * The repair a backfill performs: enrol the Member in the Channel the way any
+ * other enrolment is recorded, so the binding has a Human act to be credited to.
+ *
+ * Written as the ordinary enrolment rather than as a second kind of grant on
+ * purpose — a repair that invented its own record shape would leave the tree
+ * reading two definitions of "in this Channel".
+ */
+async function backfillParticipation(ctx: AgentTeamHarnessContext, channelRef: AgentTeamChannelRef, memberId: AgentTeamMemberId): Promise<void> {
+  await ctx.agentTeam['ledger']!.joinChannel({
+    requestId: requestId(`backfill-${memberId}`), workspaceId: alpha, channelRef, memberId,
+    actor: agentTeamHumanActor(),
+  })
+}
+
 describe('Channel rows in the Member session tree', () => {
   it('reports an un-attributable Channel as unopenable with the origin-unrecorded reason', async () => {
     const { ctx } = await harness()
@@ -194,31 +209,70 @@ describe('Channel rows in the Member session tree', () => {
     }
   })
 
-  it('lists a Channel a Member only takes part in through its Threads, and claims no Session for it', async () => {
+  it('opens a Session for a Member another Member named, not only for one the Human named', async () => {
     const { ctx } = await harness()
     const channelRef = await newChannelFor(ctx, nextChannelName())
-    const memberId = await participantThroughThreads(ctx, channelRef, 'mentioned')
+    // The sender is an ordinary Channel Member; the named one is not in the
+    // Channel at all, so the sender's Message is what enrols them. Only the
+    // Human authorizes a Channel, so the sender is not the approver here.
+    const senderId = await participantThroughThreads(ctx, channelRef, 'sender')
+    const namedId = 'member:named' as AgentTeamMemberId
+    await ctx.agentTeam['ledger']!.addMember({
+      requestId: requestId('add-named'), workspaceId: alpha, handle: 'named', description: 'Peer', presetId: 'team-member',
+      channelRefs: [], actor: agentTeamHumanActor(),
+      member: {
+        memberId: namedId, sessionId: SessionId('session:named'), workspaceId: alpha, handle: 'named', description: 'Peer',
+        presetId: 'team-member', privateMemoryPath: '/tmp/named', state: 'enabled' as const,
+      },
+    })
+    expect(ctx.agentTeam['ledger']!.memberInChannel(channelRef, namedId), 'not a Member until named').toBe(false)
 
-    // The Channel page counts this Member; before the projection read the same
-    // derivation the tree omitted the Channel entirely and the two disagreed.
+    await ctx.agentTeam['ledger']!.sendMessage({
+      requestId: requestId('member-names-member'), workspaceId: alpha, channelRef,
+      actor: { kind: 'member', memberId: senderId, handle: 'sender' } as AgentTeamOperation['actor'],
+      body: '@named, please take a look',
+    })
+
+    // The enrolment itself is a Member act, so the binding has to trace the
+    // Message back to the Human whose membership the sender rests on. Asserting
+    // only `memberInChannel` would pass while the Session stayed unopenable,
+    // which is exactly the gap this case exists to close.
+    await ctx.agentTeam['reconcileChannelWorkDomains'](ctx.agentTeam['ledger']!)
+    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(namedId, channelMemberScopeKey(channelRef))
+    expect(binding, 'a Member-named Member must still get a Channel Session').toBeDefined()
+    expect(rowsOf(ctx, namedId).find(row => row.channelRef === channelRef)?.state,
+      'the row opens rather than reporting an unattributed origin').not.toBe('unopenable')
+  })
+
+  it('gives a repaired Channel a Session, so the row the Channel page counts is the row the tree can open', async () => {
+    const { ctx } = await harness()
+    const channelRef = await newChannelFor(ctx, nextChannelName())
+    const memberId = await joinedWithoutOrigin(ctx, channelRef, 'unrepaired')
+
+    // The Channel page counts this Member through the Thread derivation the
+    // tree also reads, so the two agree even before the repair.
     const counted = ctx.agentTeam.view({ workspaceId: alpha }).members
       .filter(entry => entry.memberId === memberId)
       .map(entry => entry.channelRef)
     expect(counted).toEqual([channelRef])
 
-    const rows = rowsOf(ctx, memberId)
-    expect(rows.map(row => row.channelRef).sort()).toEqual([...counted].sort())
-    expect(rows[0]!.state).toBe('unopenable')
-    // Not `session-create-failed`: nothing failed, and naming a fault would send
-    // a reader after a cause that does not exist.
-    expect(rows[0]!.reason).toBe('session-not-created' satisfies AgentTeamChannelRowReason)
-    expect(rows[0]!.sessionId).toBeUndefined()
-
-    // The other half of the contract: a Thread-derived participation carries no
-    // grant to attribute a binding to, so startup reconciliation must leave it
-    // without one rather than invent an operator.
+    // A participation with no Human act behind it has nothing to attribute a
+    // binding to, so the row must stay unopenable rather than open under a
+    // guessed operator. This half asserts the "no fabricated actor" rule.
     await ctx.agentTeam['reconcileChannelWorkDomains'](ctx.agentTeam['ledger']!)
     expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channelRef))).toBeUndefined()
-    expect(rowsOf(ctx, memberId)[0]!.reason).toBe('session-not-created' satisfies AgentTeamChannelRowReason)
+
+    // The repair is what makes the Channel openable: enrolling the Member gives
+    // the binding an author, and the reconciliation pass then opens it.
+    await backfillParticipation(ctx, channelRef, memberId)
+    await ctx.agentTeam['reconcileChannelWorkDomains'](ctx.agentTeam['ledger']!)
+
+    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channelRef))
+    expect(binding, 'the repaired participation must carry a Session').toBeDefined()
+    const rows = rowsOf(ctx, memberId)
+    expect(rows.map(row => row.channelRef)).toEqual([channelRef])
+    expect(rows[0]!.state).not.toBe('unopenable')
+    expect(rows[0]!.reason, 'a repaired row is openable, so it carries no failure code').toBeUndefined()
+    expect(rows[0]!.sessionId).toBe(binding!.sessionId)
   })
 })

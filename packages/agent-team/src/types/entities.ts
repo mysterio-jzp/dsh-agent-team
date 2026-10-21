@@ -177,11 +177,6 @@ export type AgentTeamChannelRowReason =
   | 'activation-failed' // bound, but the Session never started
   | 'origin-unrecorded' // the act that granted the membership is missing, so nothing was created
   | 'unbound' // a Member domain exists but its durable binding is gone
-  // Took part in the Channel through its Threads without ever being granted a
-  // membership, so no Session was ever meant to exist. Deliberately NOT
-  // `session-create-failed`: nothing failed, and a reader sent after a fault
-  // that never happened would be looking in the wrong place.
-  | 'session-not-created'
   | 'unknown' // a code this projection was not taught: render the generic sentence
 
 /**

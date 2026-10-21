@@ -287,6 +287,7 @@ const channelMemberAdded: Op<'team/channel-member-added'> = {
   data: { workspaceId: alpha, channelRef, memberId },
 }
 
+
 const channelMemberRemoved: Op<'team/channel-member-removed'> = {
   ...opBase('operation:protocol-14', 'request:protocol-channel-member-removed', 14),
   previousOperationId,

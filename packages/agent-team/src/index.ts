@@ -103,6 +103,8 @@ import type {
   AgentTeamRemoveMemberAvatarResult,
   AgentTeamInbox,
   AgentTeamInboxRequest,
+  AgentTeamJoinChannelRequest,
+  AgentTeamJoinChannelResult,
   AgentTeamJoinWorkspaceRequest,
   AgentTeamJoinWorkspaceResult,
   AgentTeamLeaveWorkspaceRequest,
@@ -1501,10 +1503,10 @@ export default class AgentTeam extends TypertRemoteService {
   ): readonly AgentTeamClientChannelRow[] {
     const ledger = this.requireLedger()
     const rows: { readonly row: AgentTeamClientChannelRow; readonly createdAt: number }[] = []
-    for (const { channelRef, channelName, channelCreatedAt, explicit } of participations) {
+    for (const { channelRef, channelName, channelCreatedAt } of participations) {
       const scopeKey = channelMemberScopeKey(channelRef)
       const binding = ledger.memberScopeSessionFor(memberId, scopeKey)
-      const reason = this.channelRowReason(memberId, binding, explicit)
+      const reason = this.channelRowReason(memberId, binding)
       const row: AgentTeamClientChannelRow = Object.freeze({
         channelRef, channelName,
         ...(binding === undefined ? {} : { sessionId: binding.sessionId }),
@@ -1526,17 +1528,16 @@ export default class AgentTeam extends TypertRemoteService {
    * made-up cause would send them after the wrong thing.
    */
   private channelRowReason(
-    memberId: AgentTeamMemberId, binding: AgentTeamMemberScopeSession | undefined, explicit: boolean,
+    memberId: AgentTeamMemberId, binding: AgentTeamMemberScopeSession | undefined,
   ): AgentTeamChannelRowReason | undefined {
     const diagnostic = this.memberFailures.get(memberId)?.activation
     if (binding === undefined) {
-      // Participation derived from a Thread carries no membership, so no
-      // Session was ever opened for it and none is owed: reporting a creation
-      // failure would name a fault that never happened.
-      if (!explicit) return 'session-not-created'
       // Nothing was created: either the originating act is unrecorded, which
       // the activation carries as `domain-unattributed`, or creation failed
-      // for a cause recorded on the Member's activation slot.
+      // for a cause recorded on the Member's activation slot. Every row now
+      // states one of those, because every participation is either recorded
+      // (so a Session is owed and its absence is a failure) or not (so the
+      // missing act is the explanation) — there is no third shape to report.
       if (diagnostic === undefined) return 'session-create-failed'
       return diagnostic.class === 'domain-unattributed' ? 'origin-unrecorded' : 'activation-failed'
     }
@@ -1602,6 +1603,24 @@ export default class AgentTeam extends TypertRemoteService {
     // nothing on a retried request — the derived id makes it idempotent.
     const channelRef = result.value.channel.channelRef
     for (const memberId of result.value.memberIds) await this.openChannelWorkDomain(memberId, channelRef)
+    return result.value
+  }
+
+  /**
+   * Human admission of one existing Member to one Channel — the entry point
+   * `f5c8587` removed, restored here beside the durable participation record it
+   * authorizes. Admission and provisioning stay one intent: the Member must be
+   * able to read the Channel without a Message arriving first.
+   */
+  @Remote('addChannelMember')
+  async addChannelMember(request: AgentTeamJoinChannelRequest): Promise<AgentTeamJoinChannelResult> {
+    this.requireAccepting()
+    this.requireWorkspace(request.workspaceId)
+    if (!this.requireLedger().hasCommitted(request.requestId)) this.assertChannelMembersAvailable([request.memberId])
+    const result = await this.requireLedger().joinChannel({ ...request, actor: agentTeamHumanActor() })
+    if (!result.committed) return result.value
+    this.emitCommitted(result.value.receipt)
+    await this.openChannelWorkDomain(result.value.memberId, result.value.channelRef)
     return result.value
   }
 
