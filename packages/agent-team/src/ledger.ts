@@ -361,6 +361,22 @@ export interface AgentTeamAuthorizedThreadReadRequest extends AgentTeamThreadRea
   readonly actor: AgentTeamHumanActor | AgentTeamMemberActor
 }
 
+/**
+ * One (Member, Channel) participation as the derived rule reports it: the
+ * Member takes part either because a durable membership carries the pair or
+ * because it has taken part in one of the Channel's Threads.
+ */
+export interface AgentTeamChannelParticipation {
+  readonly memberId: AgentTeamMemberId
+  readonly channelRef: AgentTeamChannelRef
+  /** The Channel's display name, so a reader of the pair needs no second lookup. */
+  readonly channelName: string
+  /** Channel creation order: the stable order a session tree lists rows in. */
+  readonly channelCreatedAt: number
+  /** Whether a durable membership carries this pair, rather than Thread participation alone. */
+  readonly explicit: boolean
+}
+
 export interface AgentTeamAuthorizedRemoveMemberRequest extends AgentTeamRemoveMemberRequest {
   readonly actor: AgentTeamHumanActor
 }
@@ -5118,6 +5134,37 @@ export class AgentTeamLedger {
       }
     }
     return Object.freeze(pairs)
+  }
+
+  /**
+   * Every (Member, Channel) pair where the Member takes part in the Channel —
+   * the same derivation the Channel page's own member count uses, so a tree
+   * built from this cannot show fewer Channels than the count states.
+   *
+   * One pass serves a whole roster: the session tree lists rows for every
+   * Member, and deriving participation per Member would replay every Channel's
+   * Threads once per row.
+   *
+   * `explicit` separates the two sources. Only an explicit membership is
+   * something a work domain could be attributed to, so a reader that wants to
+   * create Sessions (the reconciliation pass) must keep reading
+   * {@link channelMemberships} instead of this.
+   */
+  channelParticipations(): readonly AgentTeamChannelParticipation[] {
+    const participations: AgentTeamChannelParticipation[] = []
+    for (const channel of this.state.channels.values()) {
+      // An archived Channel is hidden from every surface, Threads included, so
+      // its participation is not a row either.
+      if (channel.state === 'archived') continue
+      for (const memberId of this.state.members.keys()) {
+        if (!this.isChannelMemberFrom(this.state, channel.channelRef, memberId)) continue
+        participations.push(Object.freeze({
+          memberId, channelRef: channel.channelRef, channelName: channel.name, channelCreatedAt: channel.createdAtSequence,
+          explicit: this.state.memberships.get(channel.channelRef)?.has(memberId) === true,
+        }))
+      }
+    }
+    return Object.freeze(participations)
   }
 
   /** Every Thread of the Channel, taskful or taskless — the scope both cleanup validators replay against. */

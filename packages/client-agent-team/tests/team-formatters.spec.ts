@@ -413,6 +413,7 @@ describe('Channel row reasons', () => {
     expect(formatChannelRowReason({ reason: 'origin-unrecorded' }, t)).toBe(zh.channelRowReasonOriginUnrecorded)
     expect(formatChannelRowReason({ reason: 'activation-failed' }, t)).toBe(zh.channelRowReasonActivationFailed)
     expect(formatChannelRowReason({ reason: 'session-create-failed' }, t)).toBe(zh.channelRowReasonSessionCreateFailed)
+    expect(formatChannelRowReason({ reason: 'session-not-created' }, t)).toBe(zh.channelRowReasonSessionNotCreated)
   })
 
   it('says nothing at all for a row that can be opened', () => {

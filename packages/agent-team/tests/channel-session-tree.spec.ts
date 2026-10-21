@@ -100,6 +100,30 @@ function rowsOf(ctx: AgentTeamHarnessContext, memberId: AgentTeamMemberId) {
   return ctx.agentTeam.membersForClient({ workspaceId: alpha }).find(row => row.member.memberId === memberId)?.channels ?? []
 }
 
+/**
+ * A Member who takes part in the Channel only through one of its Threads: a
+ * Workspace participant named by the Human in a Channel message. Nothing along
+ * this path records a membership, which is exactly the shape the tree used to
+ * drop while the Channel page's own member count included it.
+ */
+async function participantThroughThreads(ctx: AgentTeamHarnessContext, channelRef: AgentTeamChannelRef, handle: string): Promise<AgentTeamMemberId> {
+  const memberId = `member:${handle}` as AgentTeamMemberId
+  const ledger = ctx.agentTeam['ledger']!
+  await ledger.addMember({
+    requestId: requestId(`add-${handle}`), workspaceId: alpha, handle, description: 'Peer', presetId: 'team-member',
+    channelRefs: [], actor: agentTeamHumanActor(),
+    member: {
+      memberId, sessionId: SessionId(`session:${handle}`), workspaceId: alpha, handle, description: 'Peer',
+      presetId: 'team-member', privateMemoryPath: `/tmp/${handle}`, state: 'enabled' as const,
+    },
+  })
+  await ledger.sendMessage({
+    requestId: requestId(`mention-${handle}`), workspaceId: alpha, channelRef, actor: agentTeamHumanActor(),
+    body: `@${handle}, please take a look`,
+  })
+  return memberId
+}
+
 describe('Channel rows in the Member session tree', () => {
   it('reports an un-attributable Channel as unopenable with the origin-unrecorded reason', async () => {
     const { ctx } = await harness()
@@ -168,5 +192,33 @@ describe('Channel rows in the Member session tree', () => {
     for (const row of unopenable) {
       expect(row.reason, `row ${row.channelRef} must carry a reason code`).toBeDefined()
     }
+  })
+
+  it('lists a Channel a Member only takes part in through its Threads, and claims no Session for it', async () => {
+    const { ctx } = await harness()
+    const channelRef = await newChannelFor(ctx, nextChannelName())
+    const memberId = await participantThroughThreads(ctx, channelRef, 'mentioned')
+
+    // The Channel page counts this Member; before the projection read the same
+    // derivation the tree omitted the Channel entirely and the two disagreed.
+    const counted = ctx.agentTeam.view({ workspaceId: alpha }).members
+      .filter(entry => entry.memberId === memberId)
+      .map(entry => entry.channelRef)
+    expect(counted).toEqual([channelRef])
+
+    const rows = rowsOf(ctx, memberId)
+    expect(rows.map(row => row.channelRef).sort()).toEqual([...counted].sort())
+    expect(rows[0]!.state).toBe('unopenable')
+    // Not `session-create-failed`: nothing failed, and naming a fault would send
+    // a reader after a cause that does not exist.
+    expect(rows[0]!.reason).toBe('session-not-created' satisfies AgentTeamChannelRowReason)
+    expect(rows[0]!.sessionId).toBeUndefined()
+
+    // The other half of the contract: a Thread-derived participation carries no
+    // grant to attribute a binding to, so startup reconciliation must leave it
+    // without one rather than invent an operator.
+    await ctx.agentTeam['reconcileChannelWorkDomains'](ctx.agentTeam['ledger']!)
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channelRef))).toBeUndefined()
+    expect(rowsOf(ctx, memberId)[0]!.reason).toBe('session-not-created' satisfies AgentTeamChannelRowReason)
   })
 })

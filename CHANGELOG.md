@@ -23,6 +23,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - A consumed Session model choice survives Host restart without changing the Member default; later Member model edits still take precedence. Older consumed choices without a source record must be selected again after upgrading. The new ledger operation requires the updated reader; downgrade reading is unsupported.
 - A Human to-do answer target is consumed when its reply commits and invalidated when the Host reports it closed or withdrawn, including while a reply is in flight. Failed sends still retain a live target for retry. A refused answer binding reports the Host's reason separately from the already-sent message instead of presenting it as a send failure.
+- The Member session tree lists every Channel a Member takes part in, not only the ones a durable membership covers, so a Member named into a Channel's Threads no longer disappears from the tree while that Channel's own count includes it. Such a row states that no separate Channel session exists yet rather than reporting a creation failure, and startup reconciliation still opens sessions only for a membership it can attribute.
 
 ## [0.2.3] - 2026-10-11
 

@@ -64,6 +64,7 @@ const CHANNEL_ROW_REASON_KEYS = {
   'activation-failed': 'channelRowReasonActivationFailed',
   'origin-unrecorded': 'channelRowReasonOriginUnrecorded',
   'unbound': 'channelRowReasonUnbound',
+  'session-not-created': 'channelRowReasonSessionNotCreated',
   'unknown': 'channelRowReasonUnknown',
 } as const satisfies Record<AgentTeamChannelRowReason, TeamKey>
 

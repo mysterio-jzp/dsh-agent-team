@@ -48,7 +48,7 @@ import { CONTEXT_CONTINUITY_PROJECTION_KEY, DEFAULT_GATE_IDLE_MS, DEFAULT_GATE_T
 import { TeamContextJudge, type TeamContextJudgeConfig } from './context-judge.ts'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
 import { boundaryByRef, carriedInputOf, checkpointByRef, checkpointRefFor, createTeamContextProjectionConfig, createTeamContextProjectionDefinition, foldTeamContextProjection, TeamContextProjectionHost } from './context-projection.ts'
-import { AGENT_TEAM_HUMAN_MEMBER_ID, AgentTeamLedger, agentTeamHumanActor, type AgentTeamDurableMemberResult } from './ledger.ts'
+import { AGENT_TEAM_HUMAN_MEMBER_ID, AgentTeamLedger, agentTeamHumanActor, type AgentTeamChannelParticipation, type AgentTeamDurableMemberResult } from './ledger.ts'
 import { claimMessageArtifacts, MESSAGE_ARTIFACTS_PROJECTION_KEY, NOTHING_CLAIMED, presentedDeliveriesProjection, type ClaimedArtifacts } from './message-artifacts.ts'
 import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, memberMemoryDirectoryPath, MemberRuntime } from './member-runtime.ts'
 import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession, parseMemberScopeKey } from './member-scope.ts'
@@ -1451,6 +1451,15 @@ export default class AgentTeam extends TypertRemoteService {
   membersForClient(request: AgentTeamMembersRequest): readonly AgentTeamClientMemberStatus[] {
     if (request.workspaceId !== undefined) this.requireWorkspace(request.workspaceId)
     const ledger = this.requireLedger()
+    // Derived once for the whole roster and grouped here: participation is the
+    // same question the Channel page's own member count answers, and asking it
+    // again per Member would replay every Channel's Threads once per row.
+    const participations = new Map<AgentTeamMemberId, AgentTeamChannelParticipation[]>()
+    for (const participation of ledger.channelParticipations()) {
+      const held = participations.get(participation.memberId)
+      if (held === undefined) participations.set(participation.memberId, [participation])
+      else held.push(participation)
+    }
     return this.members()
       .filter(status => request.workspaceId === undefined || ledger.participatesIn(status.member.memberId, request.workspaceId))
       .map(({ member: { privateMemoryPath: _privateMemoryPath, ...member }, ...status }) => Object.freeze({
@@ -1465,16 +1474,19 @@ export default class AgentTeam extends TypertRemoteService {
           agentMdPath: join(memberMemoryDirectoryPath({ memberId: member.memberId, privateMemoryPath: _privateMemoryPath }), 'agent.md'),
         }),
         workspaceIds: ledger.workspacesOf(member.memberId),
-        channels: this.channelRowsFor(member.memberId),
+        channels: this.channelRowsFor(member.memberId, participations.get(member.memberId) ?? []),
       }))
   }
 
   /**
    * One Member's Channels as session-tree rows.
    *
-   * A row exists for every durable Channel membership, so a membership whose
-   * Session could not be created still appears — as `unopenable` with a reason
-   * — rather than vanishing and leaving the Human unable to tell "no Channel"
+   * A row exists for every Channel the Member takes part in — the derivation
+   * the Channel page's own member count uses, not the membership table alone —
+   * so a Member who was only ever mentioned into a Channel's Threads is not
+   * absent from the tree while that Channel counts it. A membership whose
+   * Session could not be created still appears, as `unopenable` with a reason,
+   * rather than vanishing and leaving the Human unable to tell "no Channel"
    * from "a broken one". Order follows Channel creation so the tree does not
    * reshuffle between loads.
    *
@@ -1483,14 +1495,16 @@ export default class AgentTeam extends TypertRemoteService {
    * committed to the ledger and either has not started or is starting, which
    * is the window a Human must not be told is `ready`.
    */
-  private channelRowsFor(memberId: AgentTeamMemberId): readonly AgentTeamClientChannelRow[] {
+  private channelRowsFor(
+    memberId: AgentTeamMemberId,
+    participations: readonly AgentTeamChannelParticipation[],
+  ): readonly AgentTeamClientChannelRow[] {
     const ledger = this.requireLedger()
     const rows: { readonly row: AgentTeamClientChannelRow; readonly createdAt: number }[] = []
-    for (const { memberId: owner, channelRef, channelName, channelCreatedAt } of ledger.channelMemberships()) {
-      if (owner !== memberId) continue
+    for (const { channelRef, channelName, channelCreatedAt, explicit } of participations) {
       const scopeKey = channelMemberScopeKey(channelRef)
       const binding = ledger.memberScopeSessionFor(memberId, scopeKey)
-      const reason = this.channelRowReason(memberId, binding)
+      const reason = this.channelRowReason(memberId, binding, explicit)
       const row: AgentTeamClientChannelRow = Object.freeze({
         channelRef, channelName,
         ...(binding === undefined ? {} : { sessionId: binding.sessionId }),
@@ -1512,10 +1526,14 @@ export default class AgentTeam extends TypertRemoteService {
    * made-up cause would send them after the wrong thing.
    */
   private channelRowReason(
-    memberId: AgentTeamMemberId, binding: AgentTeamMemberScopeSession | undefined,
+    memberId: AgentTeamMemberId, binding: AgentTeamMemberScopeSession | undefined, explicit: boolean,
   ): AgentTeamChannelRowReason | undefined {
     const diagnostic = this.memberFailures.get(memberId)?.activation
     if (binding === undefined) {
+      // Participation derived from a Thread carries no membership, so no
+      // Session was ever opened for it and none is owed: reporting a creation
+      // failure would name a fault that never happened.
+      if (!explicit) return 'session-not-created'
       // Nothing was created: either the originating act is unrecorded, which
       // the activation carries as `domain-unattributed`, or creation failed
       // for a cause recorded on the Member's activation slot.
