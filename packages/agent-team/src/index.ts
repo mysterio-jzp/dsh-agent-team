@@ -4435,12 +4435,14 @@ export default class AgentTeam extends TypertRemoteService {
       // Workspace are intact — so the domain takes its next Session and starts
       // on that one. `healed` bounds it to one attempt: a second refusal is a
       // real fault and keeps its row rather than renewing forever.
-      // A superseded generation and an unreadable log both leave a Channel row
-      // that can never open. Both take the next Session: the old log stays on
-      // disk untouched, so what is replaced is the continuity, never history.
+      // A Channel domain that cannot start has no other use, whatever the
+      // cause: its binding takes the next Session and the start is retried
+      // once. The old log stays on disk untouched, so only continuity is
+      // replaced, never history. A preset fault is the one exception — it is
+      // configuration, and a new Session would reproduce it.
       const diagnostic = this.activationDiagnosticOf(error, sessionId)
-      const stale = diagnostic.class === 'session-refused' || diagnostic.class === 'session-unreadable'
-      const renewed = options?.healed === true || !stale || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
+      const renewed = options?.healed === true || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
+        || diagnostic.class === 'preset-composition'
         ? undefined
         : await this.renewSupersededScopeSession(member.memberId, scopeKey)
       if (renewed !== undefined) {
@@ -4758,7 +4760,10 @@ export default class AgentTeam extends TypertRemoteService {
     const channelRef = parseMemberScopeKey(scopeKey).scopeRef
     if (channelRef === undefined) return undefined
     const origin = ledger.channelMembershipOrigin(memberId, channelRef as AgentTeamChannelRef)
-    if (origin === undefined) return undefined
+    if (origin === undefined) {
+      this.ctx.logger.warn(`agent-team: work domain '${scopeKey}' of member '${memberId}' has no membership origin to attribute a new Session to`)
+      return undefined
+    }
     // A domain that already holds a binding cannot be bound again — the ledger
     // refuses that on purpose, so one Session never carries two authorities.
     // Renewal is the operation that moves this domain's binding onto the next
