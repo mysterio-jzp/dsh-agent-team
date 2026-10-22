@@ -623,6 +623,61 @@ describe('Team agent surfaces', () => {
     await b.runtime.dispose()
   })
 
+  it('renders each channel row status indicator and the presence the Host rolled up from them', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
+    await b.view.findByText('builder')
+
+    b.publishChannelUpdate()
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // Case 1: the Host reports `working` because one Channel Session runs.
+    b.members.mockImplementation(async () => ({
+      ok: true,
+      value: [{
+        ...b.status('member:builder', 'w1', 'builder', 'working'),
+        channels: [
+          { channelRef: 'channel:eng', channelName: 'engineering', state: 'ready', activity: 'normal', sessionId: 'session:builder-eng' },
+          { channelRef: 'channel:ops', channelName: 'ops', state: 'ready', activity: 'running', sessionId: 'session:builder-ops' },
+        ],
+      }],
+    } as never))
+    b.publishChannelUpdate()
+
+    const agentButton = await waitFor(() => {
+      const btn = b.view.getByRole('button', { name: '展开/收起 builder 的频道' })
+      expect(b.view.getByRole('img', { name: '工作中' })).toBeTruthy()
+      return btn
+    })
+    fireEvent.click(agentButton)
+    const channelList = b.view.getByRole('list', { name: 'builder 的频道' })
+    expect(channelList.querySelector('[data-channel-row-status="normal"]')).not.toBeNull()
+    expect(channelList.querySelector('[data-channel-row-status="running"]')).not.toBeNull()
+    expect(within(channelList).queryByText('就绪')).toBeNull()
+    expect(within(channelList).queryByText('创建中')).toBeNull()
+
+    // Case 2: a warning row makes the Host report `error`, which outranks `working`.
+    b.members.mockImplementation(async () => ({
+      ok: true,
+      value: [{
+        ...b.status('member:builder', 'w1', 'builder', 'error'),
+        channels: [
+          { channelRef: 'channel:eng', channelName: 'engineering', state: 'ready', activity: 'normal', sessionId: 'session:builder-eng' },
+          { channelRef: 'channel:ops', channelName: 'ops', state: 'ready', activity: 'running', sessionId: 'session:builder-ops' },
+          { channelRef: 'channel:broken', channelName: 'broken', state: 'unopenable', activity: 'warning', reason: 'origin-unrecorded' },
+        ],
+      }],
+    } as never))
+    b.publishChannelUpdate()
+
+    await waitFor(() => {
+      expect(b.view.getByRole('img', { name: '错误' })).toBeTruthy()
+    })
+    expect(channelList.querySelector('[data-channel-row-status="warning"]')).not.toBeNull()
+    expect(within(channelList).queryByText('无法打开')).toBeNull()
+
+    await b.runtime.dispose()
+  })
+
 })
 
 describe('Team archival surfaces', () => {

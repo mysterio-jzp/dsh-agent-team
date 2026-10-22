@@ -275,4 +275,81 @@ describe('Channel rows in the Member session tree', () => {
     expect(rows[0]!.reason, 'a repaired row is openable, so it carries no failure code').toBeUndefined()
     expect(rows[0]!.sessionId).toBe(binding!.sessionId)
   })
+
+  it('derives channel row activity and rolls it up to member presence with warning > running > normal priority', async () => {
+    const { ctx } = await harness()
+    const chNormal = await newChannelFor(ctx, nextChannelName())
+    const chRunning = await newChannelFor(ctx, nextChannelName())
+    const chWarning = await newChannelFor(ctx, nextChannelName())
+    const memberId = 'member:rollup' as AgentTeamMemberId
+    const defaultSessionId = SessionId('session:rollup')
+    const ledger = ctx.agentTeam['ledger']!
+
+    await ledger.addMember({
+      requestId: requestId('add-rollup'), workspaceId: alpha, handle: 'rollup', description: 'Peer', presetId: 'team-member',
+      channelRefs: [chNormal, chRunning], actor: agentTeamHumanActor(),
+      member: {
+        memberId, sessionId: defaultSessionId, workspaceId: alpha, handle: 'rollup', description: 'Peer',
+        presetId: 'team-member', privateMemoryPath: '/tmp/rollup', state: 'enabled' as const,
+      },
+    })
+    await ctx.agentTeam['reconcileChannelWorkDomains'](ledger)
+
+    const fakeHandle = (sessionId: SessionId, status: 'idle' | 'running' = 'idle') => ({
+      agent: { id: sessionId, status, ctx, session: { id: sessionId } },
+      dispose: async () => {},
+    })
+    ctx.agentTeam['registerHandle'](memberId, 'default' as never, fakeHandle(defaultSessionId, 'idle') as never)
+    ctx.agentTeam['memberRuntime'].recordAppliedCapabilities(memberId, undefined)
+
+    const bindNormal = ledger.memberScopeSessionFor(memberId, channelMemberScopeKey(chNormal))!
+    const bindRunning = ledger.memberScopeSessionFor(memberId, channelMemberScopeKey(chRunning))!
+    ctx.agentTeam['registerHandle'](memberId, channelMemberScopeKey(chNormal), fakeHandle(bindNormal.sessionId, 'idle') as never)
+    ctx.agentTeam['registerHandle'](memberId, channelMemberScopeKey(chRunning), fakeHandle(bindRunning.sessionId, ' idle'.trim() as 'idle') as never)
+
+    let clientRow = ctx.agentTeam.membersForClient({ workspaceId: alpha }).find(row => row.member.memberId === memberId)!
+    expect(clientRow.channels.map(row => row.activity)).toEqual(['normal', 'normal'])
+    expect(clientRow.presence).toBe('available')
+
+    // Running channel session rolls member presence up to working.
+    ctx.agentTeam['registerHandle'](memberId, channelMemberScopeKey(chRunning), fakeHandle(bindRunning.sessionId, 'running') as never)
+    clientRow = ctx.agentTeam.membersForClient({ workspaceId: alpha }).find(row => row.member.memberId === memberId)!
+    expect(clientRow.channels.find(row => row.channelRef === chRunning)?.activity).toBe('running')
+    expect(clientRow.presence).toBe('working')
+
+    // Warning channel session outranks running and rolls member presence up to error.
+    const memberships = ledger['state'].memberships
+    memberships.set(chWarning, new Set([memberId]))
+    clientRow = ctx.agentTeam.membersForClient({ workspaceId: alpha }).find(row => row.member.memberId === memberId)!
+    expect(clientRow.channels.find(row => row.channelRef === chWarning)?.activity).toBe('warning')
+    expect(clientRow.presence).toBe('error')
+  })
+
+  it('reports a Channel row as warning while its Session holds an unrecovered failure', async () => {
+    const { ctx } = await harness()
+    const ch = await newChannelFor(ctx, nextChannelName())
+    const memberId = 'member:failing' as AgentTeamMemberId
+    const ledger = ctx.agentTeam['ledger']!
+    await ledger.addMember({
+      requestId: requestId('add-failing'), workspaceId: alpha, handle: 'failing', description: 'Peer', presetId: 'team-member',
+      channelRefs: [ch], actor: agentTeamHumanActor(),
+      member: {
+        memberId, sessionId: SessionId('session:failing'), workspaceId: alpha, handle: 'failing', description: 'Peer',
+        presetId: 'team-member', privateMemoryPath: '/tmp/failing', state: 'enabled' as const,
+      },
+    })
+    await ctx.agentTeam['reconcileChannelWorkDomains'](ledger)
+    const binding = ledger.memberScopeSessionFor(memberId, channelMemberScopeKey(ch))!
+    ctx.agentTeam['registerHandle'](memberId, channelMemberScopeKey(ch), {
+      agent: { id: binding.sessionId, status: 'idle', ctx, session: { id: binding.sessionId } },
+      dispose: async () => {},
+    } as never)
+
+    const activityOf = () => ctx.agentTeam.membersForClient({ workspaceId: alpha })
+      .find(row => row.member.memberId === memberId)!.channels[0]!.activity
+    expect(activityOf(), 'a live Session with no failure is normal').toBe('normal')
+
+    ctx.agentTeam['sessionFailures'].add(binding.sessionId)
+    expect(activityOf(), 'the failure the row shows is the Session\'s own, not the Member\'s').toBe('warning')
+  })
 })

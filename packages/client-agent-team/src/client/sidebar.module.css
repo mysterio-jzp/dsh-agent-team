@@ -356,7 +356,7 @@
   min-width: 0;
 }
 .channelRowSelect {
-  align-items: baseline;
+  align-items: center;
   background: none;
   border: 0;
   border-radius: var(--dsw-radius-sm, 8px);
@@ -373,24 +373,35 @@ button.channelRowSelect { cursor: pointer; }
 button.channelRowSelect:hover { background: var(--dsw-alias-bg-secondary); }
 button.channelRowSelect:focus-visible { outline: 2px solid var(--dsw-alias-border-focus, var(--dsw-alias-border-secondary)); outline-offset: -2px; }
 .channelRowSelect[aria-disabled='true'] { cursor: default; opacity: 0.72; }
+.channelRowStatus {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 12px;
+  height: 12px;
+  justify-content: center;
+  line-height: 0;
+  width: 12px;
+}
+.channelRowStatus[data-channel-row-status='warning'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+.channelRowWarningIcon {
+  display: block;
+  height: 12px;
+  width: 12px;
+}
 .channelRowName {
   font-size: 12px;
   line-height: 17px;
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.channelRowState {
-  color: var(--dsw-alias-label-tertiary);
-  flex: none;
-  font-size: 11px;
-  line-height: 15px;
-}
 .channelRowReason {
   color: var(--dsw-alias-label-tertiary);
   font-size: 11px;
   line-height: 15px;
   margin: 0;
-  padding: 0 6px 3px;
+  padding: 0 6px 3px 24px;
   overflow-wrap: anywhere;
 }
 

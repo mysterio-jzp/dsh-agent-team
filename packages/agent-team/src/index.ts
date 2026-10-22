@@ -525,6 +525,32 @@ export const TEAM_HOST_ROW_SETTINGS_SCHEMA = z.object({
 })
 
 /** Host owner of the single Agent Team in one dshHome. */
+/** A Channel row's runtime indicator; a broken Session outranks a busy one. */
+function channelRowActivityOf(input: {
+  readonly state: AgentTeamClientChannelRow['state']
+  readonly failing: boolean
+  readonly orphaned: boolean
+  readonly running: boolean
+}): AgentTeamClientChannelRow['activity'] {
+  if (input.state === 'unopenable' || input.failing || input.orphaned) return 'warning'
+  return input.state === 'creating' || input.running ? 'running' : 'normal'
+}
+
+/**
+ * The Member's presence as its Channel rows roll up into it. `unavailable`
+ * answers for the Member's own Session and outranks the rollup, which describes
+ * the Channels rather than the Member's ability to answer at all.
+ */
+function memberPresenceOf(
+  presence: AgentTeamAgentMemberStatus['presence'],
+  channels: readonly AgentTeamClientChannelRow[],
+): AgentTeamClientMemberStatus['presence'] {
+  if (presence === 'unavailable') return 'unavailable'
+  if (presence === 'error' || channels.some(row => row.activity === 'warning')) return 'error'
+  if (presence === 'working' || channels.some(row => row.activity === 'running')) return 'working'
+  return 'available'
+}
+
 export default class AgentTeam extends TypertRemoteService {
   static Config = TEAM_HOST_ROW_SETTINGS_SCHEMA
   static inject = [
@@ -607,6 +633,8 @@ export default class AgentTeam extends TypertRemoteService {
     /** The post-commit configuration apply failed; the stored row is ahead of the live surface. */
     capabilityApply?: AgentTeamMemberDiagnostic
   }>()
+  /** Sessions currently holding an unrecovered runtime, compaction, or pre-turn cancellation failure. */
+  private readonly sessionFailures = new Set<SessionId>()
   /** Team notice ids waiting for a turn boundary, keyed by the live Agent message id. */
   private readonly pendingTeamWakes = new Map<string, { readonly memberId: AgentTeamMemberId; readonly sessionId: SessionId }>()
   /** Notice removals initiated by Team itself, which are normal replacement/disposal operations. */
@@ -762,6 +790,7 @@ export default class AgentTeam extends TypertRemoteService {
       failed: (sessionId, diagnostic) => {
         const memberId = this.memberOfSession(sessionId)
         if (memberId === undefined) return
+        this.sessionFailures.add(sessionId)
         this.setMemberFailure(memberId, 'compaction', diagnostic)
         this.emitAutoCompactionChanged(memberId)
       },
@@ -1019,6 +1048,7 @@ export default class AgentTeam extends TypertRemoteService {
       const member = this.memberForAgent(agent)
       if (member === undefined) return
       const message = error instanceof Error ? error.message : String(error)
+      this.sessionFailures.add(agent.session.id)
       this.setMemberFailure(member.memberId, 'runtime', message)
       // Every occurrence is classified here, including the two verdicts the
       // coordinator then reports no state change for (a terminal error with no
@@ -1035,6 +1065,7 @@ export default class AgentTeam extends TypertRemoteService {
       if (status === 'running') this.runningAgents.add(agent.id)
       else this.runningAgents.delete(agent.id)
       if (status === 'running' && member !== undefined) {
+        this.sessionFailures.delete(agent.session.id)
         const recovered = this.clearMemberFailure(member.memberId, 'runtime')
         const preTurnRecovered = this.clearMemberFailure(member.memberId, 'preTurnCancellation')
         // The notice signature is the surface's, not the Member's: this Session
@@ -1076,6 +1107,7 @@ export default class AgentTeam extends TypertRemoteService {
       if (this.expectedInboxDiscards.delete(message.id)) return
       const member = this.memberForAgent(agent)
       if (member === undefined || member.state !== 'enabled' || agent.id !== pending.sessionId) return
+      this.sessionFailures.add(pending.sessionId)
       this.setPreTurnCancellation(member.memberId, pending.sessionId)
       this.emitMemberPresenceChanged(member)
     })
@@ -1306,6 +1338,7 @@ export default class AgentTeam extends TypertRemoteService {
     const bucket = this.handles.get(memberId) ?? new Map<AgentTeamMemberScopeKey, AgentHandle>()
     bucket.set(scopeKey, handle)
     this.handles.set(memberId, bucket)
+    this.sessionFailures.delete(handle.agent.session.id)
   }
 
   /** Drop one retired generation from both lookups; the Session's own entry only while it still names this domain. */
@@ -1313,6 +1346,7 @@ export default class AgentTeam extends TypertRemoteService {
     const bucket = this.handles.get(memberId)
     bucket?.delete(scopeKey)
     if (bucket?.size === 0) this.handles.delete(memberId)
+    this.sessionFailures.delete(sessionId)
   }
 
   /**
@@ -1464,20 +1498,24 @@ export default class AgentTeam extends TypertRemoteService {
     }
     return this.members()
       .filter(status => request.workspaceId === undefined || ledger.participatesIn(status.member.memberId, request.workspaceId))
-      .map(({ member: { privateMemoryPath: _privateMemoryPath, ...member }, ...status }) => Object.freeze({
-        ...status,
-        // The boundary page opens this file, so the Client is told where it is;
-        // it is derived here rather than stored, which is what lets a Member
-        // recorded before the file existed still get a path while
-        // `privateMemoryPath` stays Host-only. `join` rather than a literal
-        // separator, so Windows member namespaces keep their own convention.
-        member: Object.freeze({
-          ...member,
-          agentMdPath: join(memberMemoryDirectoryPath({ memberId: member.memberId, privateMemoryPath: _privateMemoryPath }), 'agent.md'),
-        }),
-        workspaceIds: ledger.workspacesOf(member.memberId),
-        channels: this.channelRowsFor(member.memberId, participations.get(member.memberId) ?? []),
-      }))
+      .map(({ member: { privateMemoryPath: _privateMemoryPath, ...member }, ...status }) => {
+        const channels = this.channelRowsFor(member.memberId, participations.get(member.memberId) ?? [])
+        return Object.freeze({
+          ...status,
+          presence: memberPresenceOf(status.presence, channels),
+          // The boundary page opens this file, so the Client is told where it is;
+          // it is derived here rather than stored, which is what lets a Member
+          // recorded before the file existed still get a path while
+          // `privateMemoryPath` stays Host-only. `join` rather than a literal
+          // separator, so Windows member namespaces keep their own convention.
+          member: Object.freeze({
+            ...member,
+            agentMdPath: join(memberMemoryDirectoryPath({ memberId: member.memberId, privateMemoryPath: _privateMemoryPath }), 'agent.md'),
+          }),
+          workspaceIds: ledger.workspacesOf(member.memberId),
+          channels,
+        })
+      })
   }
 
   /**
@@ -1507,10 +1545,19 @@ export default class AgentTeam extends TypertRemoteService {
       const scopeKey = channelMemberScopeKey(channelRef)
       const binding = ledger.memberScopeSessionFor(memberId, scopeKey)
       const reason = this.channelRowReason(memberId, binding)
+      const handle = this.handleFor(memberId, scopeKey)
+      const state = reason !== undefined ? 'unopenable' : handle === undefined ? 'creating' : 'ready'
       const row: AgentTeamClientChannelRow = Object.freeze({
         channelRef, channelName,
         ...(binding === undefined ? {} : { sessionId: binding.sessionId }),
-        state: reason !== undefined ? 'unopenable' : this.handleFor(memberId, scopeKey) === undefined ? 'creating' : 'ready',
+        state,
+        activity: channelRowActivityOf({
+          state,
+          failing: binding !== undefined && this.sessionFailures.has(binding.sessionId),
+          orphaned: handle !== undefined && this.ctx.agentPresets.composedPreset(handle.agent.ctx) === undefined,
+          running: (handle !== undefined && (handle.agent.status === 'running' || this.runningAgents.has(handle.agent.id)))
+            || (binding !== undefined && this.runningAgents.has(binding.sessionId)),
+        }),
         ...(reason === undefined ? {} : { reason }),
       })
       rows.push({ row, createdAt: channelCreatedAt })
@@ -4424,8 +4471,11 @@ export default class AgentTeam extends TypertRemoteService {
     // Capability warnings are runtime-derived at activation (handles-scoped,
     // like failures): absent while capabilities resolve cleanly.
     const capabilityWarnings = this.memberRuntime.capabilityWarningsFor(member.memberId)
+    const isWorking = this.handlesOfMember(member.memberId).some(
+      live => live.agent.status === 'running' || this.runningAgents.has(live.agent.id),
+    )
     return Object.freeze({
-      member, availability: 'active', presence: handle.agent.status === 'running' ? 'working' : 'available',
+      member, availability: 'active', presence: isWorking ? 'working' : 'available',
       capabilityState,
       ...(capabilityWarnings === undefined ? {} : { capabilityWarnings }),
     })

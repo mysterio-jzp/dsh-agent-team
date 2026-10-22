@@ -193,6 +193,8 @@ export interface AgentTeamClientChannelRow {
   /** The Channel Session; absent only when nothing was ever created for it. */
   readonly sessionId?: SessionId | undefined
   readonly state: 'ready' | 'creating' | 'unopenable'
+  /** Runtime execution/health indicator for the Channel Session row: normal, running, or warning. */
+  readonly activity: 'normal' | 'running' | 'warning'
   /** Present exactly when `state` is `unopenable`; the Client turns it into a sentence. */
   readonly reason?: AgentTeamChannelRowReason | undefined
 }

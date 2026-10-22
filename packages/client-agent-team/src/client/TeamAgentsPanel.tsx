@@ -12,7 +12,8 @@ import { SortableRow, useSidebarRowDrag } from './sidebar-drag.tsx'
 import { moveSidebarItem, useSidebarOrder } from './sidebar-order.ts'
 import { useSidebarSectionOpen, setSidebarSectionOpen } from './sidebar-sections.ts'
 import { mintRequestId } from './requests.ts'
-import { diagnosticText, restartOffered } from './TeamPresenceDot.tsx'
+import { channelRowActivity, diagnosticText, restartOffered } from './TeamPresenceDot.tsx'
+import { TeamStateDot } from './TeamStateDot.tsx'
 import { formatChannelRowReason } from './team-formatters.ts'
 import { TeamRowMenu } from './TeamRowMenu.tsx'
 import { TeamSidebarSection } from './TeamSidebarSection.tsx'
@@ -319,11 +320,29 @@ function ChannelRows({ status, openMemberSession, setRowAlert, t }: {
       {status.channels.map(row => {
         const reason = formatChannelRowReason(row, t)
         const openable = row.state === 'ready' && row.sessionId !== undefined
-        const label = row.state === 'ready' ? t('channelRowReady') : row.state === 'creating' ? t('channelRowCreating') : t('channelRowUnopenable')
+        const activity = channelRowActivity(row)
         const body = (
           <>
+            <span className={css.channelRowStatus} data-channel-row-status={activity} aria-hidden="true">
+              {activity === 'warning'
+                ? (
+                  <svg
+                    className={css.channelRowWarningIcon}
+                    viewBox="0 0 16 16"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M8 2.5 14.6 13.6H1.4z" />
+                    <path d="M8 6.6v3.2" />
+                    <path d="M8 11.9h.01" />
+                  </svg>
+                )
+                : <TeamStateDot state={activity === 'running' ? 'ongoing' : 'done'} size={activity === 'running' ? 12 : 10} />}
+            </span>
             <span className={css.channelRowName}>{row.channelName}</span>
-            <span className={css.channelRowState} data-channel-row-state={row.state}>{label}</span>
           </>
         )
         return (

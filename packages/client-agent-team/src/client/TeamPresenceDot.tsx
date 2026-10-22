@@ -1,9 +1,14 @@
 import { Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { AgentTeamClientMemberStatus } from '@contexera/dsh-agent-team/types'
+import type { AgentTeamClientChannelRow, AgentTeamClientMemberStatus } from '@contexera/dsh-agent-team/types'
 import type { TeamSidebarProps } from './slots.ts'
 import { TeamStateDot } from './TeamStateDot.tsx'
 import type { TeamStateDotState } from './TeamStateDot.tsx'
 import css from './presence.module.css'
+
+/** Resolve one Channel Session row's visual status: `warning` > `running` > `normal`. */
+export function channelRowActivity(row: AgentTeamClientChannelRow): AgentTeamClientChannelRow['activity'] {
+  return row.activity
+}
 
 export function presenceLabel(status: AgentTeamClientMemberStatus, t: TeamSidebarProps['t']): string {
   const label = status.presence === 'available' ? t('statusAvailable')
