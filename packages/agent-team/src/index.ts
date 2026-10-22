@@ -4435,8 +4435,12 @@ export default class AgentTeam extends TypertRemoteService {
       // Workspace are intact — so the domain takes its next Session and starts
       // on that one. `healed` bounds it to one attempt: a second refusal is a
       // real fault and keeps its row rather than renewing forever.
+      // A superseded generation and an unreadable log both leave a Channel row
+      // that can never open. Both take the next Session: the old log stays on
+      // disk untouched, so what is replaced is the continuity, never history.
       const diagnostic = this.activationDiagnosticOf(error, sessionId)
-      const renewed = options?.healed === true || diagnostic.class !== 'session-refused' || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
+      const stale = diagnostic.class === 'session-refused' || diagnostic.class === 'session-unreadable'
+      const renewed = options?.healed === true || !stale || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
         ? undefined
         : await this.renewSupersededScopeSession(member.memberId, scopeKey)
       if (renewed !== undefined) {
