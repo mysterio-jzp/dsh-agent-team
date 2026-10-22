@@ -4450,11 +4450,15 @@ export default class AgentTeam extends TypertRemoteService {
       // Workspace are intact — so the domain takes its next Session and starts
       // on that one. `healed` bounds it to one attempt: a second refusal is a
       // real fault and keeps its row rather than renewing forever.
-      // Only a refusal means the binding is stale. A freshly minted Session was
-      // measured not to survive the other failures, so renewing on them turned
-      // one broken start into four and buried the cause.
+      // A binding is stale when its Session cannot be used at all: a refused
+      // generation, or a Session whose log carries a working directory from a
+      // different project, which no attach accepts. Both are replaced by the
+      // next Session — never rewritten in place, because history is not ours to
+      // edit. `healed` bounds it to one attempt.
       const diagnostic = this.activationDiagnosticOf(error, sessionId)
-      const renewed = options?.healed === true || diagnostic.class !== 'session-refused' || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
+      const stale = diagnostic.class === 'session-refused'
+        || (diagnostic.class === 'activation' && diagnostic.detail.includes('its cwd resolves to'))
+      const renewed = options?.healed === true || !stale || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
         ? undefined
         : await this.renewSupersededScopeSession(member.memberId, scopeKey)
       if (renewed !== undefined) {
