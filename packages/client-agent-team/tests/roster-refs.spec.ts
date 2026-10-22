@@ -81,6 +81,26 @@ describe('rosterMember', () => {
       openable: false,
     })
   })
+  it('opens the Channel Session when the surface has Channel context', () => {
+    const channelRef = 'channel:66666666-2222-4333-8333-666666666666' as AgentTeamChannelRef
+    const otherRef = 'channel:77777777-2222-4333-8333-777777777777' as AgentTeamChannelRef
+    const withChannels = [{
+      ...status('member:6e8a5b10-df16-4ec0-943a-63738010953f', 'tars', 'active'),
+      channels: [
+        { channelRef, channelName: '工程', sessionId: 'session-channel' as unknown as SessionId, state: 'ready' as const },
+        { channelRef: otherRef, channelName: '发布', sessionId: 'session-other' as unknown as SessionId, state: 'ready' as const },
+      ],
+    }]
+    const ref = 'member:6e8a5b10-df16-4ec0-943a-63738010953f' as AgentTeamMemberId
+    expect(rosterMember(withChannels, humanMemberId, 'Human', ref, channelRef)?.sessionId).toBe('session-channel')
+    // No Channel context keeps the Member's own Session.
+    expect(rosterMember(withChannels, humanMemberId, 'Human', ref)?.sessionId).toBe('session-tars')
+    // A Channel this Member holds no Session for, or one still being created,
+    // falls back to the Member's own Session instead of a dead link.
+    expect(rosterMember(withChannels, humanMemberId, 'Human', ref, 'channel:88888888-2222-4333-8333-888888888888' as AgentTeamChannelRef)?.sessionId).toBe('session-tars')
+    const creating = [{ ...withChannels[0]!, channels: [{ channelRef, channelName: '工程', state: 'creating' as const }] }]
+    expect(rosterMember(creating, humanMemberId, 'Human', ref, channelRef)).toMatchObject({ sessionId: 'session-tars', openable: true })
+  })
   it('leaves unknown and ambiguous member refs unresolved', () => {
     expect(rosterMember(members, humanMemberId, 'Human', 'member:99999999-0000-4000-8000-000000000000' as AgentTeamMemberId)).toBeUndefined()
     expect(rosterMember(members, humanMemberId, 'Human', 'member:6e8a' as AgentTeamMemberId)).toBeUndefined()

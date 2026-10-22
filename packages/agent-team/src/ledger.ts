@@ -168,11 +168,25 @@ import type {
   AgentTeamViewRequest,
 } from './types.ts'
 import { formatTeamTimestamp } from './time-format.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY, memberScopeSession, parseMemberScopeKey } from './member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession, parseMemberScopeKey } from './member-scope.ts'
 import { resolveBodyMentions } from './mentions.ts'
 import type { AgentTeamBodyMentionCandidate } from './mentions.ts'
 
 /** Stable Human Member identity shared by every replay of one dshHome Team. */
+/** The operation kinds whose subject is a fact inside a Thread, and so one Channel's. */
+const THREAD_FACT_KINDS: ReadonlySet<AgentTeamOperation['kind']> = new Set([
+  'team/message-sent',
+  'team/thread-replied',
+  'team/thread-promoted',
+  'team/thread-member-removed',
+  'team/claim-created',
+  'team/claim-done',
+  'team/claim-released',
+  'team/task-changed',
+  'team/thread-attention-changed',
+  'team/human-todo-changed',
+])
+
 export const AGENT_TEAM_HUMAN_MEMBER_ID = 'member:human' as AgentTeamMemberId
 
 /**
@@ -3149,6 +3163,32 @@ export class AgentTeamLedger {
     return [...members]
   }
 
+  /**
+   * The work domain one committed fact belongs to, or `undefined` for a fact
+   * that belongs to the Member's own `default` domain.
+   *
+   * Only a fact *inside* a Thread is one Channel's business. A Member-level or
+   * Channel-level fact — a removal, an archive, a Workspace departure — names
+   * Threads only to report what it touched, and it spans every domain its
+   * subject held; filing it under whichever Channel came first would put one
+   * Channel's facts in another Channel's Session.
+   */
+  domainKeyOf(operation: AgentTeamOperation): AgentTeamMemberScopeKey | undefined {
+    if (!THREAD_FACT_KINDS.has(operation.kind)) return undefined
+    const channelRefs = this.channelRefsOf(operation)
+    return channelRefs.length === 1 ? channelMemberScopeKey(channelRefs[0]!) : undefined
+  }
+
+  /** The Channels one fact's Threads resolve to, so a fallback log can name them. */
+  channelRefsOf(operation: AgentTeamOperation): readonly AgentTeamChannelRef[] {
+    const channelRefs = new Set<AgentTeamChannelRef>()
+    for (const threadRef of this.touchedThreadRefs(operation)) {
+      const channelRef = this.channelRefForThread(threadRef)
+      if (channelRef !== undefined) channelRefs.add(channelRef)
+    }
+    return Object.freeze([...channelRefs])
+  }
+
   private touchedThreadRefs(operation: AgentTeamOperation): readonly AgentTeamThreadRef[] {
     switch (operation.kind) {
       case 'team/message-sent':
@@ -5914,13 +5954,21 @@ export class AgentTeamLedger {
     return left.threadRef === right.threadRef && left.taskRef === right.taskRef && left.revision === right.revision
   }
 
+  /**
+   * The Workspace a Member's context belongs to. A Channel domain follows the
+   * Member, not the Channel: a Member brought into a Channel from elsewhere
+   * keeps the Workspace it belongs to, so one Channel can hold Members from
+   * several Workspaces and each keeps its own. The Channel is consulted only
+   * to prove the key names a live domain, never to borrow its Workspace.
+   */
   private workspaceForScopeFrom(projection: Projection, memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): WorkspaceId | undefined {
     const member = projection.members.get(memberId)
     if (member === undefined) return undefined
     if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) return member.workspaceId
     const { scopeKind, scopeRef } = parseMemberScopeKey(scopeKey)
     if (scopeKind !== 'channel' || scopeRef === undefined) return undefined
-    return projection.channels.get(scopeRef as AgentTeamChannelRef)?.workspaceId
+    if (projection.channels.get(scopeRef as AgentTeamChannelRef) === undefined) return undefined
+    return member.workspaceId
   }
 
   private effectiveWorkingDirectories(

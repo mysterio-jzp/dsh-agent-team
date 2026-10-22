@@ -20,8 +20,9 @@ import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
-import { channelMemberScopeKey } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { AgentTeamChannelRef, AgentTeamChannelRowReason, AgentTeamMemberId, AgentTeamOperation, AgentTeamRequestId } from '../src/types.ts'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -242,6 +243,54 @@ describe('Channel rows in the Member session tree', () => {
     expect(binding, 'a Member-named Member must still get a Channel Session').toBeDefined()
     expect(rowsOf(ctx, namedId).find(row => row.channelRef === channelRef)?.state,
       'the row opens rather than reporting an unattributed origin').not.toBe('unopenable')
+  })
+
+  it('wakes the Channel Session of an enrolled Member rather than its own', async () => {
+    const { ctx } = await harness()
+    const channelRef = await newChannelFor(ctx, nextChannelName())
+    // A Member the Human enrols by hand: the enrolment is recorded as an
+    // ordinary Channel membership, which is what binds a Channel domain.
+    const memberId = 'member:woken' as AgentTeamMemberId
+    await ctx.agentTeam['ledger']!.addMember({
+      requestId: requestId('add-woken'), workspaceId: alpha, handle: 'woken', description: 'Peer', presetId: 'team-member',
+      channelRefs: [channelRef], actor: agentTeamHumanActor(),
+      member: {
+        memberId, sessionId: SessionId('session:woken'), workspaceId: alpha, handle: 'woken', description: 'Peer',
+        presetId: 'team-member', privateMemoryPath: '/tmp/woken', state: 'enabled' as const,
+      },
+    })
+    await ctx.agentTeam['reconcileChannelWorkDomains'](ctx.agentTeam['ledger']!)
+
+    const scopeKey = channelMemberScopeKey(channelRef)
+    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)
+    expect(binding, 'an enrolled Member holds a Channel Session').toBeDefined()
+    expect(binding!.sessionId).not.toBe(SessionId('session:woken'))
+
+    // A Thread message is a Channel fact, so it wakes the Channel's Session —
+    // the one the Channel page opens — and never the Member's own.
+    const channelCalls: unknown[] = []
+    const defaultCalls: unknown[] = []
+    const seam = (calls: unknown[], id: SessionId): AgentHandle => ({
+      agent: {
+        id, session: { id }, status: 'idle',
+        inbox: { nextTurn: [], nextStep: [], remove: () => {} },
+        followup: (message: unknown) => calls.push(message),
+        steer: (message: unknown) => calls.push(message),
+      } as unknown as Agent,
+      dispose: async () => {},
+    } as unknown as AgentHandle)
+    ctx.agentTeam['handles'].set(memberId, new Map([
+      [scopeKey, seam(channelCalls, binding!.sessionId)],
+      [DEFAULT_MEMBER_SCOPE_KEY, seam(defaultCalls, SessionId('session:woken'))],
+    ]))
+
+    const sent = await ctx.agentTeam.sendMessage({
+      requestId: requestId('wake-through-channel'), workspaceId: alpha, channelRef,
+      body: 'A fact that belongs to this Channel', recipients: [memberId],
+    })
+    expect(sent.kind).toBe('committed')
+    expect(channelCalls).toHaveLength(1)
+    expect(defaultCalls).toHaveLength(0)
   })
 
   it('gives a repaired Channel a Session, so the row the Channel page counts is the row the tree can open', async () => {

@@ -4573,11 +4573,14 @@ export default class AgentTeam extends TypertRemoteService {
       })
     }
     for (const memberId of ledger.affectedMembersOf(operation)) {
-      // The wake goes to the Member's own work domain. Which domain a given
-      // fact belongs to is a routing decision this change does not make: a
-      // Member holds one context per domain, and the domain a new fact is
-      // delivered into is decided where that fact's work is started.
-      const handle = this.defaultHandle(memberId)
+      // A Channel fact wakes the Channel's Session, anything else `default`;
+      // the fallback is logged so a silently defaulted route cannot read like
+      // a repaired one.
+      const domainKey = ledger.domainKeyOf(operation)
+      const handle = this.handleFor(memberId, domainKey ?? DEFAULT_MEMBER_SCOPE_KEY) ?? this.defaultHandle(memberId)
+      if (domainKey !== undefined && this.handleFor(memberId, domainKey) === undefined) {
+        this.ctx.logger.warn(`agent-team: no live Session for work domain '${domainKey}' of '${this.memberLabel(memberId)}'; waking its default Session instead (operation '${operation.kind}', Channels: ${ledger.channelRefsOf(operation).join(', ') || 'none'})`)
+      }
       if (handle !== undefined) {
         this.afterCommit(`notification for '${this.memberLabel(memberId)}'`,
           () => this.notifyMemberSurface(handle.agent, { kind: 'commit', receipt, operationKind: operation.kind }))

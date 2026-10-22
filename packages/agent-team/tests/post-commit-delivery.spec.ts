@@ -9,7 +9,7 @@ import { changeBaseline, nextChange } from './helpers/change-stream.ts'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
@@ -95,10 +95,9 @@ describe('post-commit delivery', () => {
     const member = await addLiveMember(ctx, channel.channel.channelRef)
     const fakeSession = SessionId(`session:${member.memberId}`)
     const { agent, state } = wakeSeam(fakeSession)
-    // The Member's own work domain: which domain a Channel fact is delivered
-    // into is not this change's decision, so the wake reaches the live Session
-    // the Member already runs.
-    ctx.agentTeam['handles'].set(member.memberId, new Map([[DEFAULT_MEMBER_SCOPE_KEY, { agent, dispose: async () => {} } as unknown as AgentHandle]]))
+    // The Member's live Channel domain: a Channel fact wakes the Session that
+    // actually carries that Channel's discussion.
+    ctx.agentTeam['handles'].set(member.memberId, new Map([[channelMemberScopeKey(channel.channel.channelRef), { agent, dispose: async () => {} } as unknown as AgentHandle]]))
     const lines = (spy: typeof info): string[] => spy.mock.calls.map(args => String(args[0]))
 
     const waiter = nextChange(ctx.agentTeam)
@@ -164,7 +163,7 @@ describe('post-commit delivery', () => {
     const member = await addLiveMember(ctx, channel.channel.channelRef)
     const { agent, state } = wakeSeam(SessionId(`session:${member.memberId}`))
     state.fail = false
-    ctx.agentTeam['handles'].set(member.memberId, new Map([[DEFAULT_MEMBER_SCOPE_KEY, { agent, dispose: async () => {} } as unknown as AgentHandle]]))
+    ctx.agentTeam['handles'].set(member.memberId, new Map([[channelMemberScopeKey(channel.channel.channelRef), { agent, dispose: async () => {} } as unknown as AgentHandle]]))
     const lines = (spy: typeof info): string[] => spy.mock.calls.map(args => String(args[0]))
 
     const sent = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('duplicate-send'), workspaceId: alpha,
@@ -185,6 +184,57 @@ describe('post-commit delivery', () => {
     expect(skipped).toContain('already have a delivery attempt')
     info.mockRestore()
     debug.mockRestore()
+  })
+
+  it('wakes the Channel work domain and not the default one for a Thread fact', async () => {
+    const { ctx } = await harness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('domain-channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering' })
+    const member = await addLiveMember(ctx, channel.channel.channelRef)
+    // Both domains are live for the same Member, so the two possible routes
+    // differ only in which Session receives the discussion.
+    const channelSeam = wakeSeam(SessionId(`session:channel:${member.memberId}`))
+    const defaultSeam = wakeSeam(SessionId(`session:default:${member.memberId}`))
+    channelSeam.state.fail = false
+    defaultSeam.state.fail = false
+    ctx.agentTeam['handles'].set(member.memberId, new Map([
+      [channelMemberScopeKey(channel.channel.channelRef), { agent: channelSeam.agent, dispose: async () => {} } as unknown as AgentHandle],
+      [DEFAULT_MEMBER_SCOPE_KEY, { agent: defaultSeam.agent, dispose: async () => {} } as unknown as AgentHandle],
+    ]))
+
+    const sent = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('domain-send'), workspaceId: alpha,
+      channelRef: channel.channel.channelRef, body: 'Needs a look', recipients: [member.memberId] })
+    expect(sent.kind).toBe('committed')
+    // The discussion lands in the Channel's Session; the Member's own Session
+    // stays untouched, which is what "the message never reached the Channel
+    // conversation" looked like from the outside.
+    expect(channelSeam.state.calls).toHaveLength(1)
+    expect(defaultSeam.state.calls).toHaveLength(0)
+  })
+
+  it('names the Channel when a Channel fact has no live domain and falls back to default', async () => {
+    const { ctx } = await harness()
+    const warn = vi.spyOn(ctx.logger, 'warn')
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('fallback-channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering' })
+    const member = await addLiveMember(ctx, channel.channel.channelRef)
+    const seam = wakeSeam(SessionId(`session:default:${member.memberId}`))
+    seam.state.fail = false
+    ctx.agentTeam['handles'].set(member.memberId, new Map([[DEFAULT_MEMBER_SCOPE_KEY, { agent: seam.agent, dispose: async () => {} } as unknown as AgentHandle]]))
+    // The line names the Member by handle, which is how an operator locates the
+    // route; the bound Human seat logs its own line for its own route.
+    const fallbackFor = (lines: readonly string[]): readonly string[] =>
+      lines.filter(line => line.includes('no live Session for work domain') && line.includes(`of '${member.handle}'`))
+
+    const sent = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('fallback-send'), workspaceId: alpha,
+      channelRef: channel.channel.channelRef, body: 'Needs a look', recipients: [member.memberId] })
+    expect(sent.kind).toBe('committed')
+    expect(seam.state.calls).toHaveLength(1)
+    const fallbacks = fallbackFor(warn.mock.calls.map(args => String(args[0])))
+    expect(fallbacks).toHaveLength(1)
+    const line = fallbacks[0]!
+    expect(line).toContain(`'${channelMemberScopeKey(channel.channel.channelRef)}'`)
+    expect(line).toContain(`of '${member.handle}'`)
+    expect(line).toContain(`Channels: ${channel.channel.channelRef}`)
+    warn.mockRestore()
   })
 
   it('answers with the committed result when a synchronous commit listener throws', async () => {

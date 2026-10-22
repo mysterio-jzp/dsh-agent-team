@@ -879,8 +879,8 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   }, [rosterKey])
   const memberOf = useMemo(() => {
     const humanMemberId = channelView?.humanMemberId
-    return (ref: AgentTeamMemberId) => rosterMember(members, humanMemberId, humanName, ref)
-  }, [rosterKey, humanName])
+    return (ref: AgentTeamMemberId) => rosterMember(members, humanMemberId, humanName, ref, effectiveChannelRef)
+  }, [rosterKey, humanName, effectiveChannelRef])
 
   // Reply contexts keyed by the replying Message. Built once per change in the
   // facts, roster, or resolution cache so each row keeps one stable object:

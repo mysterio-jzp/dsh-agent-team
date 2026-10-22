@@ -315,6 +315,7 @@ export const rosterMember = (
   humanMemberId: AgentTeamMemberId | undefined,
   humanHandle: string,
   memberRef: AgentTeamMemberId,
+  channelRef?: AgentTeamChannelRef,
 ): ResolvedMemberRef | undefined => {
   if (humanMemberId !== undefined && refKeyOf(memberRef) === refKeyOf(humanMemberId)) {
     return { memberId: humanMemberId, handle: humanHandle, openable: false }
@@ -325,8 +326,16 @@ export const rosterMember = (
   return {
     memberId: hit.member.memberId,
     handle: hit.member.handle.replace(/^@/, ''),
-    ...(openable ? { sessionId: hit.member.sessionId } : {}),
+    ...(openable ? { sessionId: memberSessionFor(hit, channelRef) } : {}),
     openable,
     ...(hit.member.avatarRef === undefined ? {} : { avatarRef: hit.member.avatarRef }),
   }
+}
+
+function memberSessionFor(hit: AgentTeamClientMemberStatus, channelRef?: AgentTeamChannelRef): SessionId {
+  if (channelRef !== undefined) {
+    const row = hit.channels.find(candidate => candidate.channelRef === channelRef)
+    if (row?.state === 'ready' && row.sessionId !== undefined) return row.sessionId
+  }
+  return hit.member.sessionId
 }
