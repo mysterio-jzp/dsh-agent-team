@@ -1318,11 +1318,10 @@ export class AgentTeamLedger {
   /**
    * Every Session bucket this Member holds today, in Channel order.
    *
-   * The Member row still records a `sessionId` — records written before a
-   * Member could own more than one Session carry it, and the durable domain is
-   * strict — but it is no longer a work domain: nothing is delivered into it,
-   * and a Member's work happens in the Channel domains only. Reporting it here
-   * would put it back in every reader that restores or wakes domains.
+   * The Member row still records a `sessionId`, which is the Member's own
+   * domain: records written before a Member could own more than one Session
+   * carry it. It is reported first so a reader that restores or wakes domains
+   * still reaches it, and each Channel the Member joined follows.
    */
   memberScopeSessions(memberId: AgentTeamMemberId): readonly AgentTeamMemberScopeSession[] {
     const member = this.state.members.get(memberId)
@@ -1343,6 +1342,7 @@ export class AgentTeamLedger {
    */
   memberOfBoundSession(sessionId: SessionId): AgentTeamAgentMember | undefined {
     for (const member of this.state.members.values()) {
+      if (member.sessionId === sessionId) return member
       for (const binding of this.state.memberScopes.get(member.memberId)?.values() ?? []) {
         if (binding.sessionId === sessionId) return member
       }
