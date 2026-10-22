@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { requestScopedUuid } from './request-scoped-id.ts'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, Service, type Volatile } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -4184,7 +4184,15 @@ export default class AgentTeam extends TypertRemoteService {
       if (workspaceId === undefined) throw new Error(`work domain '${scopeKey}' has no Workspace binding`)
       const workspace = this.requireWorkspace(workspaceId)
       const workspacePath = (scopeKey === DEFAULT_MEMBER_SCOPE_KEY ? knownWorkspacePath : undefined) ?? workspace.path
-      const workingDirectories = binding.workingDirectories ?? (workspacePath === undefined ? undefined : [workspacePath])
+      // The snapshot is the Member's own choice of directory, and it is kept —
+      // unless it names a different project, which is what an earlier binding
+      // left behind. A Session whose cwd resolves away from its Workspace
+      // cannot be attached at all, so such a snapshot is replaced by the
+      // Member's own Workspace root instead of breaking every start.
+      const snapshot = binding.workingDirectories
+      const insideWorkspace = snapshot !== undefined && workspacePath !== undefined
+        && snapshot.every(directory => directory === workspacePath || directory.startsWith(`${workspacePath}${sep}`))
+      const workingDirectories = insideWorkspace ? snapshot : (workspacePath === undefined ? undefined : [workspacePath])
       if (workingDirectories === undefined) throw new Error(`work domain '${scopeKey}' has no working-directory snapshot and its Workspace root is unavailable`)
       await this.validateWorkingDirectories(member, scopeKey, workingDirectories)
       const cwd = workingDirectories[0]!
