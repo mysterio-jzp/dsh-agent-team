@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { requestScopedUuid } from './request-scoped-id.ts'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, Service, type Volatile } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -4177,7 +4177,18 @@ export default class AgentTeam extends TypertRemoteService {
       if (workspaceId === undefined) throw new Error(`work domain '${scopeKey}' has no Workspace binding`)
       const workspace = this.requireWorkspace(workspaceId)
       const workspacePath = (scopeKey === DEFAULT_MEMBER_SCOPE_KEY ? knownWorkspacePath : undefined) ?? workspace.path
-      const workingDirectories = binding.workingDirectories ?? (workspacePath === undefined ? undefined : [workspacePath])
+      // A Channel domain belongs to its Workspace, so a snapshot pointing
+      // outside it is a leftover of an earlier binding: such a Session cannot
+      // be attached at all, because its cwd resolves away from the Workspace
+      // the domain is bound to. The Workspace root is the only directory a
+      // Channel domain may run in — the Member's own domain keeps its snapshot,
+      // which is the Member's own workspace choice.
+      const snapshot = binding.workingDirectories
+      const insideDomain = snapshot !== undefined && workspacePath !== undefined
+        && snapshot.every(directory => directory === workspacePath || directory.startsWith(`${workspacePath}${sep}`))
+      const workingDirectories = scopeKey !== DEFAULT_MEMBER_SCOPE_KEY
+        ? (insideDomain ? snapshot : (workspacePath === undefined ? undefined : [workspacePath]))
+        : snapshot ?? (workspacePath === undefined ? undefined : [workspacePath])
       if (workingDirectories === undefined) throw new Error(`work domain '${scopeKey}' has no working-directory snapshot and its Workspace root is unavailable`)
       await this.validateWorkingDirectories(member, scopeKey, workingDirectories)
       const cwd = workingDirectories[0]!
