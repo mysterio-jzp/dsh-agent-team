@@ -131,9 +131,12 @@ describe('startup reconciliation of Channel work domains', () => {
     // No domain: the binding is what must NOT exist, since a binding here could
     // only carry an invented operator.
     expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channelRef))).toBeUndefined()
-    const status = ctx.agentTeam.members().find(row => row.member.memberId === memberId)
-    expect(status?.diagnostic?.class).toBe('domain-unattributed')
-    expect(status?.diagnostic?.detail).toContain('record of when it joined that Channel is missing')
+    // The failure belongs to the domain, not to the Member: one Channel that
+    // cannot be attributed must not mark the Member's other Channels as broken.
+    const row = ctx.agentTeam.membersForClient({ workspaceId: alpha })
+      .find(entry => entry.member.memberId === memberId)?.channels.find(entry => entry.channelRef === channelRef)
+    expect(row?.state).toBe('unopenable')
+    expect(row?.reason).toBe('origin-unrecorded')
   })
 
   it('opens nothing twice when the pass runs again over an already-bound membership', async () => {

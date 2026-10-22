@@ -49,7 +49,7 @@ import {
 import { SessionId as SessionIdBrand } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
-import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamRolloverSessionRequest } from './types.ts'
+import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberScopeKey, AgentTeamRolloverSessionRequest } from './types.ts'
 
 /**
  * The one writer of context-continuity messages for Team. Section names are
@@ -66,10 +66,24 @@ export const TEAM_CONTEXT_CODEC = new ContextMessageCodec({
 })
 
 export interface TeamContextContinuityOptions {
-  /** Resolve the live Agent of one Member; undefined leaves intent parked. */
-  readonly agentForMember: (memberId: AgentTeamMemberId) => Agent | undefined
+  /**
+   * Resolve the live Agent of one Member in one work domain; undefined leaves
+   * intent parked. A Member owns no Session of its own, so a domain is always
+   * named explicitly and there is nothing to drift back to.
+   */
+  readonly agentForMember: (memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey) => Agent | undefined
+  /**
+   * Resolve the durable Member of one live Agent, and the work domain it runs.
+   * `default` names no domain any more, so the pair travels together instead of
+   * being read off the Member row.
+   */
+  readonly surfaceForAgent: (agent: Agent) => { readonly member: AgentTeamAgentMember, readonly scopeKey: AgentTeamMemberScopeKey } | undefined
   /** Resolve the durable Member of one live Agent. */
   readonly memberForAgent: (agent: Agent) => AgentTeamAgentMember | undefined
+  /** The Session running one Member's work domain, or undefined when it holds none. */
+  readonly sessionForMemberScope: (memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey) => SessionId | undefined
+  /** Every work domain one Member holds a Session for; `default` is never among them. */
+  readonly scopesForMember: (memberId: AgentTeamMemberId) => readonly AgentTeamMemberScopeKey[]
   /**
    * Read one Member Session's engine-folded continuity state: the unit
    * registered by `context-projection.ts`, or undefined when the Member has no
@@ -95,14 +109,32 @@ export interface TeamContextContinuityOptions {
 export class TeamContextContinuityHost implements ContextContinuityHost<AgentTeamMemberId> {
   constructor(private readonly options: TeamContextContinuityOptions) {}
 
+  /**
+   * The Agent of one Member, resolved through a domain that Member actually
+   * runs. The engine's subject vocabulary predates per-Channel domains, so it
+   * names no domain; Team answers with a running one and never with the
+   * retired `default`, because the engine uses identity here only to confirm
+   * the generation it is about to swap is still the live one.
+   */
   agentForSubject(memberId: AgentTeamMemberId): Agent | undefined {
-    return this.options.agentForMember(memberId)
+    for (const scopeKey of this.options.scopesForMember(memberId)) {
+      const agent = this.options.agentForMember(memberId, scopeKey)
+      if (agent !== undefined) return agent
+    }
+    return undefined
   }
 
+  /**
+   * The continuity subject of one live Agent: its Member plus the Session of
+   * the domain it actually runs. Reading the Member row's `sessionId` here was
+   * the last way the retired default domain could re-enter a context decision.
+   */
   subjectForAgent(agent: Agent): ContextSubject<AgentTeamMemberId> | undefined {
-    const member = this.options.memberForAgent(agent)
-    if (member === undefined) return undefined
-    return { id: member.memberId, sessionId: member.sessionId }
+    const surface = this.options.surfaceForAgent(agent)
+    if (surface === undefined) return undefined
+    const sessionId = this.options.sessionForMemberScope(surface.member.memberId, surface.scopeKey)
+    if (sessionId === undefined) throw new Error(`agent-team: Member '${surface.member.memberId}' runs work domain '${surface.scopeKey}' without a Session`)
+    return { id: surface.member.memberId, sessionId }
   }
 
   projectionForSubject(memberId: AgentTeamMemberId, sessionId: SessionId): ContextProjectionState | undefined {

@@ -440,6 +440,13 @@ export interface AgentTeamLedgerOptions {
 export interface AgentTeamLedgerResult<T> {
   readonly value: T
   readonly committed: boolean
+  /**
+   * Members this write enrolled into the Channel as a side effect of naming
+   * them, so the caller opens their Channel Sessions in the same turn. Absent
+   * on every result that enrolled nobody, including a retry that committed
+   * nothing: the enrolment an earlier attempt wrote is already durable.
+   */
+  readonly enrolledMembers?: readonly AgentTeamMemberId[]
 }
 
 /**
@@ -1309,10 +1316,13 @@ export class AgentTeamLedger {
 
 
   /**
-   * Every Session bucket this Member holds, the default domain first: its
-   * `default` binding is the Member record's own `sessionId`, so a ledger
-   * recorded before buckets reports exactly the one Session it always had and
-   * a Member that never received a scoped delivery holds no extra context.
+   * Every Session bucket this Member holds today, in Channel order.
+   *
+   * The Member row still records a `sessionId` — records written before a
+   * Member could own more than one Session carry it, and the durable domain is
+   * strict — but it is no longer a work domain: nothing is delivered into it,
+   * and a Member's work happens in the Channel domains only. Reporting it here
+   * would put it back in every reader that restores or wakes domains.
    */
   memberScopeSessions(memberId: AgentTeamMemberId): readonly AgentTeamMemberScopeSession[] {
     const member = this.state.members.get(memberId)
@@ -1333,7 +1343,6 @@ export class AgentTeamLedger {
    */
   memberOfBoundSession(sessionId: SessionId): AgentTeamAgentMember | undefined {
     for (const member of this.state.members.values()) {
-      if (member.sessionId === sessionId) return member
       for (const binding of this.state.memberScopes.get(member.memberId)?.values() ?? []) {
         if (binding.sessionId === sessionId) return member
       }
@@ -1508,6 +1517,18 @@ export class AgentTeamLedger {
     const targetSessionId = this.memberScopeSessionFor(memberId, scopeKey)?.sessionId
     if (previousSessionId === undefined || targetSessionId === undefined) return undefined
     return { previousSessionId, targetSessionId }
+  }
+
+  /**
+   * The work domains one Member ever transitioned, newest record first.
+   *
+   * A transition names no domain in the Member row, so startup convergence
+   * needs this to find what to finish. `default` is excluded because a
+   * transition in it carries no Channel to converge on.
+   */
+  transitionedScopesOf(memberId: AgentTeamMemberId): readonly AgentTeamMemberScopeKey[] {
+    return Object.freeze([...(this.state.previousSessions.get(memberId)?.keys() ?? [])]
+      .filter(scopeKey => scopeKey !== DEFAULT_MEMBER_SCOPE_KEY))
   }
 
   /**
@@ -1735,8 +1756,8 @@ export class AgentTeamLedger {
       // as the same enrolment a Human adds by hand rather than as a second kind
       // of membership. Written after the Message because the recipient list
       // above was resolved against the roster as it stood when it was sent.
-      await this.enrollAddressed(request.workspaceId, channel, addressed, request.actor, message.messageRef)
-      return this.committed(this.messageResult(operation))
+      const enrolled = await this.enrollAddressed(request.workspaceId, channel, addressed, request.actor, message.messageRef)
+      return this.committed(this.messageResult(operation), enrolled)
     })
   }
 
@@ -1759,7 +1780,7 @@ export class AgentTeamLedger {
     addressed: readonly AgentTeamMemberId[],
     actor: AgentTeamActor,
     invitingMessageRef: AgentTeamMessageRef,
-  ): Promise<void> {
+  ): Promise<readonly AgentTeamMemberId[]> {
     // A Message can only enrol where its own authority reaches. The sender
     // holds a Membership the same predicate must be able to follow back to a
     // Human: writing an enrolment the replay would reject would commit a
@@ -1767,7 +1788,11 @@ export class AgentTeamLedger {
     // same question here and there is the point — one predicate, two call
     // sites — not a second definition of who may authorise.
     if (addressed.length > 0 && actor.kind !== 'human'
-      && this.channelMembershipOriginFrom(this.state, actor.memberId, channel.channelRef) === undefined) return
+      && this.channelMembershipOriginFrom(this.state, actor.memberId, channel.channelRef) === undefined) return []
+    // The Members this Message actually enrolled, so the caller can open their
+    // Channel Sessions in the same turn instead of leaving them to the next
+    // restart's reconciliation.
+    const enrolled: AgentTeamMemberId[] = []
     for (const memberId of addressed) {
       if (this.state.memberships.get(channel.channelRef)?.has(memberId) === true) continue
       if (!this.state.members.has(memberId)) continue
@@ -1778,7 +1803,9 @@ export class AgentTeamLedger {
       })
       await this.table.put(operation.operationId, operation)
       this.apply(operation)
+      enrolled.push(memberId)
     }
+    return Object.freeze(enrolled)
   }
 
   reply(request: AgentTeamAuthorizedReplyRequest): Promise<AgentTeamLedgerResult<AgentTeamReplyResult>> {
@@ -1848,8 +1875,8 @@ export class AgentTeamLedger {
       this.apply(operation)
       // A reply is a Message in the Channel too: naming someone in it enrols
       // them the same way a top-level Message does.
-      await this.enrollAddressed(request.workspaceId, channel, addressed, request.actor, message.messageRef)
-      return this.committed(this.replyResult(operation))
+      const enrolled = await this.enrollAddressed(request.workspaceId, channel, addressed, request.actor, message.messageRef)
+      return this.committed(this.replyResult(operation), enrolled)
     })
   }
 
@@ -6297,7 +6324,12 @@ export class AgentTeamLedger {
     return this.createRef(kind)
   }
 
-  private committed<T>(value: T): AgentTeamLedgerResult<T> { return Object.freeze({ value, committed: true }) }
+  private committed<T>(value: T, enrolledMembers?: readonly AgentTeamMemberId[]): AgentTeamLedgerResult<T> {
+    return Object.freeze({
+      value, committed: true,
+      ...(enrolledMembers === undefined || enrolledMembers.length === 0 ? {} : { enrolledMembers }),
+    })
+  }
   private resolved<T>(value: T): AgentTeamLedgerResult<T> { return Object.freeze({ value, committed: false }) }
 
   private sortedRecords(): Array<[AgentTeamOperationId, AgentTeamOperation]> {

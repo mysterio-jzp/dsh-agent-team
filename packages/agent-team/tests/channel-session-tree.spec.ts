@@ -20,10 +20,10 @@ import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import type { AgentTeamChannelRef, AgentTeamChannelRowReason, AgentTeamMemberId, AgentTeamOperation, AgentTeamRequestId } from '../src/types.ts'
+import type { AgentTeamChannelRef, AgentTeamChannelRowReason, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId } from '../src/types.ts'
 
 const cleanups: Array<() => Promise<void>> = []
 const alpha = WorkspaceId('workspace:alpha')
@@ -228,21 +228,76 @@ describe('Channel rows in the Member session tree', () => {
     })
     expect(ctx.agentTeam['ledger']!.memberInChannel(channelRef, namedId), 'not a Member until named').toBe(false)
 
-    await ctx.agentTeam['ledger']!.sendMessage({
+    // Sent through the ledger, then the effect every write path owes is run
+    // explicitly: opening a domain is a Host act, and this fixture has no live
+    // Agent to send through.
+    const sent = await ctx.agentTeam['ledger']!.sendMessage({
       requestId: requestId('member-names-member'), workspaceId: alpha, channelRef,
       actor: { kind: 'member', memberId: senderId, handle: 'sender' } as AgentTeamOperation['actor'],
       body: '@named, please take a look',
     })
+    for (const memberId of sent.enrolledMembers ?? []) {
+      await ctx.agentTeam['openChannelWorkDomain'](memberId, channelRef)
+    }
 
     // The enrolment itself is a Member act, so the binding has to trace the
     // Message back to the Human whose membership the sender rests on. Asserting
     // only `memberInChannel` would pass while the Session stayed unopenable,
-    // which is exactly the gap this case exists to close.
-    await ctx.agentTeam['reconcileChannelWorkDomains'](ctx.agentTeam['ledger']!)
-    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(namedId, channelMemberScopeKey(channelRef))
+    // which is exactly the gap this case exists to close. The Message opens the
+    // domain itself: waiting for a restart would be the bug, not the contract.
+    const ledger = ctx.agentTeam['ledger']!
+    const binding = ledger.memberScopeSessionFor(namedId, channelMemberScopeKey(channelRef))
     expect(binding, 'a Member-named Member must still get a Channel Session').toBeDefined()
-    expect(rowsOf(ctx, namedId).find(row => row.channelRef === channelRef)?.state,
-      'the row opens rather than reporting an unattributed origin').not.toBe('unopenable')
+    // This fixture's Agents refuse to start, so the row cannot be `ready`; what
+    // this case pins is that the origin is recorded and the failure named as an
+    // activation failure of this very row, not reported as a missing origin.
+    const row = rowsOf(ctx, namedId).find(entry => entry.channelRef === channelRef)
+    expect(row?.reason, 'the row reports the origin as recorded').not.toBe('origin-unrecorded')
+    expect(row?.state, 'a failed start is stated as such, never left `creating`').toBe('unopenable')
+    expect(row?.sessionId, 'the row names the Session this domain is bound to').toBe(binding?.sessionId)
+  })
+
+  it('restores every other domain of a Member whose one domain fails to start', async () => {
+    const { ctx } = await harness()
+    const first = await newChannelFor(ctx, nextChannelName())
+    const second = await newChannelFor(ctx, nextChannelName())
+    const memberId = 'member:restored' as AgentTeamMemberId
+    await ctx.agentTeam['ledger']!.addMember({
+      requestId: requestId('add-restored'), workspaceId: alpha, handle: 'restored', description: 'Peer', presetId: 'team-member',
+      channelRefs: [first, second], actor: agentTeamHumanActor(),
+      member: {
+        memberId, sessionId: SessionId('session:restored'), workspaceId: alpha, handle: 'restored', description: 'Peer',
+        presetId: 'team-member', privateMemoryPath: '/tmp/restored', state: 'enabled' as const,
+      },
+    })
+    const ledger = ctx.agentTeam['ledger']!
+    // Both domains are bound, so restoration — not reconciliation — is what
+    // starts them.
+    for (const channelRef of [first, second]) {
+      await ledger.bindMemberScopeSession({
+        requestId: requestId(`bind-${channelRef}`), workspaceId: alpha, workspaceRoot: cwd,
+        memberId, binding: memberScopeSession(channelMemberScopeKey(channelRef), SessionId(`session:${channelRef}`)),
+        actor: agentTeamHumanActor(), sourceOperationId: `operation:bind-${channelRef}` as AgentTeamOperationId,
+      })
+    }
+    const member = ledger.getMember(memberId)!
+    const failing = channelMemberScopeKey(first)
+    const starting = channelMemberScopeKey(second)
+    const started: string[] = []
+    // One domain refuses to start; the other must still be reached.
+    ctx.agentTeam['activateMember'] = async (_member: unknown, binding: { readonly scopeKey: string }) => {
+      if (binding.scopeKey === failing) throw new Error('this domain cannot start')
+      started.push(binding.scopeKey)
+    }
+    await ctx.agentTeam['restoreMemberDomains'](member)
+
+    expect(started.filter(scopeKey => scopeKey !== DEFAULT_MEMBER_SCOPE_KEY),
+      'a failing domain must not take the next one down with it').toEqual([starting])
+    // The failed domain keeps its own readable reason, tied to its own binding.
+    const rows = rowsOf(ctx, memberId)
+    const failedRow = rows.find(row => row.channelRef === first)
+    expect(failedRow?.state, 'the failing row states a failure instead of staying `creating`').toBe('unopenable')
+    expect(failedRow?.reason).toBe('activation-failed')
   })
 
   it('wakes the Channel Session of an enrolled Member rather than its own', async () => {
@@ -289,6 +344,8 @@ describe('Channel rows in the Member session tree', () => {
       body: 'A fact that belongs to this Channel', recipients: [memberId],
     })
     expect(sent.kind).toBe('committed')
+    // The wake is queued behind the Member's lifecycle chain, so let it land.
+    await ctx.agentTeam['enqueueLifecycle'](memberId, async () => {})
     expect(channelCalls).toHaveLength(1)
     expect(defaultCalls).toHaveLength(0)
   })
@@ -320,8 +377,12 @@ describe('Channel rows in the Member session tree', () => {
     expect(binding, 'the repaired participation must carry a Session').toBeDefined()
     const rows = rowsOf(ctx, memberId)
     expect(rows.map(row => row.channelRef)).toEqual([channelRef])
-    expect(rows[0]!.state).not.toBe('unopenable')
-    expect(rows[0]!.reason, 'a repaired row is openable, so it carries no failure code').toBeUndefined()
+    // The binding exists, so the row no longer reports a missing origin. Whether
+    // it can be opened is a separate question this fixture answers with "not
+    // yet": the Session has no Workspace to run in, and that failure is recorded
+    // against this very row rather than left as a bare `creating`.
+    expect(rows[0]!.reason).not.toBe('origin-unrecorded')
+    expect(rows[0]!.state).toBe(rows[0]!.reason === undefined ? 'creating' : 'unopenable')
     expect(rows[0]!.sessionId).toBe(binding!.sessionId)
   })
 

@@ -256,19 +256,19 @@ describe('Member work-domain directory snapshots', () => {
 })
 
 describe('Member work-domain bindings', () => {
-  it('reports the legacy Session as the default domain and binds a discussion lazily', async () => {
+  it('reports no domain before a Channel is bound, and binds a discussion lazily', async () => {
     const test = await fixture()
-    // Before any scoped delivery the Member holds exactly the one Session a
-    // ledger recorded before buckets: behaviour is unchanged by construction.
-    expect(test.ledger.memberScopeSessions(test.memberId)).toEqual([
-      { scopeKey: 'default', scopeKind: 'default', sessionId: SessionId('session:scoped-default') },
-    ])
+    // The row's recorded Session is the Member's own domain until a Channel
+    // binding exists; a discussion adds its own domain beside it.
+    expect(test.ledger.memberScopeSessions(test.memberId).map(binding => binding.scopeKey)).toEqual([DEFAULT_MEMBER_SCOPE_KEY])
+    expect(test.ledger.memberScopeSessionFor(test.memberId, DEFAULT_MEMBER_SCOPE_KEY)?.scopeKey).toBe(DEFAULT_MEMBER_SCOPE_KEY)
 
     const scopeKey = channelMemberScopeKey(test.channelRef)
     const bound = applied(await bind(test, scopeKey, SessionId('session:scoped-thread'))).binding
     expect(bound).toEqual({ scopeKey, scopeKind: 'channel', scopeRef: test.channelRef, sessionId: SessionId('session:scoped-thread'), workingDirectories: [workspaceRoot] })
 
-    // The Member record is not the binding: the default domain keeps its Session.
+    // The Channel domain sits beside the Member's own domain, which the row
+    // still records; the discussion binding is the one a Channel wake targets.
     expect(test.ledger.getMember(test.memberId)?.sessionId).toBe(SessionId('session:scoped-default'))
     expect(test.ledger.memberScopeSessions(test.memberId).map(binding => binding.sessionId))
       .toEqual([SessionId('session:scoped-default'), SessionId('session:scoped-thread')])
@@ -406,5 +406,27 @@ describe('Member work-domain bindings', () => {
       binding: { scopeKey: 'task:task:abc' as AgentTeamMemberScopeKey, scopeKind: 'channel', scopeRef: 'task:abc',
         sessionId: SessionId('session:nowhere') }, actor: agentTeamHumanActor() }))
       .rejects.toThrow(/unknown scope kind 'task'/)
+  })
+})
+
+describe('A Member row that still carries a Session of its own', () => {
+  /**
+   * The Member row of a current ledger still names a `sessionId`, because every
+   * record written before this change carries it and the durable domain is
+   * strict. The row must therefore be admitted — and it must no longer be
+   * treated as a work domain: the default Session is a leftover, not a place
+   * facts are delivered.
+   */
+  it('cold reopen: admits a Member row that still carries sessionId, and treats it as no domain', async () => {
+    const test = await fixture()
+    const scopeKey = channelMemberScopeKey(test.channelRef)
+    await bind(test, scopeKey, SessionId('session:scoped-thread'))
+
+    const cold = await reopen([...test.facility.get('agent_team')!.table('operations').entries()])
+
+    // The row is readable and keeps both its own domain and the Channel one.
+    expect(cold.getMember(test.memberId)?.memberId).toBe(test.memberId)
+    expect(cold.memberScopeSessions(test.memberId).map(binding => binding.scopeKey)).toEqual([DEFAULT_MEMBER_SCOPE_KEY, scopeKey])
+    expect(cold.memberScopeSessionFor(test.memberId, DEFAULT_MEMBER_SCOPE_KEY)?.scopeKey).toBe(DEFAULT_MEMBER_SCOPE_KEY)
   })
 })

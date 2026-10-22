@@ -14,10 +14,11 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { isDroppedNotice, type ContextProjectionState, type PressureGate, type PressureJudgement, type TransitionPlan } from '@contexera/dsh-context-continuity'
 import { AGENT_TEAM_PLUGIN_ID } from '../src/context-source.ts'
 import { TEAM_CONTEXT_CODEC, TeamContextContinuityHost, TeamPressurePolicy, TeamPressurePolicyHost, createTeamContextManagement } from '../src/context-continuity-host.ts'
-import type { AgentTeamAgentMember, AgentTeamMemberId } from '../src/types.ts'
+import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberScopeKey } from '../src/types.ts'
 
 const MEMBER_ID = 'member:one' as AgentTeamMemberId
 const SESSION_ID = SessionId('session:one')
+const SCOPE_KEY = 'channel:channel:one' as AgentTeamMemberScopeKey
 
 /** The model-facing text of one message. */
 function bodyOf(message: { readonly content: readonly unknown[] }): string {
@@ -101,6 +102,9 @@ describe('the Team context-continuity host', () => {
   it('derives the durable rollover identity unchanged', () => {
     const host = new TeamContextContinuityHost({
       agentForMember: () => undefined,
+      surfaceForAgent: () => undefined,
+      sessionForMemberScope: () => undefined,
+      scopesForMember: () => [],
       memberForAgent: () => undefined,
       projectionForMember: () => undefined,
       executeTransition: () => Promise.resolve(),
@@ -118,7 +122,10 @@ describe('the Team context-continuity host', () => {
 
   it('resolves subjects and Agents in both directions', () => {
     const host = new TeamContextContinuityHost({
-      agentForMember: id => (id === MEMBER_ID ? agent : undefined),
+      agentForMember: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? agent : undefined),
+      surfaceForAgent: candidate => (candidate === agent ? { member, scopeKey: SCOPE_KEY } : undefined),
+      sessionForMemberScope: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? SESSION_ID : undefined),
+      scopesForMember: id => (id === MEMBER_ID ? [SCOPE_KEY] : []),
       memberForAgent: candidate => (candidate === agent ? member : undefined),
       projectionForMember: () => undefined,
       executeTransition: () => Promise.resolve(),
@@ -133,6 +140,9 @@ describe('the Team context-continuity host', () => {
   it('treats Team notices as rederived and foreign messages as real input', () => {
     const host = new TeamContextContinuityHost({
       agentForMember: () => undefined,
+      surfaceForAgent: () => undefined,
+      sessionForMemberScope: () => undefined,
+      scopesForMember: () => [],
       memberForAgent: () => undefined,
       projectionForMember: () => undefined,
       executeTransition: () => Promise.resolve(),
@@ -175,7 +185,10 @@ describe('the Team context-continuity host', () => {
     const executeTransition = vi.fn((_memberId: AgentTeamMemberId, _plan: TransitionPlan) => Promise.resolve())
     const live = { id: 'agent:one', whenIdle: () => Promise.resolve() } as unknown as Agent
     const management = createTeamContextManagement({
-      agentForMember: id => (id === MEMBER_ID ? live : undefined),
+      agentForMember: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? live : undefined),
+      surfaceForAgent: candidate => (candidate === live ? { member, scopeKey: SCOPE_KEY } : undefined),
+      sessionForMemberScope: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? SESSION_ID : undefined),
+      scopesForMember: id => (id === MEMBER_ID ? [SCOPE_KEY] : []),
       memberForAgent: candidate => (candidate === live ? member : undefined),
       projectionForMember: () => ({
         pending: { toolCallId: 'call-1', resultSeq: 4, turn: 2, handoff: 'Handoff prose.', relatedFiles: [], turnEndSeq: -1 },
@@ -224,6 +237,9 @@ describe('the projection read', () => {
     }
     const host = new TeamContextContinuityHost({
       agentForMember: () => undefined,
+      surfaceForAgent: () => undefined,
+      sessionForMemberScope: () => undefined,
+      scopesForMember: () => [],
       memberForAgent: () => undefined,
       projectionForMember: (memberId, sessionId) => (memberId === MEMBER_ID && sessionId === SESSION_ID ? state : undefined),
       executeTransition: () => Promise.resolve(),
