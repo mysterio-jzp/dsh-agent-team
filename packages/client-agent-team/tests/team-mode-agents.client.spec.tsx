@@ -584,6 +584,45 @@ describe('Team agent surfaces', () => {
     await b.runtime.dispose()
   })
 
+  it('toggles an Agent channel session list open on click and closed on second click', async () => {
+    const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
+    await b.runtime.sessions.add({ id: 'session:member:builder' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
+    await b.view.findByText('builder')
+
+    b.publishChannelUpdate()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    b.members.mockImplementation(async () => ({
+      ok: true,
+      value: [{
+        ...b.status('member:builder', 'w1', 'builder', 'available'),
+        channels: [
+          { channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', sessionId: 'session:builder-eng' },
+        ],
+      }],
+    } as never))
+    b.publishChannelUpdate()
+
+    const agentButton = await waitFor(() => {
+      const btn = b.view.getByRole('button', { name: '展开/收起 builder 的频道' })
+      expect(btn.getAttribute('aria-expanded')).toBe('false')
+      return btn
+    })
+    expect(b.view.queryByRole('list', { name: 'builder 的频道' })).toBeNull()
+
+    fireEvent.click(agentButton)
+    expect(agentButton.getAttribute('aria-expanded')).toBe('true')
+    expect(b.openSession).not.toHaveBeenCalled()
+    const channelList = b.view.getByRole('list', { name: 'builder 的频道' })
+    expect(within(channelList).getByRole('button', { name: /engineering/ })).toBeTruthy()
+
+    fireEvent.click(agentButton)
+    expect(agentButton.getAttribute('aria-expanded')).toBe('false')
+    expect(b.openSession).not.toHaveBeenCalled()
+    expect(b.view.queryByRole('list', { name: 'builder 的频道' })).toBeNull()
+
+    await b.runtime.dispose()
+  })
+
 })
 
 describe('Team archival surfaces', () => {

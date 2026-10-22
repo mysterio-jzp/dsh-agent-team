@@ -343,9 +343,10 @@ function ChannelRows({ status, openMemberSession, setRowAlert, t }: {
 }
 
 /**
- * One sidebar Agent row: the select button opens the Member's own Session
- * conversation page, the avatar carries identity plus the presence badge, and
- * the row menu opens the editor.
+ * One sidebar Agent row: the select button expands and collapses the Channel
+ * list when the Member has Channels, and opens the Member's own Session
+ * conversation page when it has none. The avatar carries identity plus the
+ * presence badge, and the row menu opens the editor.
  */
 function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, setPresident, recoverMember, archiveMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, openMemberSession, onUpdated, t }: {
   readonly workspaceId: WorkspaceId
@@ -367,12 +368,14 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
   readonly t: TeamSidebarProps['t']
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
+  const [channelsOpen, setChannelsOpen] = useState(false)
   const [editing, setEditing] = useState(false)
   const [archiving, setArchiving] = useState(false)
   const [rowAlert, setRowAlert] = useState<string>()
   const [archivePending, setArchivePending] = useState(false)
   const archiveRequest = useRef<ReturnType<typeof mintRequestId>>()
   const withdrawing = workspaceId !== status.member.workspaceId
+  const hasChannels = (status.channels?.length ?? 0) > 0
   // Both row actions ride the same runtime remote: the Host steers a live
   // session, rebuilds an orphaned composition, or re-runs a failed activation.
   const recover = async (): Promise<void> => {
@@ -420,7 +423,11 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
   return (
     <>
       <div className={css.agentRow} data-agent-row data-menu-open={menuOpen || undefined}>
-        <button type="button" className={css.agentSelect} aria-label={t('openAgentSession', { name: status.member.handle })} aria-current={current ? 'page' : undefined} disabled={status.availability !== 'active'} onClick={() => {
+        <button type="button" className={css.agentSelect} aria-label={t(hasChannels ? 'toggleAgentChannels' : 'openAgentSession', { name: status.member.handle })} aria-current={current ? 'page' : undefined} aria-expanded={hasChannels ? channelsOpen : undefined} disabled={status.availability !== 'active' && !hasChannels} onClick={() => {
+          if (hasChannels) {
+            setChannelsOpen(open => !open)
+            return
+          }
           openMemberSession(status.member.sessionId, message => {
             setRowAlert(t('openAgentSessionFailed', { name: status.member.handle.replace(/^@/, ''), message }))
           })
@@ -449,7 +456,7 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
       {/* `channels` is read defensively: a Client can meet a Host older than the
           row projection and must render the Agent line without the Channel
           layer rather than crash the whole sidebar slot. */}
-      {(status.channels?.length ?? 0) > 0 && <ChannelRows status={status} openMemberSession={openMemberSession} setRowAlert={setRowAlert} t={t} />}
+      {hasChannels && channelsOpen && <ChannelRows status={status} openMemberSession={openMemberSession} setRowAlert={setRowAlert} t={t} />}
       {!archiving && rowAlert !== undefined && <div className={css.rowAlert} role="alert">{rowAlert}</div>}
       {archiving && (
         <Modal
