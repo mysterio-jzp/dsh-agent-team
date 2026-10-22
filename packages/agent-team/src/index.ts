@@ -4168,7 +4168,7 @@ export default class AgentTeam extends TypertRemoteService {
    * so a domain resumes, seeds, and parents its own lineage and never the
    * Member's other one.
    */
-  private async activateMember(member: AgentTeamAgentMember, binding: AgentTeamMemberScopeSession, knownWorkspacePath?: string, knownSessions?: ReadonlySet<SessionId>, forkedFrom?: SessionId, options?: { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset }): Promise<void> {
+  private async activateMember(member: AgentTeamAgentMember, binding: AgentTeamMemberScopeSession, knownWorkspacePath?: string, knownSessions?: ReadonlySet<SessionId>, forkedFrom?: SessionId, options?: { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset; readonly healed?: boolean }): Promise<void> {
     const { scopeKey, sessionId } = binding
     if (this.handleFor(member.memberId, scopeKey) !== undefined) return
     let created: AgentHandle | undefined
@@ -4430,10 +4430,23 @@ export default class AgentTeam extends TypertRemoteService {
       this.memberRuntime.forgetMember(member.memberId, scopeKey)
       const message = error instanceof Error ? error.message : String(error)
       this.ctx.logger.warn(`agent-team: activation failed for member '${this.memberLabel(member.memberId)}' in work domain '${scopeKey}': ${message}`)
+      // A bound Session the next generation superseded refuses every append.
+      // That is a stale binding, not a broken Member — Channel, membership and
+      // Workspace are intact — so the domain takes its next Session and starts
+      // on that one. `healed` bounds it to one attempt: a second refusal is a
+      // real fault and keeps its row rather than renewing forever.
+      const diagnostic = this.activationDiagnosticOf(error, sessionId)
+      const renewed = options?.healed === true || diagnostic.class !== 'session-refused' || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
+        ? undefined
+        : await this.renewSupersededScopeSession(member.memberId, scopeKey)
+      if (renewed !== undefined) {
+        await this.activateMember(member, renewed, undefined, undefined, undefined, { ...options, healed: true })
+        return
+      }
       // Every domain records its own failure: a Channel domain that fails
       // silently is a row the surface can only call `creating`, which reads as
       // "not yet" for a Session that will never start.
-      this.setDomainDiagnostic(member.memberId, scopeKey, { ...this.activationDiagnosticOf(error, sessionId), sessionId })
+      this.setDomainDiagnostic(member.memberId, scopeKey, { ...diagnostic, sessionId })
     } finally {
       // Activation only changes this Workspace's presence projection.
       this.emitMemberPresenceChanged(member)
@@ -4703,30 +4716,9 @@ export default class AgentTeam extends TypertRemoteService {
       try {
         await this.activateMember(member, binding)
       } catch (error) {
-        const diagnostic = this.activationDiagnosticOf(error, binding.sessionId)
-        // A bound Session that the next generation superseded can no longer be
-        // appended to. That is a stale binding, not a broken Member: the
-        // Channel, the membership and the Workspace are all intact, so the
-        // domain is given its next Session and started on it. Only a refusal
-        // qualifies — a Session this Host cannot even read is a real fault and
-        // keeps its row, because healing that into silence would discard a
-        // conversation to hide a bug.
-        const superseded = diagnostic.class === 'session-refused'
-        const renewed = scopeKey === DEFAULT_MEMBER_SCOPE_KEY || !superseded
-          ? undefined
-          : await this.renewSupersededScopeSession(memberId, scopeKey)
-        if (renewed === undefined) {
-          this.setDomainDiagnostic(memberId, scopeKey, { ...diagnostic, sessionId: binding.sessionId })
-          this.emitMemberPresenceChanged(member)
-          return undefined
-        }
-        try {
-          await this.activateMember(member, renewed)
-        } catch (retryError) {
-          this.setDomainDiagnostic(memberId, scopeKey, { ...this.activationDiagnosticOf(retryError, renewed.sessionId), sessionId: renewed.sessionId })
-          this.emitMemberPresenceChanged(member)
-          return undefined
-        }
+        this.setDomainDiagnostic(memberId, scopeKey, { ...this.activationDiagnosticOf(error, binding.sessionId), sessionId: binding.sessionId })
+        this.emitMemberPresenceChanged(member)
+        return undefined
       }
       return this.handleFor(memberId, scopeKey)
     }).catch((error: unknown) => {
