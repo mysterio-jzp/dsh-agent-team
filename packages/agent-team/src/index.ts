@@ -8,7 +8,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { requestScopedUuid } from './request-scoped-id.ts'
-import { readFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
@@ -4435,20 +4435,21 @@ export default class AgentTeam extends TypertRemoteService {
       // Workspace are intact — so the domain takes its next Session and starts
       // on that one. `healed` bounds it to one attempt: a second refusal is a
       // real fault and keeps its row rather than renewing forever.
-      // A Channel domain that cannot start has no other use, whatever the
-      // cause: its binding takes the next Session and the start is retried
-      // once. The old log stays on disk untouched, so only continuity is
-      // replaced, never history. A preset fault is the one exception — it is
-      // configuration, and a new Session would reproduce it.
+      // Only a refusal means the binding is stale. A freshly minted Session was
+      // measured not to survive the other failures, so renewing on them turned
+      // one broken start into four and buried the cause.
       const diagnostic = this.activationDiagnosticOf(error, sessionId)
-      const renewed = options?.healed === true || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
-        || diagnostic.class === 'preset-composition'
+      const renewed = options?.healed === true || diagnostic.class !== 'session-refused' || scopeKey === DEFAULT_MEMBER_SCOPE_KEY
         ? undefined
         : await this.renewSupersededScopeSession(member.memberId, scopeKey)
       if (renewed !== undefined) {
         await this.activateMember(member, renewed, undefined, undefined, undefined, { ...options, healed: true })
         return
       }
+      // The diagnostic lives in memory only, so a restart erases the one fact
+      // needed to fix it. A file keeps the cause readable after the process
+      // that saw it is gone.
+      this.recordActivationFailure(member, scopeKey, diagnostic, sessionId)
       // Every domain records its own failure: a Channel domain that fails
       // silently is a row the surface can only call `creating`, which reads as
       // "not yet" for a Session that will never start.
@@ -4630,6 +4631,18 @@ export default class AgentTeam extends TypertRemoteService {
       return failure.kind === 'refused' ? { class: 'session-refused' as const, ...shared } : { class: 'session-unreadable' as const, ...shared }
     }
     return { class: 'activation' as const, detail: error instanceof Error ? error.message : String(error) }
+  }
+
+  private recordActivationFailure(member: AgentTeamAgentMember, scopeKey: AgentTeamMemberScopeKey, diagnostic: AgentTeamMemberDiagnostic, sessionId: SessionId): void {
+    try {
+      const directory = dshHomePath('agent-team', 'diagnostics')
+      mkdirSync(directory, { recursive: true })
+      appendFileSync(join(directory, 'activation-failures.jsonl'), `${JSON.stringify({
+        at: new Date().toISOString(), memberId: member.memberId, handle: member.handle, scopeKey, sessionId, ...diagnostic,
+      })}\n`)
+    } catch (error) {
+      this.ctx.logger.warn(`agent-team: could not record the activation failure of '${scopeKey}': ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   private clearMemberFailure(memberId: AgentTeamMemberId, slot: 'activation' | 'runtime' | 'preTurnCancellation' | 'compaction' | 'capabilityApply'): boolean {
