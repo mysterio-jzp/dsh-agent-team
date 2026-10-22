@@ -4703,9 +4703,30 @@ export default class AgentTeam extends TypertRemoteService {
       try {
         await this.activateMember(member, binding)
       } catch (error) {
-        this.setDomainDiagnostic(memberId, scopeKey, { ...this.activationDiagnosticOf(error, binding.sessionId), sessionId: binding.sessionId })
-        this.emitMemberPresenceChanged(member)
-        return undefined
+        const diagnostic = this.activationDiagnosticOf(error, binding.sessionId)
+        // A bound Session that the next generation superseded can no longer be
+        // appended to. That is a stale binding, not a broken Member: the
+        // Channel, the membership and the Workspace are all intact, so the
+        // domain is given its next Session and started on it. Only a refusal
+        // qualifies — a Session this Host cannot even read is a real fault and
+        // keeps its row, because healing that into silence would discard a
+        // conversation to hide a bug.
+        const superseded = diagnostic.class === 'session-refused'
+        const renewed = scopeKey === DEFAULT_MEMBER_SCOPE_KEY || !superseded
+          ? undefined
+          : await this.renewSupersededScopeSession(memberId, scopeKey)
+        if (renewed === undefined) {
+          this.setDomainDiagnostic(memberId, scopeKey, { ...diagnostic, sessionId: binding.sessionId })
+          this.emitMemberPresenceChanged(member)
+          return undefined
+        }
+        try {
+          await this.activateMember(member, renewed)
+        } catch (retryError) {
+          this.setDomainDiagnostic(memberId, scopeKey, { ...this.activationDiagnosticOf(retryError, renewed.sessionId), sessionId: renewed.sessionId })
+          this.emitMemberPresenceChanged(member)
+          return undefined
+        }
       }
       return this.handleFor(memberId, scopeKey)
     }).catch((error: unknown) => {
@@ -4724,6 +4745,39 @@ export default class AgentTeam extends TypertRemoteService {
     })
     if (mounted !== undefined) this.notifyMemberSurface(mounted.agent, { kind: 'commit', receipt, operationKind })
   }
+
+  /**
+   * Rebind one Channel work domain to a fresh Session.
+   *
+   * A bound Session that has been superseded by the next generation ends at a
+   * seed boundary and can no longer be appended to, so the binding that still
+   * names it is stale rather than wrong. Attribution rides the membership's own
+   * origin, exactly as the first binding did: the Human whose act created the
+   * membership is credited, never this repair.
+   */
+  private async renewSupersededScopeSession(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): Promise<AgentTeamMemberScopeSession | undefined> {
+    const ledger = this.requireLedger()
+    const workspaceId = ledger.workspaceForMemberScope(memberId, scopeKey)
+    if (workspaceId === undefined) return undefined
+    const channelRef = parseMemberScopeKey(scopeKey).scopeRef
+    if (channelRef === undefined) return undefined
+    const origin = ledger.channelMembershipOrigin(memberId, channelRef as AgentTeamChannelRef)
+    if (origin === undefined) return undefined
+    // A domain that already holds a binding cannot be bound again — the ledger
+    // refuses that on purpose, so one Session never carries two authorities.
+    // Renewal is the operation that moves this domain's binding onto the next
+    // Session, which is exactly the transition a superseded generation needs.
+    const renewed = await ledger.renewMemberSession({
+      requestId: `agent-team:scope-renewed:${memberId}:${scopeKey}:${randomUUID()}` as AgentTeamRequestId,
+      workspaceId, memberId, scopeKey,
+      sessionId: SessionId(`agent-team-${randomUUID()}`),
+      actor: origin.actor,
+    })
+    if (!renewed.committed) return undefined
+    this.emitCommitted(renewed.value.receipt)
+    return ledger.memberScopeSessionFor(memberId, scopeKey)
+  }
+
 
   /**
    * Run one effect that follows the ledger append. The operation is durable by
