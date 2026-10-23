@@ -53,7 +53,7 @@ import { claimMessageArtifacts, MESSAGE_ARTIFACTS_PROJECTION_KEY, NOTHING_CLAIME
 import { AGENT_TEAM_TOOL_NAMES, deepCopyCapabilities, memberMemoryDirectoryName, memberMemoryDirectoryPath, MemberRuntime } from './member-runtime.ts'
 import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession, parseMemberScopeKey } from './member-scope.ts'
 import type { MemberSkillSelectionRef } from './member-skills.ts'
-import { classifyRecoverableError, failureDetail, RecoveryCoordinator, type RecoveryFact } from './recovery.ts'
+import { classifyRecoverableError, failureDetail, RecoveryCoordinator, type RecoveryClearReason, type RecoveryFact } from './recovery.ts'
 import { StoredSessionReadError, StoredSessionReader, sessionFailureOf } from './stored-session-reader.ts'
 import { agentTeamDomainSpec } from './spec.ts'
 import { formatTeamTimestamp } from './time-format.ts'
@@ -568,8 +568,8 @@ export default class AgentTeam extends TypertRemoteService {
   private ledger?: AgentTeamLedger
   /**
    * Live generations per Member and work domain. One Member runs one Session per
-   * domain: its own `default` domain carries identity, lifecycle, and recovery,
-   * and each discussion it is woken in carries that discussion alone.
+   * domain: `default` carries identity, lifecycle, and context transitions, and
+   * every work domain owns its own automatic-recovery episode and wake surface.
    */
   private readonly handles = new Map<AgentTeamMemberId, Map<AgentTeamMemberScopeKey, AgentHandle>>()
   /**
@@ -673,10 +673,11 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private readonly humanUpdateCheck = createHumanUpdateChecker({ currentVersion: HUMAN_PROFILE_VERSION })
 
-  private readonly recovery = new RecoveryCoordinator({
-    wake: memberId => { this.injectRecovery(memberId) },
-    report: fact => { this.reportRecovery(fact) },
-  })
+  /** Owner-tagged automatic-recovery coordinators, isolated per live Session. */
+  private readonly recoveries = new Map<
+    SessionId,
+    { readonly memberId: AgentTeamMemberId; readonly coordinator: RecoveryCoordinator }
+  >()
   /**
    * Team's domain half of the continuity projection: the durable ref naming,
    * the Team-notice rule, and the boundary judgement (committed messages,
@@ -1073,7 +1074,7 @@ export default class AgentTeam extends TypertRemoteService {
       // while the coordinator's own lines stay bounded by state changes.
       const kind = classifyRecoverableError(error)
       this.ctx.logger.debug(`agent-team: ${this.memberScope(member.memberId, agent.id)} reported an error classified as ${kind === undefined ? 'not automatically recoverable' : `recoverable ${kind}`}: ${message}`)
-      this.recovery.onError(member.memberId, error)
+      this.recoveryForSession(member.memberId, agent.session.id).onError(member.memberId, error)
       this.emitMemberPresenceChanged(member)
     })
     this.ctx.on('agent/status', ({ agent, status }) => {
@@ -1097,14 +1098,14 @@ export default class AgentTeam extends TypertRemoteService {
         // activation chain of its own.
         if (!this.contextManagement.isTransitioning(member.memberId)) this.notifyMemberSurface(agent, { kind: 'running' })
       }
-      // A turn that ends without an error closes any automatic recovery episode.
+      // A turn that ends without an error closes that Session's recovery episode.
       // The idle transition is itself presence-affecting (working → available),
       // so it must wake presence watchers exactly like the running transition
       // above; without this wake, cached Client member rows keep showing the
       // Member as working after every turn until an unrelated change arrives.
       if (status === 'idle' && member !== undefined) {
-        if (this.memberFailures.get(member.memberId)?.runtime === undefined) {
-          this.recovery.onCleanTurnEnd(member.memberId)
+        if (!this.sessionFailures.has(agent.session.id)) {
+          this.recoveries.get(agent.session.id)?.coordinator.onCleanTurnEnd(member.memberId)
         }
         this.emitMemberPresenceChanged(member)
       }
@@ -1154,7 +1155,8 @@ export default class AgentTeam extends TypertRemoteService {
       // through the runtime), so the chains below can drain to zero first.
       this.shutdown.resolve()
       this.memberRuntime.releaseTurnWaits()
-      this.recovery.dispose()
+      for (const { coordinator } of this.recoveries.values()) coordinator.dispose()
+      this.recoveries.clear()
       this.contextManagement.dispose()
       this.pressurePolicy.dispose()
       if (this.attachmentGcTimer !== undefined) clearInterval(this.attachmentGcTimer)
@@ -1318,9 +1320,9 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   /**
-   * The one live generation of a Member's `default` domain. Member identity,
-   * lifecycle, recovery, and context transitions are that domain's business:
-   * a discussion's domain holds one discussion's facts and nothing else.
+   * The one live generation of a Member's `default` domain. Identity, lifecycle,
+   * and context transitions are that domain's business; a discussion's domain
+   * holds its own facts and automatic-recovery episode.
    */
   private defaultHandle(memberId: AgentTeamMemberId): AgentHandle | undefined {
     return this.handles.get(memberId)?.get(DEFAULT_MEMBER_SCOPE_KEY)
@@ -1940,7 +1942,7 @@ export default class AgentTeam extends TypertRemoteService {
     this.requireAccepting()
     const member = this.requireLedger().getMember(request.memberId)
     if (member === undefined || !this.requireLedger().participatesIn(request.memberId, request.workspaceId)) throw new Error(`unknown Member '${request.memberId}' in workspace '${request.workspaceId}'`)
-    this.recovery.stopTracking(request.memberId, 'manual')
+    this.stopRecoveryForMember(request.memberId, 'manual')
     const handle = this.defaultHandle(request.memberId)
     // A committed renewal or rollover whose retire or activation never finished
     // is what leaves a Member with no live generation on its binding, or with
@@ -1990,7 +1992,7 @@ export default class AgentTeam extends TypertRemoteService {
       await this.reactivateMember(request.memberId)
       return Object.freeze({ status: this.memberStatus(member) })
     }
-    this.steerResume(member, this.manualResumeText(), 'operator recovery')
+    this.steerResume(member, handle, DEFAULT_MEMBER_SCOPE_KEY, this.manualResumeText(), 'operator recovery')
     return Object.freeze({ status: this.memberStatus(member) })
   }
 
@@ -2158,7 +2160,7 @@ export default class AgentTeam extends TypertRemoteService {
   private async retireMemberGeneration(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey, active: AgentHandle, previousSessionId: SessionId): Promise<void> {
     // Drop the old handle's transient state: pending recovery episodes and
     // error markers belong to the disposed agent, not to the Member.
-    this.recovery.stopTracking(memberId, 'session-disposed')
+    this.stopRecoveryForSession(memberId, previousSessionId, 'session-disposed')
     // The context admission gate stays armed through disposal: input racing
     // the retire window must still be captured for the new generation, and
     // the coordinator drops its own bookkeeping only after the swap settles.
@@ -2345,19 +2347,13 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   /**
-   * Steer one continuation message into a Member's live session and report the
-   * delivery with the same correlation group as every other Member-scoped
-   * line. Throws when no handle exists so the coordinator stops tracking;
-   * appends the inbox snapshot whenever there is anything new to read, and says
-   * so — a steered continuation is queued for the Member's next step, which is
-   * not the same claim as the model having read it.
+   * Steer one continuation into the exact live work domain and correlate the
+   * delivery with its Session. Throws when no handle exists so recovery stops;
+   * the attached unread snapshot is filtered to this domain, and a queued
+   * continuation is never presented as evidence the model has read it.
    */
-  private steerResume(member: AgentTeamAgentMember, text: string, trigger: 'automatic recovery' | 'operator recovery'): void {
-    // Recovery is the Member's own domain: the instruction lands in its own
-    // Session, so it may carry only the unread facts that Session owns.
-    const handle = this.defaultHandle(member.memberId)
-    if (handle === undefined) throw new Error(`member '${member.handle}' has no active session`)
-    const notifications = this.requireLedger().notificationFacts(member.memberId)
+  private steerResume(member: AgentTeamAgentMember, handle: AgentHandle, scopeKey: AgentTeamMemberScopeKey, text: string, trigger: 'automatic recovery' | 'operator recovery'): void {
+    const notifications = this.requireLedger().notificationFacts(member.memberId, undefined, scopeKey)
     const body = notifications.length === 0 ? text : `${text}\n\n${this.notificationText(notifications, member.memberId)}`
     const hint = createUserMessage({
       content: [{ type: 'text', text: body }],
@@ -2371,13 +2367,14 @@ export default class AgentTeam extends TypertRemoteService {
     this.ctx.logger.info(`agent-team: ${trigger} continuation steered for ${this.memberScope(member.memberId, handle.agent.session.id)}${notifications.length === 0 ? '' : ` carrying ${this.notificationIdentity(notifications)}`}: it is queued for the Member's next step, not yet read by the model`)
   }
 
-  /** Automatic-recovery wakeup; throwing tells the coordinator the target is gone. */
-  private injectRecovery(memberId: AgentTeamMemberId): void {
-    const handle = this.defaultHandle(memberId)
-    const agent = handle?.agent
-    const member = agent !== undefined ? this.memberForAgent(agent) : undefined
-    if (agent === undefined || member === undefined || member.state !== 'enabled') throw new Error(`member '${memberId}' cannot be recovered automatically`)
-    this.steerResume(member, this.automaticResumeText(), 'automatic recovery')
+  /** Automatic-recovery wakeup; a missing exact Session never falls back to default. */
+  private injectRecovery(memberId: AgentTeamMemberId, sessionId: SessionId): void {
+    const surface = this.surfaceOfSession(sessionId)
+    const member = this.requireLedger().getMember(memberId)
+    if (surface === undefined || surface.memberId !== memberId || member === undefined || member.state !== 'enabled') {
+      throw new Error(`member '${memberId}' session '${sessionId}' cannot be recovered automatically`)
+    }
+    this.steerResume(member, surface.handle, surface.scopeKey, this.automaticResumeText(), 'automatic recovery')
   }
 
   /**
@@ -4956,6 +4953,37 @@ export default class AgentTeam extends TypertRemoteService {
     this.ctx.logger.info(`agent-team: Team Inbox notice queued for ${scope} cause ${causeText} attempt ${attempt} lane '${sequenced ? 'follow-up turn' : 'next step'}' (${facts}): queued for the Member's next step, not yet read by the model`)
   }
 
+  private recoveryForSession(memberId: AgentTeamMemberId, sessionId: SessionId): RecoveryCoordinator {
+    const entry = this.recoveries.get(sessionId)
+    if (entry !== undefined) {
+      if (entry.memberId !== memberId) {
+        throw new AgentTeamInvariantError(`recovery Session '${sessionId}' is owned by Member '${entry.memberId}', not '${memberId}'`)
+      }
+      return entry.coordinator
+    }
+    const coordinator = new RecoveryCoordinator({
+      wake: targetMemberId => { this.injectRecovery(targetMemberId, sessionId) },
+      report: fact => { this.reportRecovery(fact, sessionId) },
+    })
+    this.recoveries.set(sessionId, { memberId, coordinator })
+    return coordinator
+  }
+
+  private stopRecoveryForMember(memberId: AgentTeamMemberId, reason: RecoveryClearReason): void {
+    for (const [sessionId, entry] of this.recoveries) {
+      if (entry.memberId !== memberId) continue
+      entry.coordinator.stopTracking(memberId, reason)
+      if (reason === 'session-disposed') this.recoveries.delete(sessionId)
+    }
+  }
+
+  private stopRecoveryForSession(memberId: AgentTeamMemberId, sessionId: SessionId, reason: RecoveryClearReason): void {
+    const entry = this.recoveries.get(sessionId)
+    if (entry === undefined || entry.memberId !== memberId) return
+    entry.coordinator.stopTracking(memberId, reason)
+    if (reason === 'session-disposed') this.recoveries.delete(sessionId)
+  }
+
   /**
    * One line per automatic-recovery state change — the family it classified,
    * the consecutive occurrence that counts, the wait it armed, the wakeup that
@@ -4964,8 +4992,8 @@ export default class AgentTeam extends TypertRemoteService {
    * turning on debug output, and no stop is silent: not a canceled wakeup, not
    * a stand-down, and not a wake whose target is gone.
    */
-  private reportRecovery(fact: RecoveryFact): void {
-    const scope = this.memberScope(fact.memberId)
+  private reportRecovery(fact: RecoveryFact, sessionId: SessionId): void {
+    const scope = this.memberScope(fact.memberId, sessionId)
     if (fact.kind === 'scheduled') {
       this.ctx.logger.info(`agent-team: automatic recovery scheduled for ${scope} errorKind '${fact.errorKind}' occurrence ${fact.consecutiveFailures}/${fact.maxConsecutiveErrors} wait ${fact.delayMs}ms`)
       return
@@ -5166,8 +5194,8 @@ export default class AgentTeam extends TypertRemoteService {
     this.clearMemberFailure(memberId, 'preTurnCancellation')
   }
 
-  private clearMemberRecoveryState(member: Pick<AgentTeamAgentMember, 'memberId' | 'sessionId'>): void {
-    this.recovery.stopTracking(member.memberId, 'session-disposed')
+  private clearMemberRecoveryState(member: Pick<AgentTeamAgentMember, 'memberId'>): void {
+    this.stopRecoveryForMember(member.memberId, 'session-disposed')
     this.clearMemberFailure(member.memberId, 'runtime')
     this.clearMemberFailure(member.memberId, 'preTurnCancellation')
     this.clearMemberNotificationState(member.memberId)
