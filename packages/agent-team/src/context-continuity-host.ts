@@ -49,7 +49,42 @@ import {
 import { SessionId as SessionIdBrand } from '@deepseek-ai/dsh-session'
 import z from '@deepseek-ai/schemastery'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY } from './member-scope.ts'
 import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberScopeKey, AgentTeamRolloverSessionRequest } from './types.ts'
+
+const SUBJECT_SCOPE_SEPARATOR = '/'
+
+/**
+ * The continuity subject of one Member work domain: the Member and the work
+ * domain whose Session it runs. The engine's coordinator keys its pending
+ * transition slot, captured-input queue, long-gap hold, and idle-boundary
+ * Agent validation by this subject id, so each work domain (`default` and
+ * `channel:<ref>`) is isolated from sibling domains of the same Member.
+ */
+export type TeamContinuitySubjectId = `${AgentTeamMemberId}/${AgentTeamMemberScopeKey}`
+
+/** Build the continuity subject id for one Member work domain. */
+export function continuitySubjectId(
+  memberId: AgentTeamMemberId,
+  scopeKey: AgentTeamMemberScopeKey = DEFAULT_MEMBER_SCOPE_KEY,
+): TeamContinuitySubjectId {
+  return `${memberId}${SUBJECT_SCOPE_SEPARATOR}${scopeKey}`
+}
+
+/** Split one continuity subject id back into its Member id and work-domain key. */
+export function parseContinuitySubjectId(subjectId: TeamContinuitySubjectId): {
+  readonly memberId: AgentTeamMemberId
+  readonly scopeKey: AgentTeamMemberScopeKey
+} {
+  const separator = subjectId.indexOf(SUBJECT_SCOPE_SEPARATOR)
+  if (separator <= 0 || separator === subjectId.length - 1) {
+    throw new Error(`agent-team: invalid continuity subject '${subjectId}'`)
+  }
+  return {
+    memberId: subjectId.slice(0, separator) as AgentTeamMemberId,
+    scopeKey: subjectId.slice(separator + 1) as AgentTeamMemberScopeKey,
+  }
+}
 
 /**
  * The one writer of context-continuity messages for Team. Section names are
@@ -82,8 +117,6 @@ export interface TeamContextContinuityOptions {
   readonly memberForAgent: (agent: Agent) => AgentTeamAgentMember | undefined
   /** The Session running one Member's work domain, or undefined when it holds none. */
   readonly sessionForMemberScope: (memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey) => SessionId | undefined
-  /** Every work domain one Member holds a Session for; `default` is never among them. */
-  readonly scopesForMember: (memberId: AgentTeamMemberId) => readonly AgentTeamMemberScopeKey[]
   /**
    * Read one Member Session's engine-folded continuity state: the unit
    * registered by `context-projection.ts`, or undefined when the Member has no
@@ -96,7 +129,7 @@ export interface TeamContextContinuityOptions {
    * then carried input and the rederived Inbox. Returns once the Member runs
    * its new generation.
    */
-  readonly executeTransition: (memberId: AgentTeamMemberId, plan: TransitionPlan) => Promise<void>
+  readonly executeTransition: (memberId: AgentTeamMemberId, plan: TransitionPlan, scopeKey: AgentTeamMemberScopeKey) => Promise<void>
   /** Log one coordinator diagnostic. */
   readonly log: (message: string) => void
 }
@@ -106,43 +139,42 @@ export interface TeamContextContinuityOptions {
  * the three that decide domain meaning: the durable rollover identity, which
  * queued messages are rederived Team notices, and the projection bridge.
  */
-export class TeamContextContinuityHost implements ContextContinuityHost<AgentTeamMemberId> {
+export class TeamContextContinuityHost implements ContextContinuityHost<TeamContinuitySubjectId> {
   constructor(private readonly options: TeamContextContinuityOptions) {}
 
   /**
-   * The Agent of one Member, resolved through a domain that Member actually
-   * runs. The engine's subject vocabulary predates per-Channel domains, so it
-   * names no domain; Team answers with a running one and never with the
-   * retired `default`, because the engine uses identity here only to confirm
-   * the generation it is about to swap is still the live one.
+   * The live Agent of one Member work domain. Keying the engine's subject by
+   * `(memberId, scopeKey)` resolves the exact domain under transition, so a
+   * sibling domain finishing a turn cannot redirect or abort this domain's
+   * idle-boundary validation.
    */
-  agentForSubject(memberId: AgentTeamMemberId): Agent | undefined {
-    for (const scopeKey of this.options.scopesForMember(memberId)) {
-      const agent = this.options.agentForMember(memberId, scopeKey)
-      if (agent !== undefined) return agent
-    }
-    return undefined
+  agentForSubject(subjectId: TeamContinuitySubjectId): Agent | undefined {
+    const { memberId, scopeKey } = parseContinuitySubjectId(subjectId)
+    return this.options.agentForMember(memberId, scopeKey)
   }
 
   /**
-   * The continuity subject of one live Agent: its Member plus the Session of
-   * the domain it actually runs. Reading the Member row's `sessionId` here was
-   * the last way the retired default domain could re-enter a context decision.
+   * The continuity subject of one live Agent: its `(memberId, scopeKey)` domain
+   * identity plus the Session of the domain it actually runs. Reading the
+   * Member row's `sessionId` here was the last way the retired default domain
+   * could re-enter a context decision.
    */
-  subjectForAgent(agent: Agent): ContextSubject<AgentTeamMemberId> | undefined {
+  subjectForAgent(agent: Agent): ContextSubject<TeamContinuitySubjectId> | undefined {
     const surface = this.options.surfaceForAgent(agent)
     if (surface === undefined) return undefined
     const sessionId = this.options.sessionForMemberScope(surface.member.memberId, surface.scopeKey)
     if (sessionId === undefined) throw new Error(`agent-team: Member '${surface.member.memberId}' runs work domain '${surface.scopeKey}' without a Session`)
-    return { id: surface.member.memberId, sessionId }
+    return { id: continuitySubjectId(surface.member.memberId, surface.scopeKey), sessionId }
   }
 
-  projectionForSubject(memberId: AgentTeamMemberId, sessionId: SessionId): ContextProjectionState | undefined {
+  projectionForSubject(subjectId: TeamContinuitySubjectId, sessionId: SessionId): ContextProjectionState | undefined {
+    const { memberId } = parseContinuitySubjectId(subjectId)
     return this.options.projectionForMember(memberId, sessionId)
   }
 
-  executeTransition(memberId: AgentTeamMemberId, plan: TransitionPlan): Promise<void> {
-    return this.options.executeTransition(memberId, plan)
+  executeTransition(subjectId: TeamContinuitySubjectId, plan: TransitionPlan): Promise<void> {
+    const { memberId, scopeKey } = parseContinuitySubjectId(subjectId)
+    return this.options.executeTransition(memberId, plan, scopeKey)
   }
 
   /**
@@ -176,7 +208,7 @@ export class TeamContextContinuityHost implements ContextContinuityHost<AgentTea
 }
 
 /** Build the engine coordinator over Team's Member lifecycle. */
-export function createTeamContextManagement(options: TeamContextContinuityOptions): ContextContinuityCoordinator<AgentTeamMemberId> {
+export function createTeamContextManagement(options: TeamContextContinuityOptions): ContextContinuityCoordinator<TeamContinuitySubjectId> {
   return new ContextContinuityCoordinator(new TeamContextContinuityHost(options), TEAM_CONTEXT_CODEC)
 }
 
