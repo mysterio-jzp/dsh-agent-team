@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { requestScopedUuid } from './request-scoped-id.ts'
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { join, sep } from 'node:path'
+import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { Context, Service, type Volatile } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelectionRef } from '@deepseek-ai/dsh-agent'
@@ -2096,26 +2096,17 @@ export default class AgentTeam extends TypertRemoteService {
   }): Promise<void> {
     const member = this.requireLedger().getMember(memberId)
     if (member === undefined || member.state !== 'enabled') return
-    const transition = this.requireLedger().lastTransitionForMember(memberId)
-    if (transition === undefined) return
-    // Finish the transition in the domain it was recorded for. A Member has no
-    // `default` domain to converge onto any more, so the domain is read from
-    // the ledger record instead of assumed.
-    const domainKey = this.requireLedger().transitionedScopesOf(memberId)
-      .find(scopeKey => this.requireLedger().lastTransitionForMember(memberId, scopeKey)?.previousSessionId === transition.previousSessionId)
-    if (domainKey === undefined) return
+    const domainKey = DEFAULT_MEMBER_SCOPE_KEY
+    const transition = this.requireLedger().lastTransitionForMember(memberId, domainKey)
+    const binding = this.requireLedger().memberScopeSessionFor(memberId, domainKey)
+    if (transition === undefined || binding === undefined) return
     const live = this.handleFor(memberId, domainKey)
-    if (live !== undefined && live.agent.id !== member.sessionId) {
+    if (live !== undefined && live.agent.id !== binding.sessionId) {
       await this.retireMemberGeneration(memberId, domainKey, live, live.agent.id)
     }
     if (!this.ctx.workspaceRegistry.archivedSessionIds.includes(transition.previousSessionId)) {
       await this.ctx.workspaceRegistry.archiveSession(transition.previousSessionId)
     }
-    // Convergence stays in the domain the transition was recorded for. Falling
-    // back to the Member's own Session would leave the work the transition was
-    // about without a live generation while reporting the Member as running.
-    const binding = this.requireLedger().memberScopeSessionFor(memberId, domainKey)
-    if (binding === undefined) throw new Error(`Agent Member '${member.handle}' has no Session in work domain '${domainKey}' to finish its transition in`)
     if (this.handleFor(memberId, domainKey) === undefined) {
       await this.activateMember(member, binding, undefined, options?.knownSessions, options?.forkedFrom)
     }
@@ -4173,26 +4164,15 @@ export default class AgentTeam extends TypertRemoteService {
     if (this.handleFor(member.memberId, scopeKey) !== undefined) return
     let created: AgentHandle | undefined
     try {
-      // A Channel decides which messages a domain belongs to, never where the
-      // Member works: the domain runs in the Member's own Workspace, so a
-      // Session carrying the Member's directory can be attached at all. Binding
-      // it to the Channel's Workspace instead made every such start refuse the
-      // Session it had just created.
-      const workspaceId = scopeKey === DEFAULT_MEMBER_SCOPE_KEY
-        ? this.requireLedger().workspaceForMemberScope(member.memberId, scopeKey)
-        : member.workspaceId
+      // A Channel domain is rooted in the Channel's Workspace, not the Member's
+      // creation Workspace. Its captured directory set remains authoritative
+      // even when the first path is external; Session accounting is resolved
+      // separately from the cwd's owning Workspace.
+      const workspaceId = this.requireLedger().workspaceForMemberScope(member.memberId, scopeKey)
       if (workspaceId === undefined) throw new Error(`work domain '${scopeKey}' has no Workspace binding`)
       const workspace = this.requireWorkspace(workspaceId)
       const workspacePath = (scopeKey === DEFAULT_MEMBER_SCOPE_KEY ? knownWorkspacePath : undefined) ?? workspace.path
-      // The snapshot is the Member's own choice of directory, and it is kept —
-      // unless it names a different project, which is what an earlier binding
-      // left behind. A Session whose cwd resolves away from its Workspace
-      // cannot be attached at all, so such a snapshot is replaced by the
-      // Member's own Workspace root instead of breaking every start.
-      const snapshot = binding.workingDirectories
-      const insideWorkspace = snapshot !== undefined && workspacePath !== undefined
-        && snapshot.every(directory => directory === workspacePath || directory.startsWith(`${workspacePath}${sep}`))
-      const workingDirectories = insideWorkspace ? snapshot : (workspacePath === undefined ? undefined : [workspacePath])
+      const workingDirectories = binding.workingDirectories ?? (workspacePath === undefined ? undefined : [workspacePath])
       if (workingDirectories === undefined) throw new Error(`work domain '${scopeKey}' has no working-directory snapshot and its Workspace root is unavailable`)
       await this.validateWorkingDirectories(member, scopeKey, workingDirectories)
       const cwd = workingDirectories[0]!
@@ -4361,7 +4341,8 @@ export default class AgentTeam extends TypertRemoteService {
       // reflects so a later edit or retry compares against reality instead
       // of against this request's own history.
       this.memberRuntime.recordAppliedCapabilities(member.memberId, member.capabilities)
-      await workspace.attachSession(sessionId)
+      const sessionWorkspace = await this.ctx.workspaceRegistry.resolveByPath?.(cwd)
+      if (sessionWorkspace !== undefined) await sessionWorkspace.attachSession(sessionId)
       this.registerHandle(member.memberId, scopeKey, created)
 
       // A domain that came up clears its own failure; the Member-level slot no

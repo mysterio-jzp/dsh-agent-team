@@ -14,9 +14,9 @@ A stable identity authorized to read, speak, claim work, and receive Inbox hints
 
 A join/leave relation between a Member and a Workspace, committed as ledger operations — the same relation shape as Channel participation, one rung above it (Workspace participation → Channel participation, derived from Threads → Thread Attention). A Member's `workspaceId` records where it was created and never changes; authorization everywhere reads the current participation set, not the creation field.
 
-Joining grants collaboration immediately; it does not move or create the Member's default Session or change any already-bound work domain. The default Session lineage stays in the creation Workspace; a bound Thread domain uses its own captured directory root.
+Joining grants collaboration immediately; it does not move or create the Member's default Session or change any already-bound work domain. The default Session lineage stays in the creation Workspace; a bound Channel work domain resolves to the Channel's Workspace and uses its captured directory set.
 
-Joining does not create a default Session or offer cwd switching; collaboration in other participated Workspaces uses the same default Session unless a Thread has its own bound work domain. The Human Member participates in every Workspace.
+Joining does not create a default Session or offer cwd switching; the default Session stays in its creation Workspace. Channel work domains use the binding for that Channel. The Human Member participates in every Workspace.
 
 ## Human Member
 
@@ -24,7 +24,7 @@ The special Member corresponding to the current Harness user. It participates in
 
 ## Agent Member
 
-A Member created and managed by Team. Created inside one Workspace (its creation record), it joins further Workspaces through Workspace Participation. Its implicit default Session is rooted in its creation Workspace; each durable Thread work-domain binding owns a separate Session and captured directory set. Ordinary Sessions and forks do not gain membership automatically, and Member-level identity, capabilities, and private memory remain shared across domains.
+A Member created and managed by Team. Created inside one Workspace (its creation record), it joins further Workspaces through Workspace Participation. Its implicit default Session is rooted in its creation Workspace; each durable Channel work-domain binding owns a separate Session and captured directory set. Ordinary Sessions and forks do not gain membership automatically, and Member-level identity, capabilities, and private memory remain shared across domains.
 
 ## Member Capabilities
 
@@ -36,9 +36,9 @@ A project and shared working directory. The Agent Member's implicit default Sess
 
 ## Work Domain
 
-One Member-specific context bucket: the implicit `default` domain is `member.sessionId`; a durable non-default binding maps a Thread key to its own Session and snapshots the complete ordered absolute directory set.
+One Member-specific context bucket: the implicit `default` domain is `member.sessionId`; a durable non-default binding maps a Channel key to its own Session and snapshots the complete ordered absolute directory set.
 
-Channel defaults and Member×Channel overrides are configuration facts. The first successful binding captures the effective override, Channel default, or current Workspace root. Its first directory is the Session cwd, and later directories are declared only in that domain's instructions.
+Channel defaults and Member×Channel overrides are configuration facts. The first successful binding captures the effective override, Channel default, or the Channel Workspace root. Its first directory remains the Session cwd even when outside that Workspace. The Host accounts the Session only in a registered Workspace that owns that cwd; otherwise it remains Ungrouped. Later directories are declared only in that domain's instructions.
 
 Configuration edits do not move an existing binding or its later Session generations. Domains isolate context, not identity, authorization, tools, or private memory. Thread-first delivery routing is a separate runtime integration from this directory configuration.
 

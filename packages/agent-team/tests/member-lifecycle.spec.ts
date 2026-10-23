@@ -1,5 +1,5 @@
 import { changeBaseline, nextChange } from './helpers/change-stream.ts'
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve, basename, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -307,6 +307,10 @@ async function realHarness(
   ctx.provide('workspaceRegistry', {
     get: (id: WorkspaceId) => workspaces.get(id),
     list: () => [],
+    resolveByPath: async (path: string) => {
+      const canonicalPath = await realpath(path)
+      return [...workspaces.values()].find(workspace => workspace.path === canonicalPath)
+    },
     // The registry-global archive set the real registry exposes: the Host
     // reads it to decide whether a retired Session's archive effect is still
     // owed, so the fake has to report the same durable truth.
@@ -386,6 +390,38 @@ describe('Agent Team Member lifecycle', () => {
     expect(archived).toEqual([])
     expect(() => ctx.agentTeam.viewForAgent(agent, { workspaceId: otherId })).toThrow(/another Workspace/)
     ctx.agentTeam.validateLedger()
+  })
+
+  it('activates a joined-workspace Channel on its external working directory', async () => {
+    const adapter = new ScriptedAdapter()
+    adapter.enqueue(textResponse('Participation recorded.'))
+    const { ctx, workspaceId, root, workspaces } = await realHarness(adapter)
+    const otherId = WorkspaceId('workspace:joined-external')
+    const otherProject = join(root, 'other-project')
+    const externalDirectory = join(root, 'external-work')
+    await Promise.all([mkdir(otherProject), mkdir(externalDirectory)])
+    const attachSession = vi.fn(async () => {})
+    workspaces.set(otherId, { id: otherId, path: otherProject, attachSession })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('external-add'), workspaceId,
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+    const memberId = added.status.member.memberId
+    await ctx.agentTeam.joinWorkspace({ requestId: requestId('external-join'), workspaceId: otherId, memberId })
+    await ctx.agents.get(added.status.member.sessionId)!.whenIdle()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('external-channel'), workspaceId: otherId,
+      name: 'external work', description: '' })
+    await ctx.agentTeam.updateChannelWorkingDirectories({ requestId: requestId('external-directory'), workspaceId: otherId,
+      channelRef: channel.channel.channelRef, workingDirectories: [externalDirectory] })
+
+    await ctx.agentTeam.addChannelMember({ requestId: requestId('external-membership'), workspaceId: otherId,
+      channelRef: channel.channel.channelRef, memberId })
+
+    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channel.channel.channelRef))
+    expect(binding?.workingDirectories).toEqual([externalDirectory])
+    const channelAgent = binding === undefined ? undefined : ctx.agents.get(binding.sessionId)
+    expect(channelAgent).toBeDefined()
+    expect(channelAgent?.session.header.cwd).toBe(externalDirectory)
+    expect(ctx.agentTeam.workDomainForAgent(channelAgent!)?.workingDirectories).toEqual([externalDirectory])
+    expect(attachSession).not.toHaveBeenCalled()
   })
 
   it('opens the new Channel work domain for an initial Member as the Channel is created', async () => {
@@ -948,7 +984,8 @@ describe('Agent Team Member lifecycle', () => {
     const cleared = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear'), workspaceId, memberId: added.status.member.memberId })
     expect(cleared.status.presence).toBe('available')
     expect(cleared.status.member.sessionId).not.toBe(added.status.member.sessionId)
-    expect(archived).toContain(added.status.member.sessionId)
+    expect(archived).toEqual([added.status.member.sessionId])
+    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
     const renewed = ctx.agents.get(cleared.status.member.sessionId)!
     expect(renewed).not.toBe(live)
     expect(ctx.agentPresets.serviceFor(renewed, 'compaction')).toBeDefined()

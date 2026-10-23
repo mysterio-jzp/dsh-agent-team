@@ -5994,8 +5994,7 @@ export class AgentTeamLedger {
     if (scopeKey === DEFAULT_MEMBER_SCOPE_KEY) return member.workspaceId
     const { scopeKind, scopeRef } = parseMemberScopeKey(scopeKey)
     if (scopeKind !== 'channel' || scopeRef === undefined) return undefined
-    if (projection.channels.get(scopeRef as AgentTeamChannelRef) === undefined) return undefined
-    return member.workspaceId
+    return projection.channels.get(scopeRef as AgentTeamChannelRef)?.workspaceId
   }
 
   private effectiveWorkingDirectories(
