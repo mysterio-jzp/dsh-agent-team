@@ -1808,6 +1808,33 @@ describe('Agent Team Member lifecycle', () => {
     expect(request).not.toContain('Unread while suspended')
   })
 
+  it('keeps automatic recovery inside the Channel Agent domain', async () => {
+    vi.useFakeTimers()
+    try {
+      const adapter = new ScriptedAdapter()
+      const { ctx, workspaceId } = await realHarness(adapter)
+      const channel = await ctx.agentTeam.createChannel({ requestId: requestId('channel-recovery-route-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+      const builder = await ctx.agentTeam.addMember({ requestId: requestId('channel-recovery-route-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+      const memberId = builder.status.member.memberId
+      const defaultAgent = ctx.agents.get(builder.status.member.sessionId)!
+      const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channel.channel.channelRef))!
+      const channelAgent = ctx.agents.get(binding.sessionId)!
+      await Promise.all([defaultAgent.whenIdle(), channelAgent.whenIdle()])
+      const defaultSteer = vi.spyOn(defaultAgent, 'steer').mockImplementation(input => { defaultAgent.inbox.append('next-turn', input) })
+      const channelSteer = vi.spyOn(channelAgent, 'steer').mockImplementation(input => { channelAgent.inbox.append('next-turn', input) })
+
+      ctx.emit('agent/error', { agent: channelAgent, turn: 1, step: 1, error: new Error('fetch failed') })
+      await vi.advanceTimersByTimeAsync(RECOVERY_DELAY_MS)
+
+      expect(channelSteer).toHaveBeenCalledTimes(1)
+      expect(defaultSteer).not.toHaveBeenCalled()
+      expect(channelSteer.mock.calls[0]![0].source).toMatchObject({ kind: AGENT_TEAM_PLUGIN_ID, form: 'notice' })
+    } finally {
+      vi.restoreAllMocks()
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps the automatic recovery instruction with durable Inbox routing', async () => {
     vi.useFakeTimers()
     try {
@@ -1898,8 +1925,11 @@ describe('Agent Team Member lifecycle', () => {
     try {
       const adapter = new ScriptedAdapter()
       const { ctx, workspaceId } = await realHarness(adapter)
-      const builder = await ctx.agentTeam.addMember({ requestId: requestId('suspend-recovery-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-      const agent = ctx.agents.get(builder.status.member.sessionId)!
+      const channel = await ctx.agentTeam.createChannel({ requestId: requestId('suspend-recovery-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+      const builder = await ctx.agentTeam.addMember({ requestId: requestId('suspend-recovery-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+      const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(builder.status.member.memberId, channelMemberScopeKey(channel.channel.channelRef))!
+      const agent = ctx.agents.get(binding.sessionId)!
+      await agent.whenIdle()
 
       ctx.emit('agent/error', { agent, turn: 1, step: 1, error: new Error('fetch failed') })
       await ctx.agentTeam.suspendMember({ requestId: requestId('suspend-recovery'), memberId: builder.status.member.memberId })
@@ -1999,12 +2029,13 @@ describe('Agent Team Member lifecycle', () => {
     }
   })
 
-  it('reissues a durable hint when a failed Member starts recovery work', async () => {
+  it('reissues a durable hint when a failed Channel Agent starts recovery work', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('error-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('error-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(builder.status.member.memberId, channelMemberScopeKey(channel.channel.channelRef))!
+    const agent = ctx.agents.get(binding.sessionId)!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('error-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate error recovery' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('error-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
