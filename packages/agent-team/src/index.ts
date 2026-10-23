@@ -43,7 +43,7 @@ import { humanAvatarsRoot, readHumanAvatar, removeHumanAvatar, writeHumanAvatar 
 import { memberAvatarsRoot, readMemberAvatar, removeMemberAvatar, writeMemberAvatar } from './member-avatar.ts'
 import { createHumanUpdateChecker } from './human-update-check.ts'
 import { AgentTeamInvariantError } from './invariant.ts'
-import { createTeamContextManagement, TeamPressurePolicy, TEAM_CONTEXT_CODEC, TEAM_JUDGE_TIMEOUT_DEFAULT_MS, TEAM_PRESSURE_GATE_SCHEMA } from './context-continuity-host.ts'
+import { continuitySubjectId, createTeamContextManagement, TeamPressurePolicy, TEAM_CONTEXT_CODEC, TEAM_JUDGE_TIMEOUT_DEFAULT_MS, TEAM_PRESSURE_GATE_SCHEMA } from './context-continuity-host.ts'
 import { CONTEXT_CONTINUITY_PROJECTION_KEY, DEFAULT_GATE_IDLE_MS, DEFAULT_GATE_TOKENS, anchorCandidates, anchorRejection, readContextTimeline, retainedPrice, type ContextProjectionConfig, type ContextTimelineItem, type ContextTimelineSource, type PressureGate, type SurfaceMeasurement, type TransitionPlan } from '@contexera/dsh-context-continuity'
 import { TeamContextJudge, type TeamContextJudgeConfig } from './context-judge.ts'
 import { AGENT_TEAM_PLUGIN_ID, isAgentTeamSource } from './context-source.ts'
@@ -706,18 +706,17 @@ export default class AgentTeam extends TypertRemoteService {
       return member === undefined ? undefined : { member, scopeKey: live.scopeKey }
     },
     sessionForMemberScope: (memberId, scopeKey) => this.requireLedger().memberScopeSessionFor(memberId, scopeKey)?.sessionId,
-    scopesForMember: memberId => this.requireLedger().memberScopeSessions(memberId).map(binding => binding.scopeKey),
     memberForAgent: agent => this.memberForAgent(agent),
-    projectionForMember: (_memberId, sessionId) => {
-      const handle = this.surfaceOfSession(sessionId)?.handle
-      if (handle === undefined) return undefined
+    projectionForMember: (memberId, sessionId) => {
+      const live = this.surfaceOfSession(sessionId)
+      if (live === undefined || live.memberId !== memberId) return undefined
       // The engine's registered unit folds this Session's durable log (replay
       // on attach, then incrementally per committed event) and keys every ref
       // to the Session that recorded it; the registry materializes the cell
       // lazily, so a Member that has not folded yet is built on this read.
-      return this.ctx.sessionProjections.stateOf(handle.agent.session, CONTEXT_CONTINUITY_PROJECTION_KEY)
+      return this.ctx.sessionProjections.stateOf(live.handle.agent.session, CONTEXT_CONTINUITY_PROJECTION_KEY)
     },
-    executeTransition: (memberId, plan) => this.executeMemberTransition(memberId, plan),
+    executeTransition: (memberId, plan, scopeKey) => this.executeMemberTransition(memberId, plan, scopeKey),
     log: message => { this.ctx.logger.warn(`agent-team: ${message}`) },
   })
   /**
@@ -1095,7 +1094,10 @@ export default class AgentTeam extends TypertRemoteService {
         // Synchronous by necessity: this runs inside the status transition, so
         // it may only touch the surface that just changed, never start an
         // activation chain of its own.
-        if (!this.contextManagement.isTransitioning(member.memberId)) this.notifyMemberSurface(agent, { kind: 'running' })
+        const scopeKey = this.scopeKeyOfSession(agent.session.id)
+        if (scopeKey !== undefined && !this.contextManagement.isTransitioning(continuitySubjectId(member.memberId, scopeKey))) {
+          this.notifyMemberSurface(agent, { kind: 'running' })
+        }
       }
       // A turn that ends without an error closes any automatic recovery episode.
       // The idle transition is itself presence-affecting (working → available),
@@ -1144,7 +1146,13 @@ export default class AgentTeam extends TypertRemoteService {
       // Every renewable Member work domain (`default` and `channel:<ref>`)
       // forwards Session events to context continuity so checkpoint
       // continuations and rollover transitions run for that domain's Session.
-      if (this.renewsContextForAgent(live.handle.agent)) this.contextManagement.onSessionEvent(live.memberId, live.handle.agent, event)
+      if (this.renewsContextForAgent(live.handle.agent)) {
+        this.contextManagement.onSessionEvent(
+          continuitySubjectId(live.memberId, live.scopeKey),
+          live.handle.agent,
+          event,
+        )
+      }
     })
     const domain = await this.ctx.storageDomain.open(agentTeamDomainSpec)
     this.ctx.effect(() => async () => {
@@ -2198,7 +2206,7 @@ export default class AgentTeam extends TypertRemoteService {
    * is delivered after the handoff; the Team Inbox is rederived from the
    * ledger, never copied.
    */
-  private async executeMemberTransition(memberId: AgentTeamMemberId, plan: TransitionPlan): Promise<void> {
+  private async executeMemberTransition(memberId: AgentTeamMemberId, plan: TransitionPlan, expectedScopeKey?: AgentTeamMemberScopeKey): Promise<void> {
     await this.enqueueLifecycle(memberId, async () => {
       this.requireAccepting()
       const stored = this.requireLedger().getMember(memberId)
@@ -2207,7 +2215,9 @@ export default class AgentTeam extends TypertRemoteService {
       // Member-level default: a Session this Host does not run, or one whose
       // Member row no longer names it, is a design error and stops here.
       const domainKey = this.scopeKeyOfSession(plan.previousSessionId)
-      if (domainKey === undefined) throw new Error(`Agent Member '${stored.handle}' cannot roll over: Session '${plan.previousSessionId}' is not a running work domain of this Member`)
+      if (domainKey === undefined || (expectedScopeKey !== undefined && domainKey !== expectedScopeKey)) {
+        throw new Error(`Agent Member '${stored.handle}' cannot roll over: Session '${plan.previousSessionId}' is not a running work domain of this Member`)
+      }
       const currentBinding = this.requireLedger().memberScopeSessionFor(memberId, domainKey)
       if (currentBinding?.sessionId !== plan.previousSessionId) {
         throw new Error(`Agent Member '${stored.handle}' is no longer bound to the rolled-over Session`)
@@ -2253,7 +2263,8 @@ export default class AgentTeam extends TypertRemoteService {
       // non-Team candidate the old generation never answered. The process
       // capture only accelerates; it is unioned by message id, never allowed
       // to override the fold.
-      const preRetireCapture = this.contextManagement.drainCapturedInput(memberId)
+      const subjectId = continuitySubjectId(memberId, domainKey)
+      const preRetireCapture = this.contextManagement.drainCapturedInput(subjectId)
       await this.retireMemberGeneration(memberId, domainKey, active, plan.previousSessionId)
       const finalEvents = active.agent.session.ownEvents()
       const finalState = foldTeamContextProjection(
@@ -2265,7 +2276,7 @@ export default class AgentTeam extends TypertRemoteService {
       const carriedById = new Map(plan.carriedInput.map(message => [message.id, message]))
       for (const message of foldedCarried) carriedById.set(message.id, message)
       for (const message of preRetireCapture) if (!carriedById.has(message.id)) carriedById.set(message.id, message)
-      for (const message of this.contextManagement.drainCapturedInput(memberId)) if (!carriedById.has(message.id)) carriedById.set(message.id, message)
+      for (const message of this.contextManagement.drainCapturedInput(subjectId)) if (!carriedById.has(message.id)) carriedById.set(message.id, message)
       const carriedInput = [...carriedById.values()]
       // A fresh rollover seeds nothing and points the lineage parent at the
       // previous active Session; a checkpoint return seeds the resolved
@@ -3825,7 +3836,8 @@ export default class AgentTeam extends TypertRemoteService {
       && parseMemberScopeKey(scopeKey).scopeKind !== 'channel') {
       throw new Error(`context_rollover is not supported in work domain '${scopeKey}'; only the Member's own Session and a Channel domain start a new context`)
     }
-    if (this.contextManagement.isTransitioning(member.memberId)) throw new Error('a context rollover is already scheduled for this Member; wait for it to finish before requesting another')
+    const continuitySubject = continuitySubjectId(member.memberId, scopeKey ?? DEFAULT_MEMBER_SCOPE_KEY)
+    if (this.contextManagement.isTransitioning(continuitySubject)) throw new Error('a context rollover is already scheduled for this Member; wait for it to finish before requesting another')
     if (this.runningAgents.has(agent.id) !== true) {
       // The tool runs inside the Member's own turn, so a non-running agent at
       // this point is a harness anomaly; refuse rather than schedule a swap
@@ -4397,7 +4409,7 @@ export default class AgentTeam extends TypertRemoteService {
           { sessionId: created.agent.session.id, inheritedEventCount },
           this.contextProjectionHost,
         )
-        if (state.pending !== null) this.contextManagement.recoverPendingTransition(member.memberId, created.agent, sessionId)
+        if (state.pending !== null) this.contextManagement.recoverPendingTransition(continuitySubjectId(member.memberId, scopeKey), created.agent, sessionId)
         // A restart between one checkpoint's durable result and its quiet
         // follow-up delivery repairs exactly once; delivered continuations
         // stay delivered through the projection's own delivery record.

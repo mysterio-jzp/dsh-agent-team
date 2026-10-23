@@ -3085,6 +3085,90 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
+  it('completes a Channel rollover when a sibling Channel domain finishes a turn during the rollover idle wait', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const channelA = await ctx.agentTeam.createChannel({ requestId: requestId('race-channel-a'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const channelB = await ctx.agentTeam.createChannel({ requestId: requestId('race-channel-b'), workspaceId, name: 'release', description: 'Release work' })
+    const added = await ctx.agentTeam.addMember({
+      requestId: requestId('race-add'),
+      workspaceId,
+      handle: 'builder',
+      description: 'Builds the implementation',
+      presetId: 'team-member',
+      channelRefs: [channelA.channel.channelRef, channelB.channel.channelRef],
+    })
+    const memberId = added.status.member.memberId
+    const scopeKeyA = channelMemberScopeKey(channelA.channel.channelRef)
+    const scopeKeyB = channelMemberScopeKey(channelB.channel.channelRef)
+    const bindingA = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKeyA)!
+    const bindingB = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKeyB)!
+    const agentA = ctx.agents.get(bindingA.sessionId)!
+    const agentB = ctx.agents.get(bindingB.sessionId)!
+
+    // Hold Channel A's post-turn/end `whenIdle()` resolution until the same
+    // Member's sibling Channel B has completed a turn of its own.
+    const originalWhenIdleA = agentA.whenIdle.bind(agentA)
+    let releaseRolloverIdleA!: () => void
+    const rolloverIdleGateA = new Promise<void>(resolve => { releaseRolloverIdleA = resolve })
+    let gatedOnce = false
+    vi.spyOn(agentA, 'whenIdle').mockImplementation(async () => {
+      await originalWhenIdleA()
+      if (!gatedOnce) {
+        gatedOnce = true
+        await rolloverIdleGateA
+      }
+    })
+
+    // 1. Trigger `context_rollover` in Channel A; its turn ends and parks on
+    //    the gated `whenIdle()` promise.
+    adapter.enqueue(toolCallResponse('call-race-ro-1', 'context_rollover', {
+      handoff: 'First Channel A rollover handoff.',
+    }))
+    agentA.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over channel A first' }], source: { kind: 'user' } }))
+    await waitFor(() => agentA.session.ownEvents().some(event => event.type === 'turn/end') ? true : undefined)
+
+    // 2. While Channel A's rollover is waiting on `whenIdle()`, run and finish a
+    //    checkpoint + quiet continuation in the same Member's Channel B domain.
+    adapter.enqueue(toolCallResponse('call-race-cp-b', 'context_checkpoint', { name: 'channel B anchor' }))
+    adapter.enqueue(textResponse('channel B continued after checkpoint while channel A rollover waited for idle.'))
+    agentB.followup(createUserMessage({ content: [{ type: 'text', text: 'checkpoint in channel B' }], source: { kind: 'user' } }))
+    await waitFor(() => agentB.session.ownEvents().some(event => event.type === 'user/message' && isCheckpointContinuationMessage(event.data)) ? true : undefined)
+    await agentB.whenIdle()
+
+    // 3. Release Channel A's idle gate; Channel A's rollover must still complete
+    //    and must not leave Channel A's pending transition slot wedged.
+    adapter.enqueue(textResponse('resumed in first rolled-over Channel A generation.'))
+    releaseRolloverIdleA()
+
+    const firstRolledBindingA = await waitFor(() => {
+      const current = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKeyA)
+      return current !== undefined && current.sessionId !== bindingA.sessionId ? current : undefined
+    })
+    const firstNextAgentA = await waitFor(() => ctx.agents.get(firstRolledBindingA.sessionId))
+    await waitFor(() => firstNextAgentA.session.ownEvents().some(event => event.type === 'assistant/message') ? true : undefined)
+    await firstNextAgentA.whenIdle()
+
+    // 4. Request a second rollover in Channel A to prove the pending transition
+    //    slot for `(memberId, scopeKeyA)` was cleaned up properly.
+    adapter.enqueue(toolCallResponse('call-race-ro-2', 'context_rollover', {
+      handoff: 'Second Channel A rollover handoff.',
+    }))
+    adapter.enqueue(textResponse('resumed in second rolled-over Channel A generation.'))
+    firstNextAgentA.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over channel A second' }], source: { kind: 'user' } }))
+
+    const secondRolledBindingA = await waitFor(() => {
+      const current = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKeyA)
+      return current !== undefined && current.sessionId !== firstRolledBindingA.sessionId ? current : undefined
+    })
+    const secondNextAgentA = await waitFor(() => ctx.agents.get(secondRolledBindingA.sessionId))
+    await waitFor(() => secondNextAgentA.session.ownEvents().some(event => event.type === 'assistant/message') ? true : undefined)
+    await secondNextAgentA.whenIdle()
+
+    expect(secondNextAgentA.session.ownEvents().some(event => event.type === 'user/message' && isHandoffMessage(event.data))).toBe(true)
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
   it('records a checkpoint alongside sibling calls with results settling in model order', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
