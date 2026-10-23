@@ -16,7 +16,7 @@ Member 与 workspace 之间是可 join、可 leave 的关系。每次变动都�
 
 Member 的 `workspaceId` 只记录创建地、永不改变。一切授权只看当前参与集合，不看创建字段。加入带来协作能力，但不移动也不创建 Member 的默认 Session，也不改变任何已绑定工作域。
 
-默认 Session 血统留在创建 Workspace；已绑定 Thread 工作域使用自己快照的目录根。新增参与不创建默认 Session，也不提供 cwd 切换；除非 Thread 已绑定自己的工作域，否则 Member 在其他参与 Workspace 中协作仍使用同一个默认 Session。Human Member 参与每个 workspace。
+默认 Session 血统留在创建 Workspace；已绑定 Channel 工作域解析到该 Channel 所属 Workspace，并使用自己的目录快照。新增参与不创建默认 Session，也不提供 cwd 切换；Channel 工作域使用该 Channel 的绑定。Human Member 参与每个 workspace。
 
 ## Human Member
 
@@ -24,7 +24,7 @@ Member 的 `workspaceId` 只记录创建地、永不改变。一切授权只看�
 
 ## Agent Member
 
-由 Agent Team 创建和管理的 Member。Member 在某个 workspace 中创建。这个 workspace 就是 Member 创建记录所载之处，之后通过 Workspace Participation 加入更多 workspace。Member 的隐式 default Session 扎根于创建 workspace；每条持久 Thread 工作域绑定都有自己的 Session 与目录快照。普通 session 与 fork 不自动获得成员身份；不同域之间仍共享 Member identity、capabilities 和私有记忆。
+由 Agent Team 创建和管理的 Member。Member 在某个 workspace 中创建。这个 workspace 就是 Member 创建记录所载之处，之后通过 Workspace Participation 加入更多 workspace。Member 的隐式 default Session 扎根于创建 workspace；每条持久 Channel 工作域绑定都有自己的 Session 与目录快照。普通 session 与 fork 不自动获得成员身份；不同域之间仍共享 Member identity、capabilities 和私有记忆。
 
 ## Member Capabilities
 
@@ -36,9 +36,9 @@ Member 的 `workspaceId` 只记录创建地、永不改变。一切授权只看�
 
 ## Work Domain
 
-Member 自己的一个上下文桶：隐式 `default` 域就是 `member.sessionId`；每条非默认持久绑定都把 Thread key 映射到独立 Session，并快照完整、有序的绝对目录集。
+Member 自己的一个上下文桶：隐式 `default` 域就是 `member.sessionId`；每条非默认持久绑定都把 Channel key 映射到独立 Session，并快照完整、有序的绝对目录集。
 
-Channel 默认目录与 Member×Channel 覆盖是配置事实。首次成功绑定按 Member 覆盖、Channel 默认、当时 Workspace 根的顺序解析并固定有效集合。第一项是 Session cwd，后续项只写进该域自己的 instructions。
+Channel 默认目录与 Member×Channel 覆盖是配置事实。首次成功绑定按 Member 覆盖、Channel 默认、Channel 所属 Workspace 根的顺序解析并固定有效集合。第一项始终是 Session cwd，即使它位于 Workspace 之外。Host 只会把 Session 归入其 cwd 所属的已注册 Workspace；否则保持 Ungrouped。后续项只写进该域自己的 instructions。
 
 后续配置编辑不会移动已绑定域或它的 Session 代际。工作域隔离上下文，不隔离 identity、authorization、tools 或私有记忆。Thread 首次路由和按域投递属于另一个 runtime 集成，不是这里的目录配置。
 
