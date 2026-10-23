@@ -22,6 +22,15 @@ export function formatClaimState(state: AgentTeamClaim['state'], t: TeamConversa
   } as const)[state])
 }
 
+/**
+ * Status indicator for a Task Claim row: aligns the leading indicator with the
+ * trailing state label (`active` → ongoing spinner, `done` → green dot,
+ * `released` → quiet gray dot).
+ */
+export function claimStateDot(state: AgentTeamClaim['state']): TeamStateDotState {
+  return ({ active: 'ongoing', done: 'done', released: 'quiet' } as const)[state]
+}
+
 const RISK_CLASS_KEYS = {
   'session-refused': ['riskClassSessionRefused', 'riskSessionRefused'],
   'session-unreadable': ['riskClassSessionUnreadable', 'riskSessionUnreadable'],

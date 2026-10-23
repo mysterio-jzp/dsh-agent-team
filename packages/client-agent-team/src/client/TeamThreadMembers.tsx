@@ -8,6 +8,7 @@ import type {
 } from '@contexera/dsh-agent-team/types'
 import type { RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { TeamConversationProps } from './slots.ts'
+import { TeamAvatarStack } from './TeamAvatarStack.tsx'
 import { TeamMemberIdentity } from './TeamMemberRow.tsx'
 import { candidateStatus, memberReachabilityStatus } from './thread-member-status.ts'
 import css from './thread-members.module.css'
@@ -57,6 +58,10 @@ export function TeamThreadMembers({
   const snapshotReady = snapshotLoaded && snapshotError === undefined
   const currentMemberIds = new Set(threadMembers.map(member => member.memberId))
   const currentMembers = threadMembers.map(member => ({ member, status: membersById.get(member.memberId) }))
+  const triggerOwners = threadMembers.map(member => ({
+    memberId: member.memberId,
+    name: membersById.get(member.memberId)?.member.handle ?? member.memberId,
+  }))
   const memberName = (memberId: AgentTeamMemberId): string => {
     const handle = membersById.get(memberId)?.member.handle
     return handle === undefined ? t('memberUnknown') : `@${handle.replace(/^@/, '')}`
@@ -166,7 +171,9 @@ export function TeamThreadMembers({
 
   return <>
     <button ref={triggerRef} type="button" className={css.trigger} aria-haspopup="dialog" aria-expanded={open} onClick={openManager}>
-      <IconUserOutlineRegular size={15} aria-hidden="true" />
+      {snapshotReady && triggerOwners.length > 0
+        ? <TeamAvatarStack owners={triggerOwners} />
+        : <IconUserOutlineRegular size={15} aria-hidden="true" />}
       <span aria-live="polite">{snapshotReady
         ? t('threadMembersCount', { count: threadMembers.length })
         : snapshotLoading || snapshotError === undefined

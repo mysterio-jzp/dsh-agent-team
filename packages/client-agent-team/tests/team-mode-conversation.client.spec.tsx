@@ -74,6 +74,7 @@ describe('Team conversation surfaces', () => {
     expect(await b.view.findByRole('heading', { name: 'Task #1' })).toBeTruthy()
     fireEvent.click(b.view.getByRole('button', { name: /Claims/ }))
     expect(b.view.getByText('Implement API')).toBeTruthy()
+    expect(b.view.container.querySelector('[data-claim-state="active"]')).not.toBeNull()
     expect(b.view.queryByRole('button', { name: '关注 Thread' })).toBeNull()
     expect(b.view.queryByRole('button', { name: '取消关注' })).toBeNull()
     expect(b.view.queryByText('Human 观察')).toBeNull()
@@ -1658,6 +1659,110 @@ describe('Team conversation surfaces', () => {
     fireEvent.click(b.view.getByRole('button', { name: '发送' }))
     await waitFor(() => expect(b.sendMessage).toHaveBeenLastCalledWith(expect.objectContaining({ body: 'keep toggle', asTask: true })))
     await waitFor(() => expect(toggle().getAttribute('aria-pressed')).toBe('false'))
+    await b.runtime.dispose()
+  })
+
+  it('lists Channel members in a header dialog and jumps only via ready Channel-scoped session bindings across header and message refs', async () => {
+    const boundRef = 'member:6e8a5b10-df16-4ec0-943a-63738010953f'
+    const unboundRef = 'member:6e8a99aa-d55a-40a0-b931-9f5b563feeba'
+    const b = await runtimeWithTeam({
+      mode: 'team',
+      workspaceId: 'w1',
+      initialChannels: true,
+      seedChannelMemberIds: [boundRef, unboundRef],
+      seedThreadMembers: [{ memberId: boundRef, following: true }],
+      seededMessages: [{ body: `task title line citing ${boundRef} and ${unboundRef}`, occurredAt: '2026-08-21T09:00:00.000Z' }],
+    })
+    await b.runtime.sessions.add({ id: 'session:builder-eng', summary: { title: 'Builder #engineering', cwd: '/work/alpha' } })
+    b.members.mockImplementation(async () => ({
+      ok: true,
+      value: [
+        {
+          ...b.status(boundRef, 'w1', 'builder', 'available'),
+          channels: [
+            { channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', activity: 'normal', sessionId: 'session:builder-eng' },
+          ],
+        },
+        {
+          ...b.status(unboundRef, 'w1', 'worker', 'working'),
+          channels: [],
+        },
+      ],
+    } as never))
+    b.publishChannelUpdate()
+
+    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
+    expect(await b.view.findByRole('heading', { name: '# engineering' })).toBeTruthy()
+
+    const trigger = await b.view.findByRole('button', { name: /频道成员 · 2/ })
+    fireEvent.click(trigger)
+    const dialog = await within(document.body).findByRole('dialog', { name: '当前频道成员 (2)' })
+    expect(within(dialog).getByText('@builder')).toBeTruthy()
+    expect(within(dialog).getByText('@worker')).toBeTruthy()
+    expect(within(dialog).queryByText('@failed')).toBeNull()
+
+    // Unbound member row stays disabled and never falls back to member.sessionId.
+    const workerButton = within(dialog).getByRole('button', { name: /@worker/ }) as HTMLButtonElement
+    expect(workerButton.disabled).toBe(true)
+    fireEvent.click(workerButton)
+    expect(b.openSession).not.toHaveBeenCalled()
+    expect(b.runtime.ctx.teamNavigation.getSnapshot().memberSessionId).toBeUndefined()
+
+    // Ready channel-bound member row opens the channel-scoped session, not member.sessionId.
+    const builderButton = within(dialog).getByRole('button', { name: /@builder/ }) as HTMLButtonElement
+    expect(builderButton.disabled).toBe(false)
+    fireEvent.click(builderButton)
+    await waitFor(() => {
+      expect(b.runtime.ctx.teamNavigation.getSnapshot()).toMatchObject({
+        mode: 'team',
+        memberSessionId: 'session:builder-eng',
+      })
+    })
+    expect(b.openSession).toHaveBeenCalledWith('session:builder-eng')
+    expect(b.openSession).not.toHaveBeenCalledWith(`session:${boundRef}`)
+    expect(b.openSession).not.toHaveBeenCalledWith(`session:${unboundRef}`)
+
+    // Return to the Channel page and verify inline member: refs in the Channel message body.
+    b.runtime.ctx.teamNavigation.actions().exitMemberSession()
+    b.openSession.mockClear()
+    expect(await b.view.findByText('成员 · @worker')).toBeTruthy()
+    expect(b.view.queryByRole('button', { name: '成员 · @worker' })).toBeNull()
+    const channelBoundChip = await b.view.findByRole('button', { name: '成员 · @builder' })
+    fireEvent.click(channelBoundChip)
+    await waitFor(() => {
+      expect(b.runtime.ctx.teamNavigation.getSnapshot()).toMatchObject({
+        mode: 'team',
+        memberSessionId: 'session:builder-eng',
+      })
+    })
+    expect(b.openSession).toHaveBeenCalledWith('session:builder-eng')
+    expect(b.openSession).not.toHaveBeenCalledWith(`session:${boundRef}`)
+    expect(b.openSession).not.toHaveBeenCalledWith(`session:${unboundRef}`)
+
+    // Open the Thread page and verify both header order and inline member: refs in the Thread message body.
+    b.runtime.ctx.teamNavigation.actions().exitMemberSession()
+    b.openSession.mockClear()
+    fireEvent.click(await b.view.findByRole('button', { name: '打开 Task #1' }))
+    expect(await b.view.findByRole('heading', { name: /Task #1/ })).toBeTruthy()
+    const threadMembersTrigger = await b.view.findByRole('button', { name: /Thread 成员 · 1/ })
+    const closeTaskButton = b.view.getByRole('button', { name: '关闭任务' })
+    const acceptTaskButton = b.view.getByRole('button', { name: '验收' })
+    expect(threadMembersTrigger.compareDocumentPosition(closeTaskButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(closeTaskButton.compareDocumentPosition(acceptTaskButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    expect(await b.view.findByText('成员 · @worker')).toBeTruthy()
+    expect(b.view.queryByRole('button', { name: '成员 · @worker' })).toBeNull()
+    const threadBoundChip = await b.view.findByRole('button', { name: '成员 · @builder' })
+    fireEvent.click(threadBoundChip)
+    await waitFor(() => {
+      expect(b.runtime.ctx.teamNavigation.getSnapshot()).toMatchObject({
+        mode: 'team',
+        memberSessionId: 'session:builder-eng',
+      })
+    })
+    expect(b.openSession).toHaveBeenCalledWith('session:builder-eng')
+    expect(b.openSession).not.toHaveBeenCalledWith(`session:${boundRef}`)
+    expect(b.openSession).not.toHaveBeenCalledWith(`session:${unboundRef}`)
     await b.runtime.dispose()
   })
 })

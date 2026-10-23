@@ -46,9 +46,9 @@ export interface ResolvedMemberRef {
   readonly memberId: AgentTeamMemberId
   /** Bare handle without the `@`; the chip renders it. */
   readonly handle: string
-  /** Present for agent Members; absent for the Human (no session to open). */
+  /** Present when the Member holds a ready Session binding for the current Channel scope. */
   readonly sessionId?: SessionId
-  /** Only active agent Members open a session — mirrors the agent card rule. */
+  /** True only when an active agent Member has a ready Channel-scoped session to open. */
   readonly openable: boolean
   /**
    * The avatar reference this Member's own record carries, absent for the Human
@@ -308,7 +308,9 @@ export const rosterChannelName = (
 /**
  * Roster facts for one authored member ref, or undefined when nobody on the
  * roster answers to it — the caller keeps plain text. The Human resolves to
- * a handle with no session: informative, never a link.
+ * a handle with no session: informative, never a link. An Agent Member is
+ * openable only when active and holding a ready Session binding for the
+ * current Channel scope; it never falls back to the Member's default Session.
  */
 export const rosterMember = (
   members: readonly AgentTeamClientMemberStatus[],
@@ -322,20 +324,19 @@ export const rosterMember = (
   }
   const hit = uniqueByPrefix(members, status => status.member.memberId, memberRef)
   if (hit === undefined) return undefined
-  const openable = hit.availability === 'active'
+  const sessionId = hit.availability === 'active' ? memberSessionFor(hit, channelRef) : undefined
+  const openable = sessionId !== undefined
   return {
     memberId: hit.member.memberId,
     handle: hit.member.handle.replace(/^@/, ''),
-    ...(openable ? { sessionId: memberSessionFor(hit, channelRef) } : {}),
+    ...(sessionId === undefined ? {} : { sessionId }),
     openable,
     ...(hit.member.avatarRef === undefined ? {} : { avatarRef: hit.member.avatarRef }),
   }
 }
 
-function memberSessionFor(hit: AgentTeamClientMemberStatus, channelRef?: AgentTeamChannelRef): SessionId {
-  if (channelRef !== undefined) {
-    const row = hit.channels.find(candidate => candidate.channelRef === channelRef)
-    if (row?.state === 'ready' && row.sessionId !== undefined) return row.sessionId
-  }
-  return hit.member.sessionId
+function memberSessionFor(hit: AgentTeamClientMemberStatus, channelRef?: AgentTeamChannelRef): SessionId | undefined {
+  if (channelRef === undefined) return undefined
+  const row = hit.channels?.find(candidate => candidate.channelRef === channelRef)
+  return row?.state === 'ready' ? row.sessionId : undefined
 }

@@ -46,14 +46,17 @@ export function namedAvatarOwners(owners: readonly TeamAvatarOwner[], human: Tea
  */
 export function TeamAvatarStack({ owners, label, human }: {
   readonly owners: readonly TeamAvatarOwner[]
-  readonly label: string
+  readonly label?: string | undefined
   /** The reader's own identity; one owner matching it draws the Human's picture. */
   readonly human?: TeamAvatarHuman | undefined
 }) {
   if (owners.length === 0) return null
   const shown = owners.slice(0, MAX_VISIBLE)
   const overflow = owners.length - shown.length
-  return <span className={css.stack} role="img" aria-label={label}>
+  return <span
+    className={css.stack}
+    {...(label === undefined ? { 'aria-hidden': 'true' } : { role: 'img', 'aria-label': label })}
+  >
     {shown.map(owner => <OwnerAvatar key={owner.memberId} owner={owner} human={human} />)}
     {overflow > 0 && <span className={css.overflow}>{`+${overflow}`}</span>}
   </span>

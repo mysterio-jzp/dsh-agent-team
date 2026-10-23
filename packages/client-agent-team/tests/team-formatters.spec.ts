@@ -4,7 +4,7 @@ import { AGENT_TEAM_HUMAN_HANDLE } from '@contexera/dsh-agent-team/host'
 import { MENTION_BODY_FIXTURE } from '../../agent-team/tests/fixtures/mention-bodies.ts'
 import { zh } from '../src/client/locales.ts'
 import type { TeamConversationProps } from '../src/client/slots.ts'
-import { allMentionMembers, containsAllMention, containsMention, firstSentence, formatChannelRowReason, formatAbsoluteTime, formatActivity, formatClaimState, formatInboxTime, formatMessageTime, formatTaskStatus, HUMAN_HISTORIC_HANDLE, HUMAN_MEMBER_ID, isPlainTextBody, isSingleBrandedRef, mentionNamesOf, mentionsHuman, formatRiskClass, mentionedMemberIds, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, taskStatusDot } from '../src/client/team-formatters.ts'
+import { allMentionMembers, claimStateDot, containsAllMention, containsMention, firstSentence, formatChannelRowReason, formatAbsoluteTime, formatActivity, formatClaimState, formatInboxTime, formatMessageTime, formatTaskStatus, HUMAN_HISTORIC_HANDLE, HUMAN_MEMBER_ID, isPlainTextBody, isSingleBrandedRef, mentionNamesOf, mentionsHuman, formatRiskClass, mentionedMemberIds, planMessageBody, shouldClampMessage, splitBrandedRefs, splitMentionNames, taskStatusDot } from '../src/client/team-formatters.ts'
 
 const t = ((key: keyof typeof zh, params?: Record<string, string | number>) => {
   let value: string = zh[key]
@@ -379,6 +379,12 @@ describe('Team presentation formatters', () => {
     expect(taskStatusDot('in_review')).toBe('warning')
     expect(taskStatusDot('done')).toBe('done')
     expect(taskStatusDot('closed')).toBe('quiet')
+  })
+
+  it('maps every claim state to its matching status dot variant', () => {
+    expect(claimStateDot('active')).toBe('ongoing')
+    expect(claimStateDot('done')).toBe('done')
+    expect(claimStateDot('released')).toBe('quiet')
   })
 
   it('clamps bodies purely by their displayed character count', () => {
