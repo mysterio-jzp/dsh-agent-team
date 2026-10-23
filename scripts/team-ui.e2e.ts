@@ -27,6 +27,18 @@ const UI09_SHOTS = join(BROWSER_ARTIFACTS, 'ui-09')
 let scaffold: WebScaffold | undefined
 let browser: Browser | undefined
 
+function memberChannelSessionId(host: unknown, memberId: string, channelRef?: string): string {
+  const ledger = (host as {
+    ledger?: {
+      memberScopeSessions(memberId: string): readonly { scopeKind: string; scopeRef?: string; sessionId: string }[]
+    }
+  }).ledger
+  const binding = ledger?.memberScopeSessions(memberId).find(scope => scope.scopeKind === 'channel'
+    && (channelRef === undefined || scope.scopeRef === channelRef))
+  if (binding === undefined) throw new Error(`Member ${memberId} has no Channel Session binding`)
+  return binding.sessionId
+}
+
 afterEach(async () => {
   await browser?.close(); browser = undefined
   await scaffold?.close(); scaffold = undefined
@@ -746,105 +758,33 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   await page.keyboard.press('Escape')
   await expect.poll(() => page.locator('[role="menu"]').count()).toBe(0)
 
-  const memberWorkspace = scaffold.ctx.workspaceRegistry.list()[0]!
-  const memberStatuses = scaffold.ctx.agentTeam.members({ workspaceId: memberWorkspace.id })
-  const builderMember = memberStatuses.find((status: { member: { handle: string } }) => status.member.handle === 'builder')!
-  const builderAgent = scaffold.ctx.agents.get(builderMember.member.sessionId)!
-
-  // Fixture seam, not an assertion change: the adjacent Harness scaffold's
-  // fixture-less adapter reports route capacity on a top-level field the
-  // canonical LlmResolvedModelInfo shape never reads, so the Member's route
-  // would price as unknown and the pressure policy fail-closed would reject
-  // every pre-step. The canonical durable route record — the same
-  // `request/context` event a real first request appends — matches the
-  // Member's default selection and carries the route's real capacity, so
-  // the Host's persisted-route fast path prices the turn normally. The
-  // journey still proves a plain composer prompt lands on the Member's live
-  // Session below; nothing about the delivery assertion changes.
-  {
-    const selection = scaffold.ctx.agentDefaultModel.currentSelection()
-    builderAgent.session.append('request/context', {
-      provider: selection.provider,
-      model: selection.model,
-      contextWindow: 128_000,
-    })
-  }
-
-  // Clicking the Agent card keeps Team mode mounted and swaps only the right
-  // pane: the conversation shadow stands down so the shipped root renders the
-  // Member Session between the Team sidebars. A Member session has no human
-  // turns yet, so DSH renders its blank-session view — the hero composer
-  // carrying the Member's workspace + `team-member` preset chips.
-  // The Human's own session is staged first on purpose: the embedded view then
-  // carries a return target, so leaving Team later restores an ordinary
-  // conversation instead of stranding the Member Session.
+  // Agent identity only expands Channels; a Channel row is the Session entry point.
+  const agentChannelToggle = builderRow.getByRole('button', { name: '展开/收起 builder 的频道' })
+  expect(await builderRow.getByRole('button', { name: '打开 builder 的会话' }).count()).toBe(0)
   await brandButton.click()
-  // The two Member Sessions exist already; the brand click adds the Human's.
-  await expect.poll(() => scaffold.ctx.sessions.list().length).toBeGreaterThanOrEqual(3)
-  await builderRow.getByRole('button', { name: '打开 builder 的会话' }).click()
+  await agentChannelToggle.click()
+  const builderChannels = page.getByRole('list', { name: 'builder 的频道' })
+  await builderChannels.waitFor()
+  await builderChannels.getByRole('button', { name: 'delivery', exact: true }).click()
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.agentTeamMode ?? null)).toBe('team')
   await expect.poll(() => page.locator('[data-team-channel]').count()).toBe(0)
-  // rc.1: the shipped InputBar owns the composer entirely — the Team manages
-  // no member-session input surface, so the journey only asserts the shipped
-  // composer renders for the embedded Member Session.
-  const memberInput = page.locator('[data-composer-input][contenteditable="true"]')
-  await expect.poll(() => memberInput.count()).toBe(1)
-  await page.screenshot({ path: join(UI04_SHOTS, 'agent-session-composer.png'), fullPage: true })
-
-  // With clear-context retired there is no Human-initiated rollover in this
-  // journey: the embedded Member Session simply stays live for its current
-  // generation (model-driven context rollover and the Client follow are
-  // covered by the member-lifecycle integration tests and the Client
-  // component suite; the full model-driven browser journey lands with
-  // ticket 04). The pane keeps rendering the Member's live Session — blank
-  // hero, composer enabled, Team mode mounted.
-  await expect.poll(() => page.evaluate(() => ({
-    channel: document.querySelectorAll('[data-team-channel]').length,
-    mode: document.documentElement.dataset.agentTeamMode ?? null,
-  })), { timeout: 10_000 }).toEqual({ channel: 0, mode: 'team' })
-  await expect.poll(() => memberInput.isEnabled()).toBe(true)
-  await page.screenshot({ path: join(UI04_SHOTS, 'agent-session-live.png'), fullPage: true })
-  // Host side: the Member is still bound to its original Session id; no
-  // archive happened and no rollover operation exists.
-  const liveStatuses = scaffold.ctx.agentTeam.members({ workspaceId: memberWorkspace.id })
-  const liveBuilder = liveStatuses.find((status: { member: { handle: string } }) => status.member.handle === 'builder')!
-  expect(liveBuilder.member.sessionId).toBe(builderMember.member.sessionId)
-  expect(scaffold.ctx.workspaceRegistry.archivedSessionIds).not.toContain(builderMember.member.sessionId)
-
-  // The embedded Member Session is directly usable through the shipped
-  // composer: a plain prompt lands on the Member's live Session (the Team
-  // manages no member-session input surface, so no structured mention flow
-  // remains).
-  await memberInput.fill('member session hello')
-  await memberInput.press('Enter')
-  const isPlainMemberPrompt = (event: ReturnType<typeof builderAgent.session.snapshotEvents>[number]): boolean => event.type === 'user/message'
-    && event.data.source.kind === 'user'
-    && event.data.content.some(block => block.type === 'text' && block.text === 'member session hello')
-  await expect.poll(() => builderAgent.session.snapshotEvents().some(isPlainMemberPrompt)).toBe(true)
-  await builderAgent.whenIdle()
-  await expect.poll(() => page.locator('[class*="agentRow"]').count()).toBeGreaterThan(0)
-  // The single positioning highlight sits on the selected Agent card; the
-  // workspace overview row stays quiet while the Member view is open.
-  await expect.poll(() => teamCurrentPage.count()).toBe(1)
-  await expect.poll(() => teamCurrentPage.getAttribute('aria-label')).toBe('打开 builder 的会话')
+  const channelInput = page.locator('[data-composer-input][contenteditable="true"]')
+  await expect.poll(() => channelInput.count()).toBe(1)
+  await expect.poll(() => channelInput.isEnabled()).toBe(true)
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-channel-session-composer.png'), fullPage: true })
+  await expect.poll(() => builderRow.locator('[aria-current="page"]').count()).toBe(0)
   await expect.poll(() => page.getByRole('button', { name: '# delivery' }).count()).toBe(1)
-  await page.screenshot({ path: join(UI04_SHOTS, 'agent-session-dm.png'), fullPage: true })
-  // Opening the row menu on the selected card must show ONE seamless full-row
-  // fill: the leaf's resident fill is suppressed while the row paints its own.
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-channel-session-live.png'), fullPage: true })
   await builderRow.hover()
   await builderRow.getByRole('button', { name: 'builder 的操作' }).click()
   await page.getByRole('menuitem', { name: '编辑 Agent' }).waitFor()
-  await expect.poll(() => page.evaluate(() => {
-    const el = document.querySelector('[data-slot="sidebar.workspaces"] [aria-current="page"]')
-    return el === null ? 'missing' : getComputedStyle(el).backgroundColor
-  })).toBe('rgba(0, 0, 0, 0)')
-  await page.screenshot({ path: join(UI04_SHOTS, 'agent-session-dm-row-menu.png'), fullPage: true })
+  await expect.poll(() => builderRow.getAttribute('data-menu-open')).toBe('true')
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-channel-session-row-menu.png'), fullPage: true })
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 390, height: 844 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
-  await page.screenshot({ path: join(UI04_SHOTS, 'agent-session-dm-narrow.png'), fullPage: true })
+  await page.screenshot({ path: join(UI04_SHOTS, 'agent-channel-session-narrow.png'), fullPage: true })
   await page.setViewportSize({ width: 1440, height: 960 })
-  // Explicit Team navigation closes the embedded Member view again.
   await page.getByRole('button', { name: '# delivery' }).click()
   await page.getByRole('heading', { name: '# delivery' }).waitFor()
   await expect.poll(() => page.locator('[data-team-channel]').count()).toBe(1)
@@ -999,7 +939,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
     .reduce((latest: { revision: number } | undefined, thread: { revision: number }) => latest === undefined || thread.revision > latest.revision ? thread : latest, undefined)!
   for (const handle of ['builder', 'reviewer']) {
     const status = scaffold.ctx.agentTeam.members({ workspaceId: allWorkspace.id }).find((entry: { member: { handle: string } }) => entry.member.handle === handle)!
-    const reader = scaffold.ctx.agents.get(status.member.sessionId)!
+    const reader = scaffold.ctx.agents.get(memberChannelSessionId(scaffold.ctx.agentTeam, status.member.memberId))!
     await scaffold.ctx.agentTeam.readThreadForAgent(reader, {
       requestId: `m2-all-read-${handle}` as never, workspaceId: allWorkspace.id, threadRef: allThread.threadRef,
     })
@@ -1091,10 +1031,9 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
       seats: document.querySelectorAll('[data-team-channel] [data-card-time]').length,
     }
   })
-  // Every row shares one text column: the human's own Message reads on the same
-  // left edge as the Agents'.
+  // Every row shares one text column; sender-side metadata remains explicit.
   expect(channelColumns.columns.length).toBe(1)
-  expect(channelColumns.sides).toBe(0)
+  expect(channelColumns.sides).toBe(await channelRows.count())
   expect(channelColumns.cards).toBe(0)
   expect(channelColumns.seats).toBe(0)
   const feedRow = channelRows.filter({ hasText: '这是一条超长验收消息' }).first()
@@ -1202,8 +1141,8 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const statuses = scaffold.ctx.agentTeam.members({ workspaceId: workspace.id })
   const builder = statuses.find((status: { member: { handle: string } }) => status.member.handle === 'builder')!
   const reviewer = statuses.find((status: { member: { handle: string } }) => status.member.handle === 'reviewer')!
-  const agent = scaffold.ctx.agents.get(builder.member.sessionId)!
-  const reviewerAgent = scaffold.ctx.agents.get(reviewer.member.sessionId)!
+  const agent = scaffold.ctx.agents.get(memberChannelSessionId(scaffold.ctx.agentTeam, builder.member.memberId))!
+  const reviewerAgent = scaffold.ctx.agents.get(memberChannelSessionId(scaffold.ctx.agentTeam, reviewer.member.memberId))!
   expect(scaffold.ctx.agentTeam.inboxForAgent(agent, { workspaceId: workspace.id })).toMatchObject({
     totalUnreadCount: 1,
     totalDirectCount: 1,
@@ -2174,6 +2113,9 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   const archivedChannel = scaffold.ctx.agentTeam.view({ workspaceId: archiveWorkspace.id }).channels.find((channel: { name: string }) => channel.name === 'ramp')
   expect(archivedChannel).toBeUndefined()
 
+  const activeBuilder = scaffold.ctx.agentTeam.members({ workspaceId: archiveWorkspace.id })
+    .find((status: { member: { handle: string } }) => status.member.handle === 'builder')!
+  const archivedBuilderSessionId = memberChannelSessionId(scaffold.ctx.agentTeam, activeBuilder.member.memberId)
   const archiveableRow = page.locator('[class*="agentRow"]').filter({ hasText: 'builder' }).first()
   await archiveableRow.hover()
   await page.getByRole('button', { name: 'builder 的操作' }).click()
@@ -2189,7 +2131,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   expect(archivedBuilder.availability).toBe('archived')
   expect(archivedBuilder.member.state).toBe('archived')
   // The Session archival settles behind the Client wake; poll the registry.
-  await expect.poll(() => scaffold.ctx.workspaceRegistry.archivedSessionIds.includes(archivedBuilder.member.sessionId)).toBe(true)
+  await expect.poll(() => scaffold.ctx.workspaceRegistry.archivedSessionIds.includes(archivedBuilderSessionId)).toBe(true)
   // The archived Member's row menu and mention candidates are gone, and the
   // members modal roster no longer lists it.
   await page.getByRole('button', { name: '成员', exact: true }).click()
@@ -2330,7 +2272,7 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
   // builder is archived earlier in the journey; reviewer stays an active
   // delivery Member and drives the mention on the Human's behalf.
   const inboxReviewer = scaffold.ctx.agentTeam.members({ workspaceId: inboxWorkspace.id }).find((entry: { member: { handle: string } }) => entry.member.handle === 'reviewer')!
-  const inboxAgent = scaffold.ctx.agents.get(inboxReviewer.member.sessionId)!
+  const inboxAgent = scaffold.ctx.agents.get(memberChannelSessionId(scaffold.ctx.agentTeam, inboxReviewer.member.memberId, deliveryChannel.channelRef))!
   const inboxRead = await scaffold.ctx.agentTeam.readThreadForAgent(inboxAgent, {
     requestId: 'm2-09-builder-read' as never, workspaceId: inboxWorkspace.id, threadRef: inboxThreadRef as never,
   })
@@ -2758,16 +2700,16 @@ it('drives the complete opt-in Agent Team journey in real Web', async () => {
     .filter((membership: { channelRef: string }) => membership.channelRef === deliveryChannel.channelRef)
     .map((membership: { memberId: string }) => membership.memberId))
   const claimants = scaffold.ctx.agentTeam.members()
-    .filter((entry: { member: { memberId: string; state: string; sessionId: string } }) => entry.member.state === 'enabled'
+    .filter((entry: { member: { memberId: string; state: string } }) => entry.member.state === 'enabled'
       && channelMemberIds.has(entry.member.memberId)
-      && scaffold.ctx.agents.get(entry.member.sessionId as never) !== undefined)
+      && scaffold.ctx.agents.get(memberChannelSessionId(scaffold.ctx.agentTeam, entry.member.memberId, deliveryChannel.channelRef)) !== undefined)
     .slice(0, 3)
   // A Member of this Channel is live, so the Task has an owner to lead with rather
   // than falling back to `newestActor` — which is the branch the two rows above
   // already covered.
   expect(claimants.length).toBeGreaterThanOrEqual(1)
   for (const [index, entry] of claimants.entries()) {
-    const claimant = scaffold.ctx.agents.get(entry.member.sessionId as never)!
+    const claimant = scaffold.ctx.agents.get(memberChannelSessionId(scaffold.ctx.agentTeam, entry.member.memberId, deliveryChannel.channelRef))!
     // A Claim is a Thread write, so the claimant drains its own unread first —
     // the read that also hands back the revision the write is based on. The
     // Claim itself is what makes the claimant a follower.
@@ -3148,17 +3090,22 @@ it('keeps Human to-do answer targets out of subsequent ordinary messages in real
   await page.getByText('requester', { exact: true }).waitFor()
   const host = scaffold.ctx.agentTeam
   const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
-  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'requester')!.member
-  await expect.poll(() => scaffold!.ctx.agents.get(member.sessionId) !== undefined).toBe(true)
-  const agent = scaffold.ctx.agents.get(member.sessionId)!
-  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
-  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
   await page.getByRole('button', { name: '新建频道' }).click()
   const channelDialog = page.getByRole('dialog', { name: '新建频道' })
   await channelDialog.getByLabel('名称').fill('todo-repro')
   await channelDialog.getByLabel('说明').fill('回答和普通消息的边界')
+  await channelDialog.getByRole('button', { name: '初始成员' }).click()
+  await page.getByRole('menuitem', { name: /requester/ }).click()
   await channelDialog.getByRole('button', { name: '创建频道' }).click()
   const channelRef = host.view({ workspaceId }).channels.find((channel: { name: string }) => channel.name === 'todo-repro')!.channelRef
+  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'requester')!.member
+  const president = await host.setPresident({ requestId: 'todo-browser-president' as never, memberId: member.memberId })
+  if (president.president?.memberId !== member.memberId) throw new Error('President designation did not select the Member')
+  const sessionId = memberChannelSessionId(host, member.memberId)
+  await expect.poll(() => scaffold!.ctx.agents.get(sessionId) !== undefined).toBe(true)
+  const agent = scaffold.ctx.agents.get(sessionId)!
+  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
+  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
   const root = await host.sendMessageForAgent(agent, {
     requestId: 'todo-browser-root' as never, workspaceId, channelRef, asTask: true,
     body: '确认发布顺序', recipients: [host.status().humanMemberId],
@@ -3304,17 +3251,22 @@ it('keeps the fact under the reader still and never remounts the conversation ac
   await page.getByText('riskagent', { exact: true }).waitFor()
   const host = scaffold.ctx.agentTeam
   const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
-  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'riskagent')!.member
-  await expect.poll(() => scaffold!.ctx.agents.get(member.sessionId) !== undefined).toBe(true)
-  const agent = scaffold.ctx.agents.get(member.sessionId)!
-  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
-  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
   await page.getByRole('button', { name: '新建频道' }).click()
   const channelDialog = page.getByRole('dialog', { name: '新建频道' })
   await channelDialog.getByLabel('名称').fill('risk-repro')
   await channelDialog.getByLabel('说明').fill('运行风险横幅')
+  await channelDialog.getByRole('button', { name: '初始成员' }).click()
+  await page.getByRole('menuitem', { name: /riskagent/ }).click()
   await channelDialog.getByRole('button', { name: '创建频道' }).click()
   const channelRef = host.view({ workspaceId }).channels.find((channel: { name: string }) => channel.name === 'risk-repro')!.channelRef
+  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'riskagent')!.member
+  const president = await host.setPresident({ requestId: 'risk-browser-president' as never, memberId: member.memberId })
+  if (president.president?.memberId !== member.memberId) throw new Error('President designation did not select the Member')
+  const sessionId = memberChannelSessionId(host, member.memberId)
+  await expect.poll(() => scaffold!.ctx.agents.get(sessionId) !== undefined).toBe(true)
+  const agent = scaffold.ctx.agents.get(sessionId)!
+  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
+  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
   // A Task Thread with an active Claim: the banner lists exactly this shape.
   const root = await host.sendMessageForAgent(agent, {
     requestId: 'risk-browser-root' as never, workspaceId, channelRef, asTask: true,
@@ -3488,17 +3440,20 @@ it('keeps the reading place when the discussion returns from the Human to-do boa
   await page.getByText('roundtripagent', { exact: true }).waitFor()
   const host = scaffold.ctx.agentTeam
   const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
-  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'roundtripagent')!.member
-  await expect.poll(() => scaffold!.ctx.agents.get(member.sessionId) !== undefined).toBe(true)
-  const agent = scaffold.ctx.agents.get(member.sessionId)!
-  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
-  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
   await page.getByRole('button', { name: '新建频道' }).click()
   const channelDialog = page.getByRole('dialog', { name: '新建频道' })
   await channelDialog.getByLabel('名称').fill('roundtrip-repro')
   await channelDialog.getByLabel('说明').fill('切页签往返')
+  await channelDialog.getByRole('button', { name: '初始成员' }).click()
+  await page.getByRole('menuitem', { name: /roundtripagent/ }).click()
   await channelDialog.getByRole('button', { name: '创建频道' }).click()
   const channelRef = host.view({ workspaceId }).channels.find((channel: { name: string }) => channel.name === 'roundtrip-repro')!.channelRef
+  const member = host.members({ workspaceId }).find((entry: { member: { handle: string } }) => entry.member.handle === 'roundtripagent')!.member
+  const sessionId = memberChannelSessionId(host, member.memberId)
+  await expect.poll(() => scaffold!.ctx.agents.get(sessionId) !== undefined).toBe(true)
+  const agent = scaffold.ctx.agents.get(sessionId)!
+  const selection = scaffold.ctx.agentDefaultModel.currentSelection()
+  agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
   const root = await host.sendMessageForAgent(agent, {
     requestId: 'roundtrip-browser-root' as never, workspaceId, channelRef,
     body: 'ROUNDTRIP-ROOT-MARKER 切页签往返的历史', recipients: [],
@@ -3623,6 +3578,16 @@ it('keeps Thread member and composer state text readable in both themes', async 
     await page.getByText(handle, { exact: true }).waitFor({ timeout: 20_000 })
   }
 
+  await page.getByRole('button', { name: '新建频道' }).click()
+  const channelDialog = page.getByRole('dialog', { name: '新建频道' })
+  await channelDialog.getByLabel('名称').fill('contrast-fixtures')
+  await channelDialog.getByLabel('说明').fill('为成员提供独立频道会话')
+  await channelDialog.getByRole('button', { name: '初始成员' }).click()
+  for (const handle of ['writer', 'reviewer', 'editor', 'observer']) {
+    await page.getByRole('menuitem', { name: new RegExp(handle) }).click()
+  }
+  await channelDialog.getByRole('button', { name: '创建频道' }).click()
+
   const workspaceId = scaffold.ctx.workspaceRegistry.list()[0]!.id
   // Same fixture seam the main journey applies, and for the same reason: the
   // scaffold's fixture-less adapter reports route capacity on a field the
@@ -3630,19 +3595,21 @@ it('keeps Thread member and composer state text readable in both themes', async 
   // pressure policy would fail closed. The durable `request/context` record a
   // real first request appends is staged instead; nothing asserted here changes.
   {
-    // The session behind each roster row starts asynchronously, so the route is
+    // The Channel Session behind each roster row starts asynchronously, so the route is
     // staged only once every Member is resolvable: a wake that reaches a session
     // without a priced route fails the pressure policy closed.
     for (const handle of ['writer', 'reviewer', 'editor', 'observer']) {
       await expect.poll(() => {
         const status = scaffold!.ctx.agentTeam.members({ workspaceId })
           .find((entry: { member: { handle: string } }) => entry.member.handle === handle)!
-        return scaffold!.ctx.agents.get(status.member.sessionId) !== undefined
+        const sessionId = memberChannelSessionId(scaffold!.ctx.agentTeam, status.member.memberId)
+        return scaffold!.ctx.agents.get(sessionId) !== undefined
       }, { timeout: 30_000 }).toBe(true)
     }
     const selection = scaffold.ctx.agentDefaultModel.currentSelection()
     for (const status of scaffold.ctx.agentTeam.members({ workspaceId })) {
-      scaffold.ctx.agents.get(status.member.sessionId)?.session.append('request/context', {
+      const sessionId = memberChannelSessionId(scaffold.ctx.agentTeam, status.member.memberId)
+      scaffold.ctx.agents.get(sessionId)?.session.append('request/context', {
         provider: selection.provider,
         model: selection.model,
         contextWindow: 128_000,
@@ -3653,11 +3620,20 @@ it('keeps Thread member and composer state text readable in both themes', async 
   const agentOf = (handle: string) => {
     const entry = scaffold!.ctx.agentTeam.members({ workspaceId })
       .find((status: { member: { handle: string } }) => status.member.handle === handle)!
-    return scaffold!.ctx.agents.get(entry.member.sessionId)
+    return scaffold!.ctx.agents.get(memberChannelSessionId(scaffold!.ctx.agentTeam, entry.member.memberId))
   }
-  // A Claim is a Thread write, so the claimant drains its own unread first; the
-  // read is also where the revision the write is based on comes from.
+  const designatePresident = async (handle: string, id: string) => {
+    const member = scaffold!.ctx.agentTeam.members({ workspaceId })
+      .find((status: { member: { handle: string } }) => status.member.handle === handle)!.member
+    const current = scaffold!.ctx.agentTeam.president()
+    if (current.kind === 'single' && current.memberId === member.memberId) return
+    const result = await scaffold!.ctx.agentTeam.setPresident({ requestId: id as never, memberId: member.memberId })
+    if (result.president?.memberId !== member.memberId) throw new Error(`President designation failed for @${handle}`)
+  }
+  // A Claim is a Thread write, so the claimant drains its own read first. Only
+  // the current President may create it.
   const claim = async (handle: string, taskRef: string, label: string) => {
+    await designatePresident(handle, `contrast-${label}-president`)
     const agent = agentOf(handle)
     const read = await scaffold!.ctx.agentTeam.readThreadForAgent(agent, {
       requestId: `contrast-${label}-read` as never, workspaceId, taskRef,
@@ -3703,6 +3679,7 @@ it('keeps Thread member and composer state text readable in both themes', async 
       .find(channel => channel.name === channelName)!.channelRef
     // The owner is seeded through Host facts so the roster has a real follower;
     // the other three stay candidates until the reader invites them.
+    await designatePresident('writer', `contrast-${scheme}-root-president`)
     const sent = await scaffold!.ctx.agentTeam.sendMessageForAgent(agentOf('writer'), {
       requestId: `contrast-${scheme}-root` as never, workspaceId, channelRef,
       asTask: true, body: '可读性校验根消息', recipients: [humanMemberId],

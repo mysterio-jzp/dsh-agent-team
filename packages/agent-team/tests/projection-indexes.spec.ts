@@ -11,6 +11,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import { AGENT_TEAM_HUMAN_MEMBER_ID, AgentTeamLedger, agentTeamHumanActor } from '../src/ledger.ts'
+import { channelMemberScopeKey, memberScopeSession } from '../src/member-scope.ts'
 import { agentTeamDomainSpec } from '../src/spec.ts'
 import type { AgentTeamChannelRef, AgentTeamClaimRef, AgentTeamMemberActor, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId, AgentTeamTaskRef, AgentTeamThreadRef } from '../src/types.ts'
 
@@ -317,25 +318,30 @@ describe('large-ledger projection equivalence (issue #21)', () => {
     await ledger.addMember({
       requestId: requestId('lineage-member'), workspaceId: alpha, handle: 'lineage', description: 'Lineage member', presetId: 'team-member',
       channelRefs: [channel.channelRef], actor: human,
-      member: { memberId, sessionId: session('0'), workspaceId: alpha, handle: 'lineage', description: 'Lineage member', presetId: 'team-member', privateMemoryPath: '/tmp/lineage', state: 'enabled' },
+      member: { memberId, workspaceId: alpha, handle: 'lineage', description: 'Lineage member', presetId: 'team-member', privateMemoryPath: '/tmp/lineage', state: 'enabled' },
     })
-    // A Member that never moved has left no Session behind.
+    const scopeKey = channelMemberScopeKey(channel.channelRef)
+    await ledger.bindMemberScopeSession({ requestId: requestId('lineage-bind'), workspaceId: alpha, workspaceRoot: process.cwd(), memberId,
+      binding: memberScopeSession(scopeKey, session('0'), [process.cwd()]), actor: human })
+    // A Member that has only been bound once has no transition history.
+    expect(ledger.previousSessionForMember(memberId, scopeKey)).toBeUndefined()
     expect(ledger.previousSessionForMember(memberId)).toBeUndefined()
 
     // Human renewal, then a Member's own rollover, then another renewal: both
-    // writers feed the same index.
-    await ledger.renewMemberSession({ requestId: requestId('lineage-renew-1'), workspaceId: alpha, memberId, sessionId: session('1'), actor: human })
-    await ledger.rolloverMemberSession({ requestId: requestId('lineage-rollover'), workspaceId: alpha, memberId, actor: memberActor(memberId, 'lineage'),
+    // writers feed this Channel domain's index.
+    await ledger.renewMemberSession({ requestId: requestId('lineage-renew-1'), workspaceId: alpha, memberId, scopeKey, sessionId: session('1'), actor: human })
+    await ledger.rolloverMemberSession({ requestId: requestId('lineage-rollover'), workspaceId: alpha, memberId, scopeKey, actor: memberActor(memberId, 'lineage'),
       previousSessionId: session('1'), newSessionId: session('2'), handoffEventSeq: 7 as never, trigger: 'model' })
-    await ledger.renewMemberSession({ requestId: requestId('lineage-renew-2'), workspaceId: alpha, memberId, sessionId: session('3'), actor: human })
+    await ledger.renewMemberSession({ requestId: requestId('lineage-renew-2'), workspaceId: alpha, memberId, scopeKey, sessionId: session('3'), actor: human })
 
-    expect(ledger.previousSessionForMember(memberId)).toBe(session('2'))
-    expect(ledger.lastTransitionForMember(memberId)).toEqual({ previousSessionId: session('2'), targetSessionId: session('3') })
+    expect(ledger.previousSessionForMember(memberId, scopeKey)).toBe(session('2'))
+    expect(ledger.lastTransitionForMember(memberId, scopeKey)).toEqual({ previousSessionId: session('2'), targetSessionId: session('3') })
+    expect(ledger.previousSessionForMember(memberId)).toBeUndefined()
 
     // Independent replay over the same table rebuilds the identical index.
     expect(() => ledger.validate()).not.toThrow()
     const fresh = new AgentTeamLedger(table)
-    expect(fresh.previousSessionForMember(memberId)).toBe(session('2'))
+    expect(fresh.previousSessionForMember(memberId, scopeKey)).toBe(session('2'))
     // An unknown Member owns nothing rather than failing the read.
     expect(fresh.previousSessionForMember('member:unknown' as AgentTeamMemberId)).toBeUndefined()
   })

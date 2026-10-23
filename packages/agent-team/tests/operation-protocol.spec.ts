@@ -91,9 +91,12 @@ const emptyInbox: AgentTeamInboxDelta = {
   directMarkers: { added: [], removed: [] },
   activityMarkers: { added: [], removed: [] },
 }
-const fixtureMember: AgentTeamAgentMember = {
+const protocolOriginalSessionId = SessionId('session:protocol')
+const protocolNextSessionId = SessionId('session:protocol-next')
+type LegacyFixtureMember = AgentTeamAgentMember & { readonly sessionId: SessionId }
+const fixtureMember: LegacyFixtureMember = {
   memberId,
-  sessionId: SessionId('session:protocol'),
+  sessionId: protocolOriginalSessionId,
   workspaceId: alpha,
   handle: memberHandle,
   description: 'Protocol fixture Agent',
@@ -197,7 +200,7 @@ const memberSessionRenewed: Op<'team/member-session-renewed'> = {
   ...opBase('operation:protocol-09', 'request:protocol-member-session-renewed', 9),
   previousOperationId,
   kind: 'team/member-session-renewed',
-  data: { member: { ...fixtureMember, sessionId: SessionId('session:protocol-next') }, previousSessionId: SessionId('session:protocol') },
+  data: { member: { ...fixtureMember, sessionId: protocolNextSessionId }, previousSessionId: protocolOriginalSessionId },
 }
 
 const memberScopeSessionBound: Op<'team/member-scope-session-bound'> = {
@@ -789,9 +792,9 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
           actor: human,
           workspaceId: alpha,
           memberId,
-          sessionId: memberSessionRenewed.data.member.sessionId,
+          sessionId: protocolNextSessionId,
         })
-        expect(out.value.member.sessionId, 'the renew mapper answers with the stored Session move').toBe(memberSessionRenewed.data.member.sessionId)
+        expect(out.value.member.sessionId, 'the renew mapper answers with the stored Session move').toBe(protocolNextSessionId)
         return out
       },
       changed: () => ledger.renewMemberSession({
@@ -842,11 +845,11 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
           workspaceId: alpha,
           memberId,
           previousSessionId: memberSessionRolledOver.data.previousSessionId,
-          newSessionId: memberSessionRolledOver.data.member.sessionId,
+          newSessionId: protocolNextSessionId,
           handoffEventSeq: memberSessionRolledOver.data.handoffEventSeq,
           trigger: memberSessionRolledOver.data.trigger,
         })
-        expect(out.value.member.sessionId, 'the rollover mapper answers with the stored Session move').toBe(memberSessionRolledOver.data.member.sessionId)
+        expect(out.value.member.sessionId, 'the rollover mapper answers with the stored Session move').toBe(protocolNextSessionId)
         return out
       },
       changed: () => ledger.rolloverMemberSession({
@@ -855,7 +858,7 @@ const protocol: Record<AgentTeamOperation['kind'], ProtocolRow> = {
         workspaceId: alpha,
         memberId,
         previousSessionId: memberSessionRolledOver.data.previousSessionId,
-        newSessionId: memberSessionRolledOver.data.member.sessionId,
+        newSessionId: protocolNextSessionId,
         handoffEventSeq: SessionSeq(8),
         trigger: memberSessionRolledOver.data.trigger,
       }),

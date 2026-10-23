@@ -68,7 +68,7 @@ Member 持有无法在切换中存活的 jobs 时，rollover 会被拒绝：任�
 
 ## `context_checkpoint`
 
-`context_checkpoint` 为调用的 Member 记录一个命名的当前上下文 checkpoint。与 `context_rollover` 一样，工具体不做 lifecycle 副作用。durable checkpoint 就是 Session projection 折叠的成功 `tool/call`+`tool/result` 对。返回的 ref 由 Member Session 身份加 tool call id 确定性派生。模型可以在结果存在前引用。跨代重复的 provider call id 也不会碰撞。checkpoint 在所属 turn 结束时 resolve。模型把它作为一个完整工作单元的最后动作来记录。turn 结束后，Host 调度一条 quiet continuation message，让 Member 朝记录的锚点继续工作。投递跨重启恰好一次。projection 的 delivery record 是 durable 的，已送达 continuation 的 checkpoint 不会被重新调度。
+`context_checkpoint` 为调用的 Member 记录一个命名的当前上下文 checkpoint。与 `context_rollover` 一样，工具体不做 lifecycle 副作用。durable checkpoint 就是 Session projection 折叠的成功 `tool/call`+`tool/result` 对。返回的 ref 由调用的 Channel Session 身份加 tool call id 确定性派生。模型可以在结果存在前引用。跨代重复的 provider call id 也不会碰撞。checkpoint 在所属 turn 结束时 resolve。模型把它作为一个完整工作单元的最后动作来记录。turn 结束后，Host 调度一条 quiet continuation message，让 Member 朝记录的锚点继续工作。投递跨重启恰好一次。projection 的 delivery record 是 durable 的，已送达 continuation 的 checkpoint 不会被重新调度。
 
 ## `context_status`
 

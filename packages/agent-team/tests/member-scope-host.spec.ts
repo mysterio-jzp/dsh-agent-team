@@ -66,23 +66,31 @@ async function harness(): Promise<{ readonly ctx: Context }> {
 
 interface TestMember {
   readonly memberId: AgentTeamMemberId
-  readonly sessionId: SessionId
+  readonly channelSessionId: SessionId
+  readonly channelScopeKey: AgentTeamMemberScopeKey
   readonly actor: AgentTeamMemberActor
 }
 
-/** One enabled Member in the channel, added through the live ledger so the Host carries it. */
-async function addMember(ctx: Context, channelRef: AgentTeamChannelRef, handle: string): Promise<TestMember> {
+/** One enabled Member with one explicitly bound Channel Session. */
+async function addMember(ctx: Context, channelRef: AgentTeamChannelRef, handle: string, options: { readonly bindDomain?: boolean } = {}): Promise<TestMember> {
   const memberId = `member:${handle}` as AgentTeamMemberId
-  const sessionId = SessionId(`session:${handle}`)
+  const channelSessionId = SessionId(`session:${handle}`)
+  const channelScopeKey = channelMemberScopeKey(channelRef)
   await ctx.agentTeam['ledger']!.addMember({
     requestId: requestId(`ledger-member-${handle}`), workspaceId: alpha, handle, description: 'Peer', presetId: 'team-member',
     channelRefs: [channelRef], actor: agentTeamHumanActor(),
     member: {
-      memberId, sessionId, workspaceId: alpha, handle, description: 'Peer',
+      memberId, workspaceId: alpha, handle, description: 'Peer',
       presetId: 'team-member', privateMemoryPath: `/tmp/${handle}`, state: 'enabled' as const,
     },
   })
-  return { memberId, sessionId, actor: Object.freeze({ kind: 'member', memberId, handle }) }
+  if (options.bindDomain !== false) {
+    await ctx.agentTeam['ledger']!.bindMemberScopeSession({
+      requestId: requestId(`bind-channel-${handle}`), workspaceId: alpha, workspaceRoot: cwd, memberId,
+      binding: memberScopeSession(channelScopeKey, channelSessionId), actor: agentTeamHumanActor(),
+    })
+  }
+  return { memberId, channelSessionId, channelScopeKey, actor: Object.freeze({ kind: 'member', memberId, handle }) }
 }
 
 /**
@@ -129,45 +137,27 @@ async function channelWithThread(ctx: Context): Promise<{ readonly channelRef: A
 }
 
 describe('one Message, one work domain', () => {
-  it('claims the acting domain\'s declarations, and the default domain\'s when no Session is named', async () => {
+  it('claims declarations only from the acting Channel Session', async () => {
     const { ctx } = await harness()
-    const { channelRef, threadRef } = await channelWithThread(ctx)
+    const { channelRef } = await channelWithThread(ctx)
     const member = await addMember(ctx, channelRef, 'reader')
-    const scopeKey = channelMemberScopeKey(channelRef)
-    // The discussion is a real domain: bound in the ledger for its first delivery.
-    const discussionSessionId = SessionId('session:reader-discussion')
-    await ctx.agentTeam['ledger']!.bindMemberScopeSession({
-      requestId: requestId('bind-discussion'), workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
-      binding: memberScopeSession(scopeKey, discussionSessionId), actor: agentTeamHumanActor(),
+    const session = declaringSession(ctx, member.channelSessionId, 'docs/channel.md')
+    const agent = liveAgent(session)
+    registerDomains(ctx, member.memberId, [[member.channelScopeKey, agent]])
+
+    const sent = await ctx.agentTeam.sendMessageForAgent(agent, {
+      requestId: requestId('channel-message'), workspaceId: alpha, channelRef, body: 'The Channel report',
     })
+    if (sent.kind !== 'committed') throw new Error(`expected a committed Message, received ${sent.kind}`)
+    expect(sent.message.artifacts).toEqual([artifact(member.channelSessionId, `${cwd}/docs/channel.md`, 'the docs/channel.md')])
 
-    // Two domains, each with its own declaration: which one the Message carries
-    // is the whole reading.
-    const ownSession = declaringSession(ctx, member.sessionId, 'docs/own.md')
-    const discussionSession = declaringSession(ctx, discussionSessionId, 'docs/discussion.md')
-    const ownAgent = liveAgent(ownSession)
-    const discussionAgent = liveAgent(discussionSession)
-    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, ownAgent], [scopeKey, discussionAgent]])
-
-    // Sent from the discussion: the Message carries the discussion's file, never
-    // the Member's own domain's file.
-    const fromDiscussion = await ctx.agentTeam.sendMessageForAgent(discussionAgent, {
-      requestId: requestId('discussion-message'), workspaceId: alpha, channelRef, body: 'The discussion report',
-    })
-    if (fromDiscussion.kind !== 'committed') throw new Error(`expected a committed Message, received ${fromDiscussion.kind}`)
-    expect(fromDiscussion.message.artifacts).toEqual([artifact(discussionSessionId, `${cwd}/docs/discussion.md`, 'the docs/discussion.md')])
-
-    // No Session named: the Member's own domain answers, exactly as it did when
-    // a Member held one Session.
+    // A Session-less caller cannot fall back to a Member-wide default Session.
     const unnamed = await ctx.agentTeam['sendMessageAs'](member.actor, {
       requestId: requestId('unnamed-message'), workspaceId: alpha, channelRef, body: 'No Session named',
     })
     if (unnamed.kind !== 'committed') throw new Error(`expected a committed Message, received ${unnamed.kind}`)
-    expect(unnamed.message.artifacts).toEqual([artifact(member.sessionId, `${cwd}/docs/own.md`, 'the docs/own.md')])
-
-    // Each domain spent its own declaration: neither Message consumed the other's.
-    expect(ctx.agentTeam['claimedDeliveries'].get(member.sessionId)?.callIds.has(`call:${member.sessionId}`)).toBe(true)
-    expect(ctx.agentTeam['claimedDeliveries'].get(discussionSessionId)?.callIds.has(`call:${discussionSessionId}`)).toBe(true)
+    expect(unnamed.message.artifacts).toBeUndefined()
+    expect(ctx.agentTeam['claimedDeliveries'].get(member.channelSessionId)?.callIds.has(`call:${member.channelSessionId}`)).toBe(true)
   })
 
   it('never adopts a named Session that belongs to another Member', async () => {
@@ -175,40 +165,41 @@ describe('one Message, one work domain', () => {
     const { channelRef } = await channelWithThread(ctx)
     const sender = await addMember(ctx, channelRef, 'sender')
     const other = await addMember(ctx, channelRef, 'other')
-    const senderSession = declaringSession(ctx, sender.sessionId, 'docs/sender.md')
-    const otherSession = declaringSession(ctx, other.sessionId, 'docs/other.md')
-    registerDomains(ctx, sender.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, liveAgent(senderSession)]])
-    registerDomains(ctx, other.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, liveAgent(otherSession)]])
+    const senderAgent = liveAgent(declaringSession(ctx, sender.channelSessionId, 'docs/sender.md'))
+    const otherAgent = liveAgent(declaringSession(ctx, other.channelSessionId, 'docs/other.md'))
+    registerDomains(ctx, sender.memberId, [[sender.channelScopeKey, senderAgent]])
+    registerDomains(ctx, other.memberId, [[other.channelScopeKey, otherAgent]])
 
-    // A Session this Member does not run is not adopted: the claim takes the same
-    // fallback an unnamed Session takes, so another Member's files can never be
-    // handed over as this author's.
     const sent = await ctx.agentTeam['sendMessageAs'](sender.actor, {
       requestId: requestId('foreign-session'), workspaceId: alpha, channelRef, body: 'Not my Session',
-    }, other.sessionId)
+    }, other.channelSessionId)
     if (sent.kind !== 'committed') throw new Error(`expected a committed Message, received ${sent.kind}`)
-    expect(sent.message.artifacts).toEqual([artifact(sender.sessionId, `${cwd}/docs/sender.md`, 'the docs/sender.md')])
-    expect(ctx.agentTeam['claimedDeliveries'].get(other.sessionId), 'the other Member\'s declaration is untouched').toBeUndefined()
+    expect(sent.message.artifacts).toBeUndefined()
+    expect(ctx.agentTeam['claimedDeliveries'].get(other.channelSessionId), 'the other Member\'s declaration is untouched').toBeUndefined()
+    expect(ctx.agentTeam['claimedDeliveries'].get(sender.channelSessionId), 'the sender did not claim without its own acting Session').toBeUndefined()
   })
 })
 
 describe('work-domain activation paths', () => {
-  it('returns the exact default binding without synthesizing a directory snapshot', async () => {
+  it('returns the exact Channel binding without a Member default Session', async () => {
     const { ctx } = await harness()
     const { channelRef } = await channelWithThread(ctx)
-    const member = await addMember(ctx, channelRef, 'default-domain')
-    const agent = liveAgent(ctx.sessions.create(member.sessionId, { meta: { cwd } }))
-    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, agent]])
+    const member = await addMember(ctx, channelRef, 'channel-domain')
+    const agent = liveAgent(ctx.sessions.create(member.channelSessionId, { meta: { cwd } }))
+    registerDomains(ctx, member.memberId, [[member.channelScopeKey, agent]])
 
-    expect(ctx.agentTeam.workDomainForAgent(agent)).toEqual({
-      scopeKey: DEFAULT_MEMBER_SCOPE_KEY, scopeKind: 'default', sessionId: member.sessionId,
+    expect(ctx.agentTeam.workDomainForAgent(agent)).toMatchObject({
+      scopeKey: member.channelScopeKey, scopeKind: 'channel', scopeRef: channelRef,
+      sessionId: member.channelSessionId, workingDirectories: [cwd],
     })
+    expect(ctx.agentTeam['ledger']!.getMember(member.memberId)).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['handles'].get(member.memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY)).toBe(false)
   })
 
-  it('rejects a missing configured directory without marking the Member unavailable', async () => {
+  it('rejects a missing configured directory without hiding another active Channel Session', async () => {
     const { ctx } = await harness()
-    const { channelRef, threadRef } = await channelWithThread(ctx)
-    const member = await addMember(ctx, channelRef, 'path-check')
+    const { channelRef } = await channelWithThread(ctx)
+    const member = await addMember(ctx, channelRef, 'path-check', { bindDomain: false })
     const missingDirectory = `${cwd}/.missing-work-domain-${randomUUID()}`
     await ctx.agentTeam.updateChannelWorkingDirectories({ requestId: requestId('missing-dir-config'),
       workspaceId: alpha, channelRef, workingDirectories: [cwd, missingDirectory] })
@@ -216,11 +207,21 @@ describe('work-domain activation paths', () => {
       .toEqual([cwd, missingDirectory])
     const bound = await ctx.agentTeam['ledger']!.bindMemberScopeSession({ requestId: requestId('missing-dir-bind'), actor: agentTeamHumanActor(),
       workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
-      binding: memberScopeSession(channelMemberScopeKey(channelRef), SessionId('session:path-check-domain')) })
+      binding: memberScopeSession(member.channelScopeKey, member.channelSessionId) })
     if (!bound.committed) throw new Error('domain binding unexpectedly resolved instead of committing')
 
-    const defaultSession = ctx.sessions.create(member.sessionId, { meta: { cwd } })
-    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, liveAgent(defaultSession)]])
+    const healthyChannel = await ctx.agentTeam.createChannel({ requestId: requestId('healthy-channel'), workspaceId: alpha,
+      name: 'healthy', description: 'Active sibling domain' })
+    await ctx.agentTeam['ledger']!.joinChannel({ requestId: requestId('healthy-member'), workspaceId: alpha,
+      channelRef: healthyChannel.channel.channelRef, memberId: member.memberId, actor: agentTeamHumanActor() })
+    const healthyScope = channelMemberScopeKey(healthyChannel.channel.channelRef)
+    const healthySessionId = SessionId('session:path-check-healthy')
+    const healthyBinding = await ctx.agentTeam['ledger']!.bindMemberScopeSession({ requestId: requestId('healthy-bind'), actor: agentTeamHumanActor(),
+      workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
+      binding: memberScopeSession(healthyScope, healthySessionId) })
+    if (!healthyBinding.committed) throw new Error('healthy domain binding unexpectedly resolved instead of committing')
+    registerDomains(ctx, member.memberId, [[healthyScope, liveAgent(ctx.sessions.create(healthySessionId, { meta: { cwd } }))]])
+
     const warning = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
     await ctx.agentTeam['activateMember'](ctx.agentTeam['ledger']!.getMember(member.memberId)!, bound.value.binding)
 
@@ -229,16 +230,16 @@ describe('work-domain activation paths', () => {
     warning.mockRestore()
   })
 
-  it('uses the first snapshotted directory as the Session cwd', async () => {
+  it('uses the first snapshotted directory as the Channel Session cwd', async () => {
     const { ctx } = await harness()
-    const { channelRef, threadRef } = await channelWithThread(ctx)
-    const member = await addMember(ctx, channelRef, 'cwd-check')
+    const { channelRef } = await channelWithThread(ctx)
+    const member = await addMember(ctx, channelRef, 'cwd-check', { bindDomain: false })
     const domainRoot = dirname(cwd)
     await ctx.agentTeam.updateChannelWorkingDirectories({ requestId: requestId('cwd-dir-config'),
       workspaceId: alpha, channelRef, workingDirectories: [domainRoot, cwd] })
     const bound = await ctx.agentTeam['ledger']!.bindMemberScopeSession({ requestId: requestId('cwd-dir-bind'), actor: agentTeamHumanActor(),
       workspaceId: alpha, workspaceRoot: cwd, memberId: member.memberId,
-      binding: memberScopeSession(channelMemberScopeKey(channelRef), SessionId('session:cwd-check-domain')) })
+      binding: memberScopeSession(member.channelScopeKey, member.channelSessionId) })
     if (!bound.committed) throw new Error('domain binding unexpectedly resolved instead of committing')
 
     ctx.agentTeam['memberRuntime']['initializePrivateMemory'] = async () => {}
@@ -263,45 +264,26 @@ describe('work-domain activation paths', () => {
 })
 
 describe('the rollover entry by work-domain kind', () => {
-  // A Channel domain is a long-lived context shared by every discussion in the
-  // Channel, so it renews exactly like the Member default. Gating it off would
-  // leave its container growing with only in-place reduction as relief.
   it('admits a Channel domain instead of refusing it', async () => {
     const { ctx } = await harness()
     const { channelRef } = await channelWithThread(ctx)
     const member = await addMember(ctx, channelRef, 'reader')
-    const scopeKey = channelMemberScopeKey(channelRef)
-    const ownSession = ctx.sessions.create(member.sessionId, { meta: { cwd } })
-    const domainSession = ctx.sessions.create(SessionId('session:reader-domain'), { meta: { cwd } })
-    const ownAgent = liveAgent(ownSession)
-    const domainAgent = liveAgent(domainSession)
-    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, ownAgent], [scopeKey, domainAgent]])
+    const domainAgent = liveAgent(ctx.sessions.create(member.channelSessionId, { meta: { cwd } }))
+    registerDomains(ctx, member.memberId, [[member.channelScopeKey, domainAgent]])
 
-    // The domain-kind refusal must no longer fire for a Channel domain. The
-    // guards unrelated to the kind stay in force, so a fabricated agent is
-    // refused for running outside its own turn — which is exactly the proof
-    // wanted here: rejection reaches a later, kind-independent guard.
+    // The domain-kind refusal must no longer fire; unrelated running-turn guards stay active.
     await expect(ctx.agentTeam.requestNewContext(domainAgent, { memberId: member.memberId }))
       .rejects.not.toThrow(/not supported in work domain/)
   })
 
-  it('classifies the same domains as renewable for the pressure judge', async () => {
+  it('classifies the Channel Session as renewable for the pressure judge', async () => {
     const { ctx } = await harness()
     const { channelRef } = await channelWithThread(ctx)
     const member = await addMember(ctx, channelRef, 'reader')
-    const scopeKey = channelMemberScopeKey(channelRef)
-    const ownSession = ctx.sessions.create(member.sessionId, { meta: { cwd } })
-    const domainSession = ctx.sessions.create(SessionId('session:judged-domain'), { meta: { cwd } })
-    const ownAgent = liveAgent(ownSession)
-    const domainAgent = liveAgent(domainSession)
-    registerDomains(ctx, member.memberId, [[DEFAULT_MEMBER_SCOPE_KEY, ownAgent], [scopeKey, domainAgent]])
+    const domainAgent = liveAgent(ctx.sessions.create(member.channelSessionId, { meta: { cwd } }))
+    registerDomains(ctx, member.memberId, [[member.channelScopeKey, domainAgent]])
 
-    // The judge and the gate must answer identically: a domain offered a
-    // remedy the gate refuses would stall instead of relieving, and one the
-    // gate allows but the judge skips would grow without reduction.
-    const renewable = (agent: Parameters<typeof ctx.agentTeam.requestNewContext>[0]) => ctx.agentTeam['renewsContextForAgent'](agent)
-    expect(renewable(ownAgent)).toBe(true)
-    expect(renewable(domainAgent)).toBe(true)
+    expect(ctx.agentTeam['renewsContextForAgent'](domainAgent)).toBe(true)
   })
 
   it('still refuses a Session that is not a live Member work domain', async () => {
@@ -310,8 +292,6 @@ describe('the rollover entry by work-domain kind', () => {
     const member = await addMember(ctx, channelRef, 'reader')
     const stranger = liveAgent(ctx.sessions.create(SessionId('session:not-a-domain'), { meta: { cwd } }))
 
-    // Not registered as any domain, so the entry cannot classify it as
-    // renewable; it must fail rather than fall through to a swap.
     await expect(ctx.agentTeam.requestNewContext(stranger, { memberId: member.memberId }))
       .rejects.toThrow()
   })

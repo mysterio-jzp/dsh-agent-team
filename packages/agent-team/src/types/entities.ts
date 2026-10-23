@@ -202,7 +202,8 @@ export interface AgentTeamClientChannelRow {
 /** Durable identity and lifecycle intent of one team-managed Agent. */
 export interface AgentTeamAgentMember {
   readonly memberId: AgentTeamMemberId
-  readonly sessionId: SessionId
+  /** Legacy default Session id retained only so older ledger facts can be archived; new Members have no default Session. */
+  readonly sessionId?: SessionId | undefined
   readonly workspaceId: WorkspaceId
   readonly handle: string
   readonly description: string

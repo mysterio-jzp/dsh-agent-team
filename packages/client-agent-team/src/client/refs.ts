@@ -324,12 +324,12 @@ export const rosterMember = (
   }
   const hit = uniqueByPrefix(members, status => status.member.memberId, memberRef)
   if (hit === undefined) return undefined
-  const sessionId = hit.availability === 'active' ? memberSessionFor(hit, channelRef) : undefined
-  const openable = sessionId !== undefined
+  const sessionId = hit.member.sessionId
+  const openable = hit.availability === 'active' && sessionId !== undefined
   return {
     memberId: hit.member.memberId,
     handle: hit.member.handle.replace(/^@/, ''),
-    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(openable ? { sessionId } : {}),
     openable,
     ...(hit.member.avatarRef === undefined ? {} : { avatarRef: hit.member.avatarRef }),
   }

@@ -19,6 +19,7 @@ import type {
   AgentTeamHumanTodoRef,
   AgentTeamMemberCapabilities,
   AgentTeamMemberId,
+  AgentTeamMemberScopeKey,
   AgentTeamMessage,
   AgentTeamMessageRef,
   AgentTeamMessageReplyContext,
@@ -280,6 +281,8 @@ export interface AgentTeamRecoverMemberRequest {
   readonly requestId: AgentTeamRequestId
   readonly workspaceId: WorkspaceId
   readonly memberId: AgentTeamMemberId
+  /** Optional Channel domain; absent recovers every bound domain. */
+  readonly scopeKey?: AgentTeamMemberScopeKey
 }
 
 /** Result of a recovery nudge; runtime-only steering, so there is no ledger receipt. */
@@ -292,9 +295,10 @@ export interface AgentTeamClearMemberContextRequest {
   readonly requestId: AgentTeamRequestId
   readonly workspaceId: WorkspaceId
   readonly memberId: AgentTeamMemberId
+  readonly scopeKey: AgentTeamMemberScopeKey
 }
 
-/** The Member keeps identity, memory, and binding; its sessionId moves to a fresh Session and the previous log stays archived on disk. */
+/** The Channel binding moves to a fresh Session; the Member identity and the previous log stay durable. */
 export interface AgentTeamClearMemberContextResult {
   readonly receipt: AgentTeamOperationReceipt
   readonly status: AgentTeamAgentMemberStatus
@@ -310,6 +314,8 @@ export interface AgentTeamRolloverSessionRequest {
   readonly requestId: AgentTeamRequestId
   readonly workspaceId: WorkspaceId
   readonly memberId: AgentTeamMemberId
+  /** The Channel work domain being renewed. */
+  readonly scopeKey: AgentTeamMemberScopeKey
   /** The Session the Member must still be bound to at commit time. */
   readonly previousSessionId: AgentTeamMemberSessionId
   /** The next generation Session, derived from the successful tool call. */

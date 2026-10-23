@@ -8,7 +8,7 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 
 ## Ledger 权威与提交
 - mutation 进入 Host authority，并提交一条 durable operation。
-- Channel 默认目录集与 Member×Channel 覆盖是独立、可重放的配置 operations。首次 Thread 绑定快照有效有序目录集（Member 覆盖、Channel 默认、Channel 所属 Workspace 根依次优先）；后续配置编辑不改变该绑定或它的 Session 代际。配置提交校验路径形状，Host 在 activation 时校验目录是否存在。
+- Channel 默认目录集与 Member×Channel 覆盖是独立、可重放的配置 operations。首次 Channel 工作域绑定快照有效有序目录集（Member 覆盖、Channel 默认、Channel 所属 Workspace 根依次优先）；后续配置编辑不改变该绑定或它的 Session 代际。配置提交校验路径形状，Host 在 activation 时校验目录是否存在。
 - 回复把被回答的 Message 记为自身 Message 上的 `replyToMessageRef`，Host 在提交前用 ledger 解析这个 ref：未知的 ref、或属于别的 Thread 的 ref 一律拒绝，不会被存下。父消息作者在提交时加入收件人，邀请规则、direct markers 与 `undeliveredMentions` 报告与 mention 完全一致。被引用的画面 —— 父消息作者与其正文一行 —— 是读取期派生（`replyTo`），绝不是第二份存储副本。因此它不可能与父消息不一致，父消息不在本次读取这一页里时也照样填得上。ref 不再可解析时只留裸 ref。引用不是可选项：这个参数属于回复契约的一部分，携带 ref 的回复只按 ref 本身被接受或拒绝。
 - Thread 成员关系与 Attention 分开。Human-only `removeThreadMember` 会追加该 Thread 的移除 tombstone，结束该 Member 当前 Attention 并清除 direct markers，但不改变 Workspace/Channel 成员关系，也不删除 Thread 历史事实。若该 Member 持有该 Thread Task 的 active Claim，Host 会返回 blocked 结果。Human-only `threadObservations` 返回 observation history、当前 `followers`、带 `following` 标记的 `threadMembers`，以及 `removedMemberIds`；Human 确认并成功发送后可重新邀请已移除的 Member，Host 投影随之清除 tombstone。
 - Projections、Inbox results、tools、commands、Remote responses 和 UI 都从已提交的 operations 派生。
@@ -19,7 +19,8 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - 已提交的 Session transition（`team/member-session-renewed`、`team/member-session-rolled-over`）记录的是 desired binding，而不是已完成的切换。retire 旧代与 activate 目标都是 ledger 写入之外的 Host 效果。startup 与 Member 的显式 recovery 动作都会补完被中断的 transition，依据记录的 previous Session。每个效果各自推导自己是否已完成。live handle 不能证明 archive 那一半跑过。因此重复请求返回已记录的 receipt 与诚实状态，不再提交一次绑定。
 - 每个 durable Member state 只有一组期望的外部 effect，即 [Member Lifecycle](../domain-model.zh.md#member-lifecycle) 表。每一次 lifecycle operation 在 commit 之后重跑这组 effect。startup 对每个非 enabled Member 也重跑同一组。archive、suspension、remove 因此走同一条推导重跑收敛，不做第二次 durable 写入。即使 Workspace/Session/filesystem 调用被 crash 或失败打断，也一样收敛。
 - startup 绝不把非 enabled Member 激活为 enabled。启动阶段失败的 effect 只记日志，下一次 boot 重试，不让 boot 失败。同一 Member 的 lifecycle operation 按提交序串行；不同 Member 从不排在彼此的等待之后。
-- Channel Session 的 domain Workspace 按 Channel 本身解析，而不是按 Member 的创建 Workspace。快照第一项始终保留为 cwd，即使它在该 Workspace 之外；Host 会在 provisioning 前检查所有快照目录。激活后，Host 只把 Session 归入其 cwd 所属的已注册 Workspace；若外部 cwd 无对应 Workspace，则保持 Ungrouped。其余目录只注入该域自己的 instructions。路径缺失时只拒绝该域 activation。
+- Agent Member 没有默认 Session。旧 ledger 行可能带可选 `member.sessionId`，它只用于启动/清理时归档旧 Session；启动只恢复已记录的 Channel 绑定，当前 status projection 不再暴露该字段。此清理不会写入 ledger。
+- Channel Session 在 Channel 绑定解析出的 Workspace 中激活。快照第一项作为 cwd；Host 在 provisioning 前检查所有快照路径都是可访问目录，其他目录只注入该工作域自己的 instructions。任一路径缺失时只拒绝该域 activation 并保留域级 diagnostic；其他活跃 Channel Session 仍可让该 Member 保持 available。
 - ledger append 之后剩下的是 delivery 效果：commit listeners、Client change invalidation、participation notice。每个受影响的 Member 还会收到一次 wake。每一项都经过同一条边界：失败只记日志，不让操作本身失败。失败的 listener 或 wake 仍以 committed result 作答，而不是虚假的回滚。只有 invariant divergence 继续 reject。失败的 Inbox wake 清掉这个 wake 记录的 notice state。因此，下一次触及该 Member 的 commit 重新推导同一批 durable Inbox facts 并重试，不追加第二次操作。DM 保留显式的 recorded-but-not-delivered 错误。
 - 某个 Channel 中的 Thread 事实只能通过该 Member 在同一 Channel 已经 live 的 Session 通知。若没有活动 Session，Host 会记录 commit 后的投递失败并保留 ledger 中的持久事实；既不会为通知激活 Session，也不会把通知改投到 Member 的 default Session。
 
@@ -88,7 +89,7 @@ Member 默认域当前的失败原因以 `diagnostic` 挂在 status 上并由 Cl
 - 改成员的模型会写入与人工点选相同的 `model/selection` 事件，因此选择器与下一条请求保持一致。由此有两个刻意的结果：会话日志分不出这次写入是插件做的还是人点的（谁是谁的账在成员账本里），以及这次改动不改变正在跑的那一条请求——从下一条起生效，且不动全局默认值。
 
 ## 私有记忆、归档与身份效应
-- `$DSH_HOME/agent-team/members/` 下的 private-memory directories 是 Member identity 的 Host-owned effects，不是第二权威。Member activation 确保 private-memory directory、`notes/` 和缺失的 `memory.md` 存在。startup 不会清理 ledger 不知道的 `member:` directories。显式 Member removal 会归档这个 Member 的 Session，并移除这个 Member 的 private-memory directory。Team removal path 之外的 entries 保持不动。
+- `$DSH_HOME/agent-team/members/` 下的 private-memory directories 是 Member identity 的 Host-owned effects，不是第二权威。创建 Member 时独立于 Session activation 初始化 private-memory directory、`notes/` 和缺失的 `memory.md`；activation 也会为恢复的 Member 确保这些目录存在。startup 不会清理 ledger 不知道的 `member:` directories。显式 Member removal 会归档这个 Member 的 Session，并移除这个 Member 的 private-memory directory。Team removal path 之外的 entries 保持不动。
 - 这项删除，以及 activation 时对旧式 colon 目录的改名，都限定在当前进程自己的 members root 之内。记录里的 `privateMemoryPath` 是一条 durable 绝对事实，指向「当初添加这个 Member 的那个 DSH home」里的目录。因此解析到另一个 home 的进程会拒绝搬移或删除这个目录（并告警），而不是把 Member 的真实私有记忆搬出 Member 自己的 home。
 - Member 与 Channel 的归档是介于 suspend 与 remove 之间的可逆第三态。`archiveMember` 提交 `team/member-archived`。dispose live session，私有 memory 与 Session log 留在磁盘，并把 Session 从分组 surface 归档。`archiveMember` 再以公开 `claims_released` Activity 加上 Attention/marker 清理，释放这个 Member 的 active Claims。被隐藏的 Member 不得让 Task 卡在 in progress，也不得留下幻影 unread 计数。`archiveChannel` 提交 `team/channel-archived`，对 Channel 上所有 Thread 的 owner 施加同样的释放形态。两种归档形态下 Membership 都保留（隐藏态，非退出）。
 

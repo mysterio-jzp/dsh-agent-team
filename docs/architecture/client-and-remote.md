@@ -32,11 +32,11 @@ sidebar.settings            Team shadow, priority -100
 
 Activation mounts `agentTeamRemote`, waits for `remote.agentTeam`, then registers the Team entry and the mode shadows. `dsh.client.inject` describes the module graph but does not guarantee apply order or service readiness; use `ctx.slots.inject()` when a declaration may appear later.
 
-Team mode owns the conversation seat, not a panel: `TeamNavigation.mode` is the one criterion for whether the mode stands, and its seat is the `main` shadow keyed `conversation`, which paints while that mode holds and no Member Session view is embedded.
+Team mode owns the conversation seat, not a panel: `TeamNavigation.mode` is the one criterion for whether the mode stands, and its seat is the `main` shadow keyed `conversation`, which paints while that mode holds and no Channel Session view is embedded.
 
 The entry at the sidebar's foot beside the shipped Settings row clears whatever global panel holds the column and then flips the mode. Keeping that selection clear is also what leaves the shell's right rail available, because the shell hides the rail's Session content while any panel is selected; a global panel taking the column therefore ends the mode.
 
-A null selection is left alone — an embedded Member Session view clears the panel to own the column and the mode has to survive that. A restored mode paints through its own seat without selecting anything, and a panel already selected at mount keeps the column while the mode stands down.
+A null selection is left alone — an embedded Channel Session view clears the panel to own the column and the mode has to survive that. A restored mode paints through its own seat without selecting anything, and a panel already selected at mount keeps the column while the mode stands down.
 
 A slot parent's `children` declaration is both render site and authority. Team's `sidebar.workspaces` shadow must not redeclare shipped `sidebar.workspaces.directoryFlow`; Harness SlotCore rejects duplicate live declarations. Do not copy private WorkspaceBrowser, ConversationRoot, Shell, or private CSS. Use public Harness services and exports, such as `ctx.workspaces.pickDirectory()`, and record limitations rather than depending silently on private implementation.
 
@@ -55,9 +55,9 @@ Team navigation mode, Workspace selection, the last Channel/Thread, and the Inbo
 
 The Team sidebar keeps Channels/Agents ordering as a browser-only `localStorage` preference, merged over Remote defaults.
 
-An embedded Member Session uses the shipped composer unmodified: the Team registers no member-session composer surface — no seat shadow, no trigger sources, no dock strip. rc.1 moved the trigger-menu overlay into `conversation.composer.bar`'s children, where a shadowing entry would inherit — and strand — the overlay. The Team's own command/member reference entry points carried no irreplaceable value over the shipped vocabulary, so they were removed together.
+An embedded Channel Session uses the shipped composer unmodified: the Team registers no Channel Session composer surface — no seat shadow, no trigger sources, no dock strip. rc.1 moved the trigger-menu overlay into `conversation.composer.bar`'s children, where a shadowing entry would inherit — and strand — the overlay. The Team's own command/member reference entry points carried no irreplaceable value over the shipped vocabulary, so they were removed together.
 
-Ordinary and member sessions share the same composer and vocabulary. Reuse public primitives and `--dsw-*` tokens, keep CSS in CSS Modules, and preserve Team mode restoration and narrow layouts.
+Ordinary and Channel Sessions share the same composer and vocabulary. Reuse public primitives and `--dsw-*` tokens, keep CSS in CSS Modules, and preserve Team mode restoration and narrow layouts.
 
 ## Opening a cached attachment in the right rail
 A non-image attachment block opens its cached copy in the Shell's right rail. The read is `getAttachment` against the Host's cache; the address is a `dsh-resource://file/…` in the Session scope, so the rail's fallback text type claims it and dispatches by extension.

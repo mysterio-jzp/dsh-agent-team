@@ -19,9 +19,10 @@ import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.
 import { snapshotReadData, receiptReadData } from './helpers/legacy-thread-read.ts'
 import AgentTeam, { AGENT_TEAM_HUMAN_HANDLE, AGENT_TEAM_HUMAN_MEMBER_ID, AGENT_TEAM_INITIALIZE_REQUEST_ID } from '../src/index.ts'
 import { AgentTeamLedger, agentTeamHumanActor, isThreadReadSnapshot } from '../src/ledger.ts'
+import { channelMemberScopeKey } from '../src/member-scope.ts'
 import { agentTeamDomainSpec } from '../src/spec.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
-import type { AgentTeamAgentMember, AgentTeamMemberActor, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadReadData, AgentTeamThreadReadOperation, AgentTeamThreadReadReceipt, AgentTeamThreadReadResult, AgentTeamThreadRef } from '../src/types.ts'
+import type { AgentTeamAgentMember, AgentTeamChannelRef, AgentTeamMemberActor, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId, AgentTeamTask, AgentTeamTaskRef, AgentTeamThreadReadData, AgentTeamThreadReadOperation, AgentTeamThreadReadReceipt, AgentTeamThreadReadResult, AgentTeamThreadRef } from '../src/types.ts'
 
 interface TeamHarness {
   readonly ctx: Context
@@ -50,6 +51,7 @@ async function harness(
   ctx.storage.mount('domain', facility)
   ctx.provide('storageDomain', facility)
   ctx.provide('workspaceRegistry', {
+    archivedSessionIds: [] as SessionId[],
     get: (id: WorkspaceId) => workspaceIds.includes(id) ? { id, path: process.cwd(), attachSession: async () => {} } : undefined,
     list: () => workspaceIds.map(id => ({ id, path: process.cwd() })),
     archiveSession: async () => {},
@@ -73,7 +75,7 @@ async function sqliteHarness(path: string): Promise<TeamHarness> {
   const facility = new DomainFacility(ctx, { backend: 'sqlite', routes: {} })
   ctx.storage.mount('domain', facility)
   ctx.provide('storageDomain', facility)
-  ctx.provide('workspaceRegistry', { get: (id: WorkspaceId) => ({ id, path: process.cwd(), attachSession: async () => {}, archiveSession: async () => {} }), list: () => [] })
+  ctx.provide('workspaceRegistry', { archivedSessionIds: [] as SessionId[], get: (id: WorkspaceId) => ({ id, path: process.cwd(), attachSession: async () => {} }), list: () => [], archiveSession: async () => {} })
   ctx.provide('agents', { create: async () => { throw new Error('unused') }, resume: async () => { throw new Error('unused') } })
   ctx.provide('agentDefaultModel', { currentSelection: () => ({ provider: 'mock', model: 'mock' }) })
   ctx.provide('agentPresets', { mount: async () => { throw new Error('unused') } })
@@ -144,8 +146,8 @@ async function addLedgerMember(
   memberId = `member:agent-${crypto.randomUUID()}`,
   description = 'Test Agent',
   handle = memberId.slice('member:'.length),
-): Promise<{ readonly member: AgentTeamAgentMember; readonly actor: AgentTeamMemberActor }> {
-  const member: AgentTeamAgentMember = {
+): Promise<{ readonly member: AgentTeamAgentMember & { readonly sessionId: SessionId }; readonly actor: AgentTeamMemberActor }> {
+  const member: AgentTeamAgentMember & { readonly sessionId: SessionId } = {
     memberId: memberId as never,
     sessionId: SessionId(`session:${memberId}`),
     workspaceId: alpha,
@@ -168,6 +170,15 @@ async function addLedgerMember(
     await ledger.setPresident({ requestId: requestId(`president:${memberId}`), actor: agentTeamHumanActor(), memberId: member.memberId })
   }
   return { member, actor: { kind: 'member', memberId: member.memberId, handle: member.handle } }
+}
+
+async function bindLedgerMemberChannelSession(ledger: AgentTeamLedger, memberId: AgentTeamAgentMember['memberId'], channelRef: AgentTeamChannelRef, sessionId: SessionId) {
+  const scopeKey = channelMemberScopeKey(channelRef)
+  await ledger.bindMemberScopeSession({
+    requestId: requestId(`bind:${memberId}:${channelRef}`), workspaceId: alpha, workspaceRoot: process.cwd(), memberId,
+    binding: { scopeKey, sessionId, scopeKind: 'channel', scopeRef: channelRef }, actor: agentTeamHumanActor(),
+  })
+  return scopeKey
 }
 
 describe('AgentTeam durable Thread Attention ledger', () => {
@@ -2405,28 +2416,33 @@ describe('AgentTeam archived read surfaces', () => {
 })
 
 describe('AgentTeam Member session rollover ledger command', () => {
-  it('commits a model-actor rollover, moves exactly the sessionId, and keeps every other fact', async () => {
+  it('rolls over a Channel Session while leaving the legacy Member Session untouched', async () => {
     const pool = new MemoryMediaPool()
     const test = await harness(pool)
     const ledger = replayLedger(test)
-    const { member, actor } = await addLedgerMember(ledger, undefined)
+    const channel = (await ledger.createChannel({ requestId: requestId('rollover-channel'), workspaceId: alpha,
+      name: 'engineering', description: '', actor: agentTeamHumanActor() })).value.channel
+    const { member, actor } = await addLedgerMember(ledger, channel.channelRef)
+    const previousSessionId = SessionId(`agent-team-channel-${crypto.randomUUID()}`)
+    const scopeKey = await bindLedgerMemberChannelSession(ledger, member.memberId, channel.channelRef as AgentTeamChannelRef, previousSessionId)
     const newSessionId = SessionId(`agent-team-rollover-${crypto.randomUUID()}`)
     const rolled = (await ledger.rolloverMemberSession({
-      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 42 as never, trigger: 'model',
+      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 42 as never, trigger: 'model',
     })).value
-    expect(rolled.member.sessionId).toBe(newSessionId)
+    expect(ledger.memberScopeSessionFor(member.memberId, scopeKey)?.sessionId).toBe(newSessionId)
+    expect(rolled.member.sessionId).toBe(member.sessionId)
     expect(rolled.member).toMatchObject({ memberId: member.memberId, handle: member.handle, state: 'enabled', privateMemoryPath: member.privateMemoryPath })
-    expect(ledger.getMember(member.memberId)?.sessionId).toBe(newSessionId)
-    // The durable envelope records anchors and trigger, never handoff prose.
+    expect(ledger.getMember(member.memberId)?.sessionId).toBe(member.sessionId)
+    // The durable envelope records Channel anchors and trigger, never handoff prose.
     const operation = [...pool.media.get('agent_team')!.tables.get('operations')!.values() as Iterable<AgentTeamOperation>]
       .find(op => op.kind === 'team/member-session-rolled-over')
     expect(operation).toMatchObject({
       kind: 'team/member-session-rolled-over',
-      data: { previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 42, trigger: 'model' },
+      data: { previousSessionId, newSessionId, handoffEventSeq: 42, trigger: 'model', scopeKey },
     })
     if (operation?.kind !== 'team/member-session-rolled-over') throw new Error('expected rollover operation')
-    expect(operation.data.member.sessionId).toBe(newSessionId)
+    expect(operation.data.member.sessionId).toBe(member.sessionId)
     expect(operation.data.sourceSessionId).toBeUndefined()
     expect(operation.data.checkpointRef).toBeUndefined()
     expect(() => replayLedger(test).validate()).not.toThrow()
@@ -2435,32 +2451,37 @@ describe('AgentTeam Member session rollover ledger command', () => {
   it('rejects another Member, a stale previous binding, human actors, and mismatched replay data', async () => {
     const test = await harness()
     const ledger = replayLedger(test)
-    const { member, actor } = await addLedgerMember(ledger, undefined)
-    const { actor: other } = await addLedgerMember(ledger, undefined, `member:agent-${crypto.randomUUID()}`)
+    const channel = (await ledger.createChannel({ requestId: requestId('rollover-channel'), workspaceId: alpha,
+      name: 'engineering', description: '', actor: agentTeamHumanActor() })).value.channel
+    const { member, actor } = await addLedgerMember(ledger, channel.channelRef)
+    const { member: otherMember, actor: other } = await addLedgerMember(ledger, channel.channelRef, `member:agent-${crypto.randomUUID()}`)
+    const previousSessionId = SessionId(`agent-team-channel-${crypto.randomUUID()}`)
+    const scopeKey = await bindLedgerMemberChannelSession(ledger, member.memberId, channel.channelRef as AgentTeamChannelRef, previousSessionId)
+    await bindLedgerMemberChannelSession(ledger, otherMember.memberId, channel.channelRef as AgentTeamChannelRef, SessionId(`agent-team-channel-${crypto.randomUUID()}`))
     const newSessionId = SessionId(`agent-team-rollover-${crypto.randomUUID()}`)
     // A Member cannot roll over another Member's Session.
     await expect(ledger.rolloverMemberSession({
-      requestId: requestId('cross'), workspaceId: alpha, memberId: member.memberId, actor: other,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'model',
+      requestId: requestId('cross'), workspaceId: alpha, memberId: member.memberId, actor: other, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'model',
     })).rejects.toThrow(/cannot roll over another Member/)
     // Human authority is reserved for renewals; the rollover is Member-authored.
     await expect(ledger.rolloverMemberSession({
-      requestId: requestId('human'), workspaceId: alpha, memberId: member.memberId, actor: agentTeamHumanActor() as never,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'model',
+      requestId: requestId('human'), workspaceId: alpha, memberId: member.memberId, actor: agentTeamHumanActor() as never, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'model',
     })).rejects.toThrow(/requires Member authority/)
     // The previous binding must still be current at commit time.
     await expect(ledger.rolloverMemberSession({
-      requestId: requestId('stale'), workspaceId: alpha, memberId: member.memberId, actor,
+      requestId: requestId('stale'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
       previousSessionId: SessionId('agent-team-stale'), newSessionId, handoffEventSeq: 7 as never, trigger: 'model',
     })).rejects.toThrow(/no longer bound/)
     const rolled = (await ledger.rolloverMemberSession({
-      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'pressure',
+      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'pressure',
     })).value
     // An exact retry resolves the recorded outcome with the same receipt.
     const again = (await ledger.rolloverMemberSession({
-      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'pressure',
+      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 7 as never, trigger: 'pressure',
     })).value
     expect(again.receipt.operationId).toBe(rolled.receipt.operationId)
     // The same requestId with different data collides instead of resolving.
@@ -2475,44 +2496,53 @@ describe('AgentTeam Member session rollover ledger command', () => {
     const pool = new MemoryMediaPool()
     const test = await harness(pool)
     const ledger = replayLedger(test)
-    const { member, actor } = await addLedgerMember(ledger, undefined)
+    const channel = (await ledger.createChannel({ requestId: requestId('rollover-channel'), workspaceId: alpha,
+      name: 'engineering', description: '', actor: agentTeamHumanActor() })).value.channel
+    const { member, actor } = await addLedgerMember(ledger, channel.channelRef)
+    const previousSessionId = SessionId(`agent-team-channel-${crypto.randomUUID()}`)
+    const scopeKey = await bindLedgerMemberChannelSession(ledger, member.memberId, channel.channelRef as AgentTeamChannelRef, previousSessionId)
     const newSessionId = SessionId(`agent-team-rollover-${crypto.randomUUID()}`)
     // A through sequence without a source Session is incomplete lineage.
     await expect(ledger.rolloverMemberSession({
-      requestId: requestId('orphan-seq'), workspaceId: alpha, memberId: member.memberId, actor,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 5 as never, trigger: 'model',
+      requestId: requestId('orphan-seq'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 5 as never, trigger: 'model',
       sourceThroughSeq: 30 as never,
     })).rejects.toThrow(/requires a source Session/)
     // A checkpoint ref without a source Session is likewise incomplete.
     await expect(ledger.rolloverMemberSession({
-      requestId: requestId('orphan-ref'), workspaceId: alpha, memberId: member.memberId, actor,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 5 as never, trigger: 'model',
+      requestId: requestId('orphan-ref'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 5 as never, trigger: 'model',
       checkpointRef: 'context-checkpoint:abc' as never,
     })).rejects.toThrow(/must appear together/)
     const rolled = (await ledger.rolloverMemberSession({
-      requestId: requestId('seeded'), workspaceId: alpha, memberId: member.memberId, actor,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 5 as never, trigger: 'model',
-      sourceSessionId: member.sessionId, sourceThroughSeq: 30 as never, checkpointRef: 'context-checkpoint:abc' as never,
+      requestId: requestId('seeded'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 5 as never, trigger: 'model',
+      sourceSessionId: previousSessionId, sourceThroughSeq: 30 as never, checkpointRef: 'context-checkpoint:abc' as never,
     })).value
-    expect(rolled.member.sessionId).toBe(newSessionId)
+    expect(rolled.member.sessionId).toBe(member.sessionId)
+    expect(ledger.memberScopeSessionFor(member.memberId, scopeKey)?.sessionId).toBe(newSessionId)
     const operation = [...pool.media.get('agent_team')!.tables.get('operations')!.values() as Iterable<AgentTeamOperation>]
       .find(op => op.kind === 'team/member-session-rolled-over')
     if (operation?.kind !== 'team/member-session-rolled-over') throw new Error('expected seeded rollover operation')
-    expect(operation.data.sourceSessionId).toBe(member.sessionId)
+    expect(operation.data.sourceSessionId).toBe(previousSessionId)
     expect(operation.data.sourceThroughSeq).toBe(30)
     expect(operation.data.checkpointRef).toBe('context-checkpoint:abc')
     expect(() => replayLedger(test).validate()).not.toThrow()
   })
 
-  it('rejects a forged rollover that moves more than the sessionId during replay', async () => {
+  it('rejects a forged rollover that changes the member snapshot during replay', async () => {
     const pool = new MemoryMediaPool()
     const first = await harness(pool)
     const ledger = replayLedger(first)
-    const { member, actor } = await addLedgerMember(ledger, undefined)
+    const channel = (await ledger.createChannel({ requestId: requestId('rollover-channel'), workspaceId: alpha,
+      name: 'engineering', description: '', actor: agentTeamHumanActor() })).value.channel
+    const { member, actor } = await addLedgerMember(ledger, channel.channelRef)
+    const previousSessionId = SessionId(`agent-team-channel-${crypto.randomUUID()}`)
+    const scopeKey = await bindLedgerMemberChannelSession(ledger, member.memberId, channel.channelRef as AgentTeamChannelRef, previousSessionId)
     const newSessionId = SessionId(`agent-team-rollover-${crypto.randomUUID()}`)
     await ledger.rolloverMemberSession({
-      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor,
-      previousSessionId: member.sessionId, newSessionId, handoffEventSeq: 1 as never, trigger: 'model',
+      requestId: requestId('rollover'), workspaceId: alpha, memberId: member.memberId, actor, scopeKey,
+      previousSessionId, newSessionId, handoffEventSeq: 1 as never, trigger: 'model',
     })
     const records = [...pool.media.get('agent_team')!.tables.get('operations')!.entries()]
     await first.fiber.dispose()
@@ -2524,7 +2554,7 @@ describe('AgentTeam Member session rollover ledger command', () => {
       const rolled = operation as Extract<AgentTeamOperation, { kind: 'team/member-session-rolled-over' }>
       return [key, { ...rolled, data: { ...rolled.data, member: { ...rolled.data.member, handle: 'impostor' } } }] as [string, unknown]
     })
-    await expect(harness(storedPool(forged))).rejects.toThrow(/invalid Member session rollover/)
+    await expect(harness(storedPool(forged))).rejects.toThrow(/invalid Member session transition scope/)
   })
 })
 

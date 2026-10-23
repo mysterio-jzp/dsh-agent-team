@@ -98,15 +98,13 @@ describe('the Team context codec', () => {
 
 describe('the Team context-continuity host', () => {
   const member = { memberId: MEMBER_ID, sessionId: SESSION_ID } as AgentTeamAgentMember
-  const agent = { id: 'agent:one' } as Agent
+  const agent = { id: 'agent:one', session: { id: SESSION_ID } } as unknown as Agent
 
   it('derives the durable rollover identity unchanged', () => {
     const host = new TeamContextContinuityHost({
-      agentForMember: () => undefined,
-      surfaceForAgent: () => undefined,
-      sessionForMemberScope: () => undefined,
+      agentForSession: () => undefined,
       memberForAgent: () => undefined,
-      projectionForMember: () => undefined,
+      projectionForSession: () => undefined,
       executeTransition: () => Promise.resolve(),
       log: () => {},
     })
@@ -122,19 +120,15 @@ describe('the Team context-continuity host', () => {
 
   it('resolves subjects and Agents in both directions per (Member, scopeKey)', () => {
     const host = new TeamContextContinuityHost({
-      agentForMember: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? agent : undefined),
-      surfaceForAgent: candidate => (candidate === agent ? { member, scopeKey: SCOPE_KEY } : undefined),
-      sessionForMemberScope: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? SESSION_ID : undefined),
+      agentForSession: id => (id === SESSION_ID ? agent : undefined),
       memberForAgent: candidate => (candidate === agent ? member : undefined),
-      projectionForMember: () => undefined,
+      projectionForSession: () => undefined,
       executeTransition: () => Promise.resolve(),
       log: () => {},
     })
 
-    expect(parseContinuitySubjectId(SUBJECT_ID)).toEqual({ memberId: MEMBER_ID, scopeKey: SCOPE_KEY })
-    expect(host.agentForSubject(SUBJECT_ID)).toBe(agent)
-    expect(host.agentForSubject(continuitySubjectId(MEMBER_ID, 'default' as AgentTeamMemberScopeKey))).toBeUndefined()
-    expect(host.subjectForAgent(agent)).toEqual({ id: SUBJECT_ID, sessionId: SESSION_ID })
+    expect(host.agentForSubject(SESSION_ID)).toBe(agent)
+    expect(host.subjectForAgent(agent)).toEqual({ id: SESSION_ID, sessionId: SESSION_ID })
     expect(host.subjectForAgent({ id: 'agent:other' } as Agent)).toBeUndefined()
   })
 
@@ -241,11 +235,9 @@ describe('the Team context-continuity host', () => {
 
   it('treats Team notices as rederived and foreign messages as real input', () => {
     const host = new TeamContextContinuityHost({
-      agentForMember: () => undefined,
-      surfaceForAgent: () => undefined,
-      sessionForMemberScope: () => undefined,
+      agentForSession: () => undefined,
       memberForAgent: () => undefined,
-      projectionForMember: () => undefined,
+      projectionForSession: () => undefined,
       executeTransition: () => Promise.resolve(),
       log: () => {},
     })
@@ -283,14 +275,12 @@ describe('the Team context-continuity host', () => {
     // restart landing before the containing turn ends durably — has no other
     // guard, and swapping a generation under an open turn is exactly the
     // mistake it exists to prevent.
-    const executeTransition = vi.fn((_memberId: AgentTeamMemberId, _plan: TransitionPlan) => Promise.resolve())
-    const live = { id: 'agent:one', whenIdle: () => Promise.resolve() } as unknown as Agent
+    const executeTransition = vi.fn((_sessionId: SessionId, _plan: TransitionPlan) => Promise.resolve())
+    const live = { id: 'agent:one', session: { id: SESSION_ID }, whenIdle: () => Promise.resolve() } as unknown as Agent
     const management = createTeamContextManagement({
-      agentForMember: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? live : undefined),
-      surfaceForAgent: candidate => (candidate === live ? { member, scopeKey: SCOPE_KEY } : undefined),
-      sessionForMemberScope: (id, scopeKey) => (id === MEMBER_ID && scopeKey === SCOPE_KEY ? SESSION_ID : undefined),
+      agentForSession: id => (id === SESSION_ID ? live : undefined),
       memberForAgent: candidate => (candidate === live ? member : undefined),
-      projectionForMember: () => ({
+      projectionForSession: () => ({
         pending: { toolCallId: 'call-1', resultSeq: 4, turn: 2, handoff: 'Handoff prose.', relatedFiles: [], turnEndSeq: -1 },
         checkpoints: [],
       }) as unknown as ContextProjectionState,
@@ -298,22 +288,22 @@ describe('the Team context-continuity host', () => {
       log: () => {},
     })
 
-    management.recoverPendingTransition(SUBJECT_ID, live, SESSION_ID)
+    management.recoverPendingTransition(SESSION_ID, live, SESSION_ID)
 
     // Nothing ended the containing turn durably, so recovery is registration
     // alone: the intent waits for the live turn end, and no swap may run yet.
-    expect(management.isTransitioning(SUBJECT_ID)).toBe(true)
+    expect(management.isTransitioning(SESSION_ID)).toBe(true)
     expect(executeTransition).not.toHaveBeenCalled()
 
-    management.onSessionEvent(SUBJECT_ID, live, { type: 'turn/end' } as SessionEvent)
+    management.onSessionEvent(SESSION_ID, live, { type: 'turn/end' } as SessionEvent)
     await new Promise(resolve => setImmediate(resolve))
 
     // The parked intent then completes through the ordinary idle-boundary
     // path, carrying the ORIGINAL intent's handoff rather than a re-derived one.
     expect(executeTransition).toHaveBeenCalledTimes(1)
-    expect(executeTransition.mock.calls[0]?.[0]).toBe(MEMBER_ID)
+    expect(executeTransition.mock.calls[0]?.[0]).toBe(SESSION_ID)
     expect(executeTransition.mock.calls[0]?.[1]).toMatchObject({ handoff: 'Handoff prose.', trigger: 'model' })
-    expect(management.isTransitioning(SUBJECT_ID)).toBe(false)
+    expect(management.isTransitioning(SESSION_ID)).toBe(false)
   })
 })
 
@@ -336,17 +326,15 @@ describe('the projection read', () => {
       lastTurnEndSeq: 6,
     }
     const host = new TeamContextContinuityHost({
-      agentForMember: () => undefined,
-      surfaceForAgent: () => undefined,
-      sessionForMemberScope: () => undefined,
+      agentForSession: () => undefined,
       memberForAgent: () => undefined,
-      projectionForMember: (memberId, sessionId) => (memberId === MEMBER_ID && sessionId === SESSION_ID ? state : undefined),
+      projectionForSession: sessionId => (sessionId === SESSION_ID ? state : undefined),
       executeTransition: () => Promise.resolve(),
       log: () => {},
     })
 
-    expect(host.projectionForSubject(SUBJECT_ID, SESSION_ID)).toBe(state)
-    expect(host.projectionForSubject(SUBJECT_ID, SessionId('session:two'))).toBeUndefined()
+    expect(host.projectionForSubject(SESSION_ID, SESSION_ID)).toBe(state)
+    expect(host.projectionForSubject(SESSION_ID, SessionId('session:two'))).toBeUndefined()
   })
 })
 

@@ -71,52 +71,54 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
   const drag = useSidebarRowDrag({ refs: orderedAgentRefs, onCommit: applyMove })
   const sectionOpen = useSidebarSectionOpen(workspaceId, 'agents')
 
-  // Observed old→new Session binding per Member while this panel is
-  // mounted. A model-initiated rollover moves the binding without any
-  // Client action; when the conversation seat is showing the Member's
-  // previous live Session, the panel follows to the new one exactly once —
-  // but only after the refreshed status is actually active, so the commit
-  // window (binding moved, new Session not yet live) never redirects to a
-  // Session that does not exist. The follow requires the seat to still show
-  // the previous Session at completion as well: a rollover observed while
-  // unavailable stays pending, and navigating away before it completes
-  // cancels the follow instead of pulling the pane back.
-  const observedSessionIds = useRef(new Map<string, AgentTeamClientMemberStatus['member']['sessionId']>())
-  const pendingFollows = useRef(new Map<string, { readonly previousSessionId: AgentTeamClientMemberStatus['member']['sessionId']; readonly nextSessionId: AgentTeamClientMemberStatus['member']['sessionId'] }>())
-  // The seat's embedded Session id rides a ref: the change subscription may
-  // deliver an invalidation through a refresh closure captured before the
-  // seat rebinds, and the follow decision must always read the live value.
+  // Observe each Member/Channel binding while mounted. A Channel rollover
+  // follows only the exact previous live Session shown by the seat, and only
+  // once the replacement Channel row is ready; navigating away during the
+  // commit window cancels the follow instead of reopening an unrelated Session.
+  const observedChannelSessions = useRef(new Map<string, AgentTeamClientMemberStatus['channels'][number]['sessionId']>())
+  const pendingFollows = useRef(new Map<string, { readonly previousSessionId: NonNullable<AgentTeamClientMemberStatus['channels'][number]['sessionId']>; readonly nextSessionId?: AgentTeamClientMemberStatus['channels'][number]['sessionId'] }>())
+  // Read the live seat value: a workspace invalidation may run through a
+  // refresh closure captured before navigation changed.
   const seatSessionIdRef = useRef(memberSessionId)
   seatSessionIdRef.current = memberSessionId
   const openMemberSessionRef = useRef(openMemberSession)
   openMemberSessionRef.current = openMemberSession
   const followRollover = useCallback((statuses: readonly AgentTeamClientMemberStatus[]) => {
+    const presentChannels = new Set<string>()
     for (const status of statuses) {
-      const memberId = status.member.memberId
-      const observed = observedSessionIds.current.get(memberId)
-      if (observed === undefined) {
-        observedSessionIds.current.set(memberId, status.member.sessionId)
-        continue
+      for (const row of status.channels ?? []) {
+        const key = `${status.member.memberId}\u0000${row.channelRef}`
+        presentChannels.add(key)
+        const hadObservation = observedChannelSessions.current.has(key)
+        const observed = observedChannelSessions.current.get(key)
+        if (!hadObservation) {
+          observedChannelSessions.current.set(key, row.sessionId)
+          continue
+        }
+        if (observed !== row.sessionId) {
+          observedChannelSessions.current.set(key, row.sessionId)
+          const seatSessionId = seatSessionIdRef.current
+          const pending = pendingFollows.current.get(key)
+          if (observed !== undefined && seatSessionId === observed) {
+            pendingFollows.current.set(key, { previousSessionId: observed, nextSessionId: row.sessionId })
+          } else if (pending !== undefined && seatSessionId === pending.previousSessionId) {
+            pendingFollows.current.set(key, { ...pending, nextSessionId: row.sessionId })
+          } else {
+            pendingFollows.current.delete(key)
+          }
+        }
+        const pending = pendingFollows.current.get(key)
+        if (pending?.nextSessionId !== undefined && pending.nextSessionId === row.sessionId && row.state === 'ready') {
+          const seatSessionId = seatSessionIdRef.current
+          pendingFollows.current.delete(key)
+          if (seatSessionId === pending.previousSessionId) openMemberSessionRef.current(pending.nextSessionId)
+        }
       }
-      if (observed !== status.member.sessionId) {
-        observedSessionIds.current.set(memberId, status.member.sessionId)
-        // Only the exact previous live page follows; browsing an older
-        // archive or another Member stays untouched. A binding change seen
-        // before any page is embedded is still recorded so the observation
-        // baseline stays current.
-        const seatSessionId = seatSessionIdRef.current
-        if (seatSessionId !== undefined && observed === seatSessionId) pendingFollows.current.set(memberId, { previousSessionId: observed, nextSessionId: status.member.sessionId })
-        else pendingFollows.current.delete(memberId)
-      }
-      const pending = pendingFollows.current.get(memberId)
-      if (pending !== undefined && pending.nextSessionId === status.member.sessionId && status.availability === 'active') {
-        // The seat must still show the followed Member's previous Session at
-        // completion too: the commit window can outlive the user's patience,
-        // and navigating away (or onto another Member/archive view) cancels
-        // the follow instead of yanking the pane back onto the new Session.
-        const seatSessionId = seatSessionIdRef.current
-        pendingFollows.current.delete(memberId)
-        if (seatSessionId !== undefined && seatSessionId === pending.previousSessionId) openMemberSessionRef.current(pending.nextSessionId)
+    }
+    for (const key of observedChannelSessions.current.keys()) {
+      if (!presentChannels.has(key)) {
+        observedChannelSessions.current.delete(key)
+        pendingFollows.current.delete(key)
       }
     }
   }, [])
@@ -283,7 +285,7 @@ export function TeamAgentsPanel({ workspaceId, loadMembers, subscribeChanges, ad
         <div className={css.agentList}>
           {orderedMembers.map(status => (
             <SortableRow key={status.member.memberId} drag={drag} orderKey={status.member.memberId}>
-              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} {...(memberSessionId === undefined ? {} : { current: status.member.sessionId === memberSessionId })} updateMember={updateMember} setPresident={setPresident} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} putMemberAvatar={putMemberAvatar} removeMemberAvatar={removeMemberAvatar} memberAvatars={memberAvatars} openMemberPersonaPath={openMemberPersonaPath} openMemberSession={openMemberSession} onUpdated={refresh} t={t} />
+              <AgentRow workspaceId={workspaceId} leaveWorkspace={leaveWorkspace} status={status} updateMember={updateMember} setPresident={setPresident} recoverMember={recoverMember} archiveMember={archiveMember} loadModels={loadModels} putMemberAvatar={putMemberAvatar} removeMemberAvatar={removeMemberAvatar} memberAvatars={memberAvatars} openMemberPersonaPath={openMemberPersonaPath} openMemberSession={openMemberSession} onUpdated={refresh} t={t} />
             </SortableRow>
           ))}
         </div>
@@ -362,17 +364,14 @@ function ChannelRows({ status, openMemberSession, setRowAlert, t }: {
 }
 
 /**
- * One sidebar Agent row: the select button expands and collapses the Channel
- * list when the Member has Channels, and opens the Member's own Session
- * conversation page when it has none. The avatar carries identity plus the
- * presence badge, and the row menu opens the editor.
+ * One sidebar Agent row: its control expands the Channel list when the Member
+ * has Channels. An Agent identity without Channels is not a Session entry
+ * point; its row menu still opens the editor and other management actions.
  */
-function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, setPresident, recoverMember, archiveMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, openMemberSession, onUpdated, t }: {
+function AgentRow({ workspaceId, leaveWorkspace, status, updateMember, setPresident, recoverMember, archiveMember, loadModels, putMemberAvatar, removeMemberAvatar, memberAvatars, openMemberPersonaPath, openMemberSession, onUpdated, t }: {
   readonly workspaceId: WorkspaceId
   readonly leaveWorkspace: TeamSidebarProps['leaveWorkspace']
   readonly status: AgentTeamClientMemberStatus
-  /** This Member's Session is the one embedded in the conversation seat. */
-  readonly current?: boolean
   readonly updateMember: TeamSidebarProps['updateMember']
   readonly setPresident: TeamSidebarProps['setPresident']
   readonly recoverMember: TeamSidebarProps['recoverMember']
@@ -414,9 +413,6 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
         return
       }
       setRowAlert(undefined)
-      // A page opened while the Member was down predates the live Session;
-      // re-selecting is a no-op when already bound and rebinds when stale.
-      if (current === true) openMemberSession(status.member.sessionId)
     } catch (cause) {
       setRowAlert(t('restartFailed', { message: cause instanceof Error ? cause.message : String(cause) }))
     }
@@ -442,15 +438,7 @@ function AgentRow({ workspaceId, leaveWorkspace, status, current, updateMember, 
   return (
     <>
       <div className={css.agentRow} data-agent-row data-menu-open={menuOpen || undefined}>
-        <button type="button" className={css.agentSelect} aria-label={t(hasChannels ? 'toggleAgentChannels' : 'openAgentSession', { name: status.member.handle })} aria-current={current ? 'page' : undefined} aria-expanded={hasChannels ? channelsOpen : undefined} disabled={status.availability !== 'active' && !hasChannels} onClick={() => {
-          if (hasChannels) {
-            setChannelsOpen(open => !open)
-            return
-          }
-          openMemberSession(status.member.sessionId, message => {
-            setRowAlert(t('openAgentSessionFailed', { name: status.member.handle.replace(/^@/, ''), message }))
-          })
-        }}>
+        <button type="button" className={css.agentSelect} {...(hasChannels ? { 'aria-label': t('toggleAgentChannels', { name: status.member.handle }), 'aria-expanded': channelsOpen } : {})} disabled={!hasChannels} onClick={() => { if (hasChannels) setChannelsOpen(open => !open) }}>
           <TeamMemberIdentity status={status} name={status.member.handle.replace(/^@/, '')} className={css.agentCopy} t={t} memberAvatars={memberAvatars} />
         </button>
         {status.member.president === true && <span className={css.presidentBadge} title={t('presidentManagerBadgeHint')}>{t('presidentRole')}</span>}

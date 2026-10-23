@@ -9,6 +9,24 @@ function mainViewSessionId(b: Awaited<ReturnType<typeof runtimeWithTeam>>): stri
   return Object.values(b.runtime.sessions.list.getSnapshot().byId).find(session => (session.retainedBy.mainView ?? 0) > 0)?.id
 }
 
+async function reportBuilderChannels(b: Awaited<ReturnType<typeof runtimeWithTeam>>, channels: readonly Record<string, unknown>[], presence: 'available' | 'unavailable' = 'available'): Promise<void> {
+  b.publishChannelUpdate()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  b.members.mockImplementation(async () => ({
+    ok: true,
+    value: [{ ...b.status('member:builder', 'w1', 'builder', presence), channels }],
+  } as never))
+  b.publishChannelUpdate()
+  await waitFor(() => { expect(b.view.getByRole('button', { name: '展开/收起 builder 的频道' })).toBeTruthy() })
+}
+
+async function openBuilderChannelSession(b: Awaited<ReturnType<typeof runtimeWithTeam>>, channelName: RegExp = /engineering/): Promise<void> {
+  const agent = b.view.getByRole('button', { name: '展开/收起 builder 的频道' })
+  if (agent.getAttribute('aria-expanded') !== 'true') fireEvent.click(agent)
+  const list = await b.view.findByRole('list', { name: 'builder 的频道' })
+  fireEvent.click(within(list).getByRole('button', { name: channelName }))
+}
+
 usePinnedBrowserLanguages('zh-CN')
 afterEach(cleanup)
 beforeEach(() => { localStorage.clear() })
@@ -228,8 +246,12 @@ describe('Team agent surfaces', () => {
     await b.runtime.dispose()
   })
 
-  it('creates a Channel atomically with selected available Members and manages committed membership', async () => {
+  it('creates a Channel atomically with selected enabled Members and manages committed membership', async () => {
     const b = await runtimeWithTeam()
+    const builderWithoutChannel = b.status('member:builder', 'w1', 'builder', 'unavailable')
+    const suspended = b.status('member:offline', 'w1', 'offline', 'unavailable')
+    Object.assign(suspended.member, { state: 'suspended' })
+    b.members.mockImplementation(async () => ({ ok: true, value: [builderWithoutChannel, suspended] } as never))
     fireEvent.click(b.view.getByRole('button', { name: '团队' }))
     expect(await b.view.findByText('还没有频道')).toBeTruthy()
     fireEvent.click(b.view.getByRole('button', { name: '新建频道' }))
@@ -313,14 +335,12 @@ describe('Team agent surfaces', () => {
     await b.runtime.dispose()
   })
 
-  it('retires the manual clear-context action and follows a Member rollover exactly once', async () => {
+  it('retires the manual clear-context action and follows a Channel rollover exactly once', async () => {
     const b = await runtimeWithTeam({ initialChannels: true })
     fireEvent.click(b.view.getByRole('button', { name: '团队' }))
     await b.view.findByText('builder')
 
-    // The manual clear-context row action is retired: Members manage their
-    // own context through the context_rollover tool, and every row menu —
-    // available, working, error, unavailable — omits the entry entirely.
+    // The manual clear-context row action is retired: every Member menu omits it.
     for (const handle of ['builder', 'worker', 'failed', 'offline']) {
       fireEvent.click(b.view.getByRole('button', { name: `${handle} 的操作` }))
       const menu = await within(document.body).findByRole('menu')
@@ -328,60 +348,20 @@ describe('Team agent surfaces', () => {
       fireEvent.keyDown(document, { key: 'Escape' })
     }
 
-    // While no Member page is embedded, a rollover binding change never
-    // redirects the conversation seat.
-    // Prime the change stream: the first wake advances the probe loop so
-    // later publishes reach the listener (no roster change is attached to it).
-    b.publishChannelUpdate()
-    await new Promise(resolve => setTimeout(resolve, 30))
-    b.members.mockImplementation(async () => ({ ok: true, value: [
-      b.status('member:builder', 'w1', 'builder', 'available'),
-    ].map(entry => ({ ...entry, member: { ...entry.member, sessionId: 'session:builder-next' } })) }))
-    b.publishChannelUpdate()
-    // The roster now reports only builder on the new binding: wait for the
-    // refresh to land (worker's row disappears) before opening the page.
-    await waitFor(() => { expect(b.view.queryByRole('button', { name: '打开 worker 的会话' })).toBeNull() }, { timeout: 3000 })
-    expect(b.openSession.mock.calls.some(([id]) => String(id).includes('builder-next'))).toBe(false)
+    const previousSessionId = 'session:builder-eng'
+    const nextSessionId = 'session:builder-eng-next'
+    await b.runtime.sessions.add({ id: previousSessionId as never, summary: { title: 'engineering', cwd: '/work/alpha' } } as never)
+    await b.runtime.sessions.add({ id: nextSessionId as never, summary: { title: 'engineering', cwd: '/work/alpha' } } as never)
+    await reportBuilderChannels(b, [{ channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', sessionId: previousSessionId }])
+    await openBuilderChannelSession(b)
+    expect(b.openSession).toHaveBeenCalledWith(previousSessionId)
 
-    // Open the Member's live page: the conversation seat embeds the
-    // post-rollover Session the roster now reports.
-    await b.runtime.sessions.add({ id: 'session:builder-next' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
-    fireEvent.click(b.view.getByRole('button', { name: '打开 builder 的会话' }))
-    await waitFor(() => {
-      expect(b.view.getByRole('button', { name: '打开 builder 的会话' }).getAttribute('aria-current')).toBe('page')
-    })
-    const opened = b.openSession.mock.calls.length
-
-    // A rollover that lands while the commit window still reports the Member
-    // unavailable does not redirect — the new Session does not exist for the
-    // client yet.
-    b.members.mockImplementation(async () => ({ ok: true, value: [
-      { ...b.status('member:builder', 'w1', 'builder', 'unavailable', { class: 'rollover', detail: 'context rollover in progress' }), member: { ...b.status('member:builder', 'w1', 'builder', 'unavailable').member, sessionId: 'session:builder-next-2' } },
-    ] }))
-    b.publishChannelUpdate()
-    await new Promise(resolve => setTimeout(resolve, 50))
-    expect(b.openSession.mock.calls.length).toBe(opened)
-
-    // Navigating away during the commit window cancels the follow: leaving
-    // the Member page (back onto a Channel) rebinds the seat, so the later
-    // active refresh must not yank the pane onto the new Session.
-    fireEvent.click(b.view.getByRole('button', { name: '# engineering' }))
-    await waitFor(() => { expect(b.view.getByRole('button', { name: '打开 builder 的会话' }).getAttribute('aria-current')).toBe(null) })
-    b.members.mockImplementation(async () => ({ ok: true, value: [
-      b.status('member:builder', 'w1', 'builder', 'available'),
-    ].map(entry => ({ ...entry, member: { ...entry.member, sessionId: 'session:builder-next-2' } })) }))
+    // A Channel-domain binding rollover follows the selected session once.
+    await reportBuilderChannels(b, [{ channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', sessionId: nextSessionId }])
+    await waitFor(() => expect(b.openSession.mock.calls.filter(([id]) => id === nextSessionId)).toHaveLength(1))
     b.publishChannelUpdate()
     await new Promise(resolve => setTimeout(resolve, 80))
-    expect(b.openSession.mock.calls.filter(([id]) => String(id).includes('builder-next-2')).length).toBe(0)
-
-    // Returning to the Member page after the rollover settled opens the
-    // post-rollover generation directly — the observation baseline has
-    // already absorbed the change, so no pending follow remains.
-    await b.runtime.sessions.add({ id: 'session:builder-next-2' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
-    fireEvent.click(b.view.getByRole('button', { name: '打开 builder 的会话' }))
-    await waitFor(() => {
-      expect(b.openSession.mock.calls.filter(([id]) => String(id).includes('builder-next-2')).length).toBe(1)
-    })
+    expect(b.openSession.mock.calls.filter(([id]) => id === nextSessionId)).toHaveLength(1)
     await b.runtime.dispose()
   })
 
@@ -436,102 +416,71 @@ describe('Team agent surfaces', () => {
     }
   })
 
-  it('opens the Member Session inside Team mode from the Agent card', async () => {
+  it('keeps Agent rows from opening Member Sessions and opens the Channel-domain Session', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
-    await b.runtime.sessions.add({ id: 'session:member:builder' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
+    const memberSessionId = 'session:member:builder'
+    const channelSessionId = 'session:builder-eng'
+    await b.runtime.sessions.add({ id: memberSessionId as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
+    await b.runtime.sessions.add({ id: channelSessionId as never, summary: { title: 'engineering', cwd: '/work/alpha' } } as never)
     await b.view.findByText('builder')
-    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
-    expect(await b.view.findByRole('heading', { name: '# engineering' })).toBeTruthy()
-    expect(document.documentElement.dataset.agentTeamMode).toBe('team')
-    // Team views own the conversation seat before the card click.
-    expect(b.view.container.querySelector('[data-phase]')).toBeNull()
 
-    fireEvent.click(b.view.getByRole('button', { name: '打开 builder 的会话' }))
-    await waitFor(() => {
-      expect(b.openSession).toHaveBeenCalledWith('session:member:builder')
-    })
-    // The card stays inside Team mode: the chrome remains mounted and the
-    // conversation seat yields to the shipped root rendering the Member Session.
-    expect(document.documentElement.dataset.agentTeamMode).toBe('team')
-    await waitFor(() => { expect(b.view.container.querySelector('[data-phase]')).toBeTruthy() })
-    expect(b.view.container.querySelector('[data-team-conversation]')).toBeNull()
-    // The single positioning highlight moves to the selected Agent card; the
-    // workspace overview row goes quiet.
-    const card = b.view.getByRole('button', { name: '打开 builder 的会话' })
-    await waitFor(() => { expect(card.getAttribute('aria-current')).toBe('page') })
-    for (const row of b.view.container.querySelectorAll('[aria-current="page"]')) {
-      expect(row).toBe(card)
-    }
+    // A Member without Channel rows is not an entry point to its legacy personal Session.
+    const memberRow = b.view.container.querySelector('[data-agent-row] [class*="agentSelect"]') as HTMLButtonElement
+    expect(memberRow.disabled).toBe(true)
+    fireEvent.click(memberRow)
+    expect(b.openSession).not.toHaveBeenCalledWith(memberSessionId)
 
-    // Explicit Team navigation closes the embedded Member view again.
-    fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
-    await waitFor(() => { expect(b.view.container.querySelector('[data-team-channel]')).toBeTruthy() })
-    expect(b.view.container.querySelector('[data-phase]')).toBeNull()
-    expect(card.getAttribute('aria-current')).toBeNull()
+    await reportBuilderChannels(b, [{ channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', sessionId: channelSessionId }])
+    await openBuilderChannelSession(b)
+    await waitFor(() => expect(b.openSession).toHaveBeenCalledWith(channelSessionId))
+    expect(b.openSession).not.toHaveBeenCalledWith(memberSessionId)
     await b.runtime.dispose()
   })
 
-  it('lends the Agent card the marker while the Inbox page stands under it', async () => {
-    // The Inbox page is a Team face the reader can be standing on when they open
-    // an Agent, and the overlay embeds that Session over the page rather than
-    // replacing it: the page keeps its place while exactly one row — the Agent
-    // card — wears the marker, and the entry takes the marker back on the way out.
+  it('returns from a Channel Session to Inbox without reopening a disposed id', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
-    await b.runtime.sessions.add({ id: 'session:member:builder' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
+    const channelSessionId = 'session:builder-eng'
+    await b.runtime.sessions.add({ id: channelSessionId as never, summary: { title: 'engineering', cwd: '/work/alpha' } } as never)
     await b.view.findByText('builder')
+    await reportBuilderChannels(b, [{ channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', sessionId: channelSessionId }])
+
     const entry = b.view.getByRole('button', { name: /^收件箱/ })
     fireEvent.click(entry)
     await waitFor(() => { expect(b.view.container.querySelector('[data-team-inbox]')).toBeTruthy() })
     await waitFor(() => { expect(entry.getAttribute('aria-current')).toBe('page') })
 
-    const card = b.view.getByRole('button', { name: '打开 builder 的会话' })
-    fireEvent.click(card)
-    await waitFor(() => { expect(b.view.container.querySelector('[data-phase]')).toBeTruthy() })
-    // The page left the seat with the overlay, and only the card is marked: the
-    // Inbox entry is a remembered location, not a second current page.
-    expect(b.view.container.querySelector('[data-team-inbox]')).toBeNull()
-    await waitFor(() => { expect(card.getAttribute('aria-current')).toBe('page') })
-    expect(entry.getAttribute('aria-current')).toBeNull()
-    for (const row of b.view.container.querySelectorAll('[aria-current="page"]')) expect(row).toBe(card)
+    await openBuilderChannelSession(b)
+    await waitFor(() => expect(b.openSession).toHaveBeenCalledWith(channelSessionId))
+    await b.runtime.sessions.remove(channelSessionId)
 
-    // Leaving the overlay puts the reader back on the page they were reading,
-    // and the marker goes home with them.
+    // Returning to the Team page must not resurrect the disposed Channel Session.
     fireEvent.click(entry)
     await waitFor(() => { expect(b.view.container.querySelector('[data-team-inbox]')).toBeTruthy() })
     expect(entry.getAttribute('aria-current')).toBe('page')
-    expect(card.getAttribute('aria-current')).toBeNull()
+    expect(b.openSession.mock.calls.filter(([id]) => id === channelSessionId)).toHaveLength(1)
     await b.runtime.dispose()
   })
 
-  it('rebinds the underlying session when leaving an embedded Member view, so an off-seat rollover never blanks the seat', async () => {
+  it('returns from a Channel Session to its page without a blank seat after disposal', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
-    // Added without taking the selection: the Human's ordinary session stays
-    // the workspace service's `mainView` retention, the way a real Member
-    // session exists beside it on the Host.
-    await b.runtime.sessions.add({ id: 'session:member:builder' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
+    const channelSessionId = 'session:builder-eng'
+    await b.runtime.sessions.add({ id: channelSessionId as never, summary: { title: 'engineering', cwd: '/work/alpha' } } as never)
     await b.view.findByText('builder')
+    await reportBuilderChannels(b, [{ channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', sessionId: channelSessionId }])
     fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
 
-    // Enter the Member page: the seat embeds the Member session while the
-    // underlying DSH current still points at the Human's ordinary session
-    // only until open() moves it.
-    fireEvent.click(b.view.getByRole('button', { name: '打开 builder 的会话' }))
-    await waitFor(() => { expect(mainViewSessionId(b)).toBe('session:member:builder') })
+    await openBuilderChannelSession(b)
+    await waitFor(() => { expect(mainViewSessionId(b)).toBe(channelSessionId) })
 
-    // Leaving the Member page through Team navigation must rebind the
-    // underlying selection back to the Human's original session exactly once —
-    // a stale Member retention would otherwise become the next entry's
-    // return target.
+    // Returning to the Channel page restores the ordinary selection once;
+    // disposing the former Channel Session cannot blank or remount its seat.
     fireEvent.click(b.view.getByRole('button', { name: '# engineering' }))
     await waitFor(() => { expect(b.view.container.querySelector('[data-team-channel]')).toBeTruthy() })
     expect(mainViewSessionId(b)).toBe('ordinary-session')
     expect(b.openSession.mock.calls.filter(([id]) => id === 'ordinary-session')).toHaveLength(1)
     const seat = b.view.container.querySelector('[data-team-channel]') as HTMLElement
 
-    // The later rollover disposal of the Member session is now invisible to
-    // the seat: the selection was already rebound, so no undefined gap, no
-    // remount.
-    await b.runtime.sessions.remove('session:member:builder')
+    await b.runtime.sessions.remove(channelSessionId)
     await new Promise(resolve => setTimeout(resolve, 50))
     expect(mainViewSessionId(b)).toBe('ordinary-session')
     expect(b.view.container.querySelector('[data-team-channel]')).toBe(seat)
@@ -539,24 +488,22 @@ describe('Team agent surfaces', () => {
     await b.runtime.dispose()
   })
 
-  it('keeps the departed Member retention when the return target is gone, without reopening the dead id', async () => {
+  it('keeps the Channel Session when its return target is gone without reopening the dead id', async () => {
     const b = await runtimeWithTeam({ mode: 'team', workspaceId: 'w1', initialChannels: true })
-    await b.runtime.sessions.add({ id: 'session:member:builder' as never, summary: { title: 'builder', cwd: '/work/alpha' } } as never)
+    const channelSessionId = 'session:builder-eng'
+    await b.runtime.sessions.add({ id: channelSessionId as never, summary: { title: 'engineering', cwd: '/work/alpha' } } as never)
     await b.view.findByText('builder')
+    await reportBuilderChannels(b, [{ channelRef: 'channel:engineering', channelName: 'engineering', state: 'ready', sessionId: channelSessionId }])
     fireEvent.click(await b.view.findByRole('button', { name: '# engineering' }))
-    fireEvent.click(b.view.getByRole('button', { name: '打开 builder 的会话' }))
-    await waitFor(() => { expect(mainViewSessionId(b)).toBe('session:member:builder') })
+    await openBuilderChannelSession(b)
+    await waitFor(() => { expect(mainViewSessionId(b)).toBe(channelSessionId) })
 
-    // The return target dies while the Member page is embedded (the Host
-    // disposed the Human's ordinary session). 0.1.7 exposes no public clear,
-    // so leaving the view keeps the departed Member retention behind the Team
-    // seat; the member-session exclusion in the next capture keeps it from
-    // becoming a false return target.
+    // The Human's ordinary return target disappears while the Channel Session is selected.
     await b.runtime.sessions.remove('ordinary-session')
     fireEvent.click(b.view.getByRole('button', { name: '# engineering' }))
     await waitFor(() => { expect(b.view.container.querySelector('[data-team-channel]')).toBeTruthy() })
-    expect(mainViewSessionId(b)).toBe('session:member:builder')
-    // The dead target is never opened: unknown ids fail loud in the service.
+    expect(mainViewSessionId(b)).toBe(channelSessionId)
+    expect(b.openSession.mock.calls.filter(([id]) => id === channelSessionId)).toHaveLength(1)
     expect(b.openSession).not.toHaveBeenCalledWith('ordinary-session')
     await b.runtime.dispose()
   })

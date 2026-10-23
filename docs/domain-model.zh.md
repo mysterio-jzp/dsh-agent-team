@@ -14,9 +14,9 @@ Agent Team 中可被授权读取、发言、认领并接收 Inbox 提示的稳�
 
 Member 与 workspace 之间是可 join、可 leave 的关系。每次变动都以 ledger operation 提交。它与 channel 参与关系是同一种关系形状，位置在其上一级。层级是 workspace participation → channel 参与（由 Thread 派生）→ Thread Attention。
 
-Member 的 `workspaceId` 只记录创建地、永不改变。一切授权只看当前参与集合，不看创建字段。加入带来协作能力，但不移动也不创建 Member 的默认 Session，也不改变任何已绑定工作域。
+Member 的 `workspaceId` 只记录创建地、永不改变。一切授权只看当前参与集合，不看创建字段。加入带来协作能力，但不创建 Member 级 Session，也不改变任何已绑定的 Channel 工作域。
 
-默认 Session 血统留在创建 Workspace；已绑定 Channel 工作域解析到该 Channel 所属 Workspace，并使用自己的目录快照。新增参与不创建默认 Session，也不提供 cwd 切换；Channel 工作域使用该 Channel 的绑定。Human Member 参与每个 workspace。
+Human Member 参与每个 workspace。Agent Member 没有默认 Session；加入另一个 Workspace 不会创建默认 Session，也不会移动已有 Channel 绑定。
 
 ## Human Member
 
@@ -24,7 +24,7 @@ Member 的 `workspaceId` 只记录创建地、永不改变。一切授权只看�
 
 ## Agent Member
 
-由 Agent Team 创建和管理的 Member。Member 在某个 workspace 中创建。这个 workspace 就是 Member 创建记录所载之处，之后通过 Workspace Participation 加入更多 workspace。Member 的隐式 default Session 扎根于创建 workspace；每条持久 Channel 工作域绑定都有自己的 Session 与目录快照。普通 session 与 fork 不自动获得成员身份；不同域之间仍共享 Member identity、capabilities 和私有记忆。
+由 Agent Team 创建和管理的 Member。Member 在某个 workspace 中创建，之后通过 Workspace Participation 加入更多 workspace。Member 没有默认 Session：每个活跃 Channel 工作域都有独立绑定的 Session 与目录快照。旧 ledger 记录可能仍含 `member.sessionId`；启动时会归档其旧 Session，并只恢复已记录的 Channel 绑定；当前投影不再暴露这个旧字段。普通 Session 与 fork 不自动获得成员身份；不同域之间仍共享 Member identity、capabilities 和私有记忆。
 
 ## Member Capabilities
 
@@ -32,15 +32,15 @@ Member 的 `workspaceId` 只记录创建地、永不改变。一切授权只看�
 
 ## Workspace
 
-一个项目及其共享工作目录。Agent Member 隐式 default Session 的 cwd 是创建 Workspace 项目目录；非默认工作域可以使用自己的快照根目录。Member 私有记忆不存放在项目根目录。
+一个项目及其共享工作目录。Channel Session 使用其工作域快照中的第一项作为 cwd；Member 私有记忆不存放在项目根目录。
 
 ## Work Domain
 
-Member 自己的一个上下文桶：隐式 `default` 域就是 `member.sessionId`；每条非默认持久绑定都把 Channel key 映射到独立 Session，并快照完整、有序的绝对目录集。
+按 Channel 划分的 Member 上下文桶：每条持久 Channel 绑定拥有自己的 Session，并快照完整、有序的绝对目录集。没有默认域；旧 `member.sessionId` 只在启动或清理时用于归档，不会被选为活跃 fallback。
 
 Channel 默认目录与 Member×Channel 覆盖是配置事实。首次成功绑定按 Member 覆盖、Channel 默认、Channel 所属 Workspace 根的顺序解析并固定有效集合。第一项始终是 Session cwd，即使它位于 Workspace 之外。Host 只会把 Session 归入其 cwd 所属的已注册 Workspace；否则保持 Ungrouped。后续项只写进该域自己的 instructions。
 
-后续配置编辑不会移动已绑定域或它的 Session 代际。工作域隔离上下文，不隔离 identity、authorization、tools 或私有记忆。Thread 首次路由和按域投递属于另一个 runtime 集成，不是这里的目录配置。
+后续配置编辑不会移动已绑定域或它的 Session 代际。工作域隔离上下文，不隔离 identity、authorization、tools 或私有记忆。Thread 消息路由到所属 Channel 的共享工作域，不会创建独立 Thread Session。
 
 ## Channel
 
@@ -132,7 +132,7 @@ presence/availability 行不正常时，背后的结构化原因（绝不持久�
 
 ## Context Generation（上下文代际）
 
-一个工作域 Session 的两个上下文边界之间的工作上下文。全新代际除了收到的 handoff，从零开始；checkpoint 回返的代际拿来源的精确 completed-turn 前缀作 seed。Member 的 default Session 隐含在 `member.sessionId` 中；每个非默认工作域都有自己的持久绑定与最近一次 renewal/rollover 的上一 Session。上下文历史保存在各 Session 日志中。Member 身份、模型、私有记忆、skills、Claims 和 Attention，代代都保留。
+一个 Channel Session 的两个上下文边界之间的工作上下文。全新代际除了收到的 handoff，从零开始；checkpoint 回返的代际拿来源的精确 completed-turn 前缀作 seed。每个 Channel 工作域都有自己的持久绑定与最近一次 renewal/rollover 的上一 Session；Member 没有默认 Session。上下文历史保存在各 Session 日志中。Member 身份、模型、私有记忆、skills、Claims 和 Attention，代代都保留。
 
 ## Context Checkpoint（上下文检查点）
 

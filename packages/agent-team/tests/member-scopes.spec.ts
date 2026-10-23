@@ -256,22 +256,21 @@ describe('Member work-domain directory snapshots', () => {
 })
 
 describe('Member work-domain bindings', () => {
-  it('reports no domain before a Channel is bound, and binds a discussion lazily', async () => {
+  it('keeps a legacy Member Session out of domain bindings and binds the Channel Session explicitly', async () => {
     const test = await fixture()
-    // The row's recorded Session is the Member's own domain until a Channel
-    // binding exists; a discussion adds its own domain beside it.
-    expect(test.ledger.memberScopeSessions(test.memberId).map(binding => binding.scopeKey)).toEqual([DEFAULT_MEMBER_SCOPE_KEY])
-    expect(test.ledger.memberScopeSessionFor(test.memberId, DEFAULT_MEMBER_SCOPE_KEY)?.scopeKey).toBe(DEFAULT_MEMBER_SCOPE_KEY)
+    // Legacy Member Session data is retained for migration, but never exposed
+    // as an active work-domain binding.
+    expect(test.ledger.memberScopeSessions(test.memberId)).toEqual([])
+    expect(test.ledger.getMember(test.memberId)?.sessionId).toBe(SessionId('session:scoped-default'))
 
     const scopeKey = channelMemberScopeKey(test.channelRef)
     const bound = applied(await bind(test, scopeKey, SessionId('session:scoped-thread'))).binding
     expect(bound).toEqual({ scopeKey, scopeKind: 'channel', scopeRef: test.channelRef, sessionId: SessionId('session:scoped-thread'), workingDirectories: [workspaceRoot] })
 
-    // The Channel domain sits beside the Member's own domain, which the row
-    // still records; the discussion binding is the one a Channel wake targets.
+    // The Member's legacy field stays unchanged; only the Channel binding is current.
     expect(test.ledger.getMember(test.memberId)?.sessionId).toBe(SessionId('session:scoped-default'))
     expect(test.ledger.memberScopeSessions(test.memberId).map(binding => binding.sessionId))
-      .toEqual([SessionId('session:scoped-default'), SessionId('session:scoped-thread')])
+      .toEqual([SessionId('session:scoped-thread')])
     expect(test.ledger.memberScopeSessionFor(test.memberId, scopeKey)?.sessionId).toBe(SessionId('session:scoped-thread'))
 
     // A retry resolves the recorded binding rather than writing a second one.

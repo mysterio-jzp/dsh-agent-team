@@ -396,7 +396,7 @@ export class MemberRuntime {
    * in the Workspace's grouping surfaces as an orphan — and delete its private
    * namespace.
    */
-  async cleanupRemovedMember(member: AgentTeamAgentMember, sessions: readonly SessionId[] = [member.sessionId]): Promise<void> {
+  async cleanupRemovedMember(member: AgentTeamAgentMember, sessions: readonly SessionId[] = member.sessionId === undefined ? [] : [member.sessionId]): Promise<void> {
     // The ledger path may still name the legacy colon directory (never
     // activated after the fix): remove both spellings; rm is force-tolerant
     // of the one that does not exist. Every target must sit inside THIS

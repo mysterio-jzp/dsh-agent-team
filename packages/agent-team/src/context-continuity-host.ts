@@ -1,6 +1,6 @@
 /**
- * The Agent Team's binding of the context-continuity engine: how one Member
- * resolves to its live Agent and back, how a Member Session's fold state is
+ * The Agent Team's binding of the context-continuity engine: how one Channel
+ * Session resolves to its live Agent, how its fold state is
  * read, how a prepared generation swap runs in the Member lifecycle, and the
  * two domain dimensions the engine refuses to own (which queued messages are
  * Team notices, and how a rollover's durable identity is named).
@@ -101,35 +101,14 @@ export const TEAM_CONTEXT_CODEC = new ContextMessageCodec({
 })
 
 export interface TeamContextContinuityOptions {
-  /**
-   * Resolve the live Agent of one Member in one work domain; undefined leaves
-   * intent parked. A Member owns no Session of its own, so a domain is always
-   * named explicitly and there is nothing to drift back to.
-   */
-  readonly agentForMember: (memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey) => Agent | undefined
-  /**
-   * Resolve the durable Member of one live Agent, and the work domain it runs.
-   * `default` names no domain any more, so the pair travels together instead of
-   * being read off the Member row.
-   */
-  readonly surfaceForAgent: (agent: Agent) => { readonly member: AgentTeamAgentMember, readonly scopeKey: AgentTeamMemberScopeKey } | undefined
+  /** Resolve the live Agent of one Channel Session; undefined leaves intent parked. */
+  readonly agentForSession: (sessionId: SessionId) => Agent | undefined
   /** Resolve the durable Member of one live Agent. */
   readonly memberForAgent: (agent: Agent) => AgentTeamAgentMember | undefined
-  /** The Session running one Member's work domain, or undefined when it holds none. */
-  readonly sessionForMemberScope: (memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey) => SessionId | undefined
-  /**
-   * Read one Member Session's engine-folded continuity state: the unit
-   * registered by `context-projection.ts`, or undefined when the Member has no
-   * live Session with that id (the coordinator leaves intent parked).
-   */
-  readonly projectionForMember: (memberId: AgentTeamMemberId, sessionId: SessionId) => ContextProjectionState | undefined
-  /**
-   * Execute one prepared Member generation swap at a true idle boundary:
-   * commit, dispose, archive, create/activate, deliver the handoff first,
-   * then carried input and the rederived Inbox. Returns once the Member runs
-   * its new generation.
-   */
-  readonly executeTransition: (memberId: AgentTeamMemberId, plan: TransitionPlan, scopeKey: AgentTeamMemberScopeKey) => Promise<void>
+  /** Read the engine-folded continuity state for one exact Session. */
+  readonly projectionForSession: (sessionId: SessionId) => ContextProjectionState | undefined
+  /** Execute one prepared generation swap for the Channel Session at an idle boundary. */
+  readonly executeTransition: (sessionId: SessionId, plan: TransitionPlan) => Promise<void>
   /** Log one coordinator diagnostic. */
   readonly log: (message: string) => void
 }
@@ -139,42 +118,24 @@ export interface TeamContextContinuityOptions {
  * the three that decide domain meaning: the durable rollover identity, which
  * queued messages are rederived Team notices, and the projection bridge.
  */
-export class TeamContextContinuityHost implements ContextContinuityHost<TeamContinuitySubjectId> {
+export class TeamContextContinuityHost implements ContextContinuityHost<SessionId> {
   constructor(private readonly options: TeamContextContinuityOptions) {}
 
-  /**
-   * The live Agent of one Member work domain. Keying the engine's subject by
-   * `(memberId, scopeKey)` resolves the exact domain under transition, so a
-   * sibling domain finishing a turn cannot redirect or abort this domain's
-   * idle-boundary validation.
-   */
-  agentForSubject(subjectId: TeamContinuitySubjectId): Agent | undefined {
-    const { memberId, scopeKey } = parseContinuitySubjectId(subjectId)
-    return this.options.agentForMember(memberId, scopeKey)
+  agentForSubject(sessionId: SessionId): Agent | undefined {
+    return this.options.agentForSession(sessionId)
   }
 
-  /**
-   * The continuity subject of one live Agent: its `(memberId, scopeKey)` domain
-   * identity plus the Session of the domain it actually runs. Reading the
-   * Member row's `sessionId` here was the last way the retired default domain
-   * could re-enter a context decision.
-   */
-  subjectForAgent(agent: Agent): ContextSubject<TeamContinuitySubjectId> | undefined {
-    const surface = this.options.surfaceForAgent(agent)
-    if (surface === undefined) return undefined
-    const sessionId = this.options.sessionForMemberScope(surface.member.memberId, surface.scopeKey)
-    if (sessionId === undefined) throw new Error(`agent-team: Member '${surface.member.memberId}' runs work domain '${surface.scopeKey}' without a Session`)
-    return { id: continuitySubjectId(surface.member.memberId, surface.scopeKey), sessionId }
+  subjectForAgent(agent: Agent): ContextSubject<SessionId> | undefined {
+    if (this.options.memberForAgent(agent) === undefined) return undefined
+    return { id: agent.session.id, sessionId: agent.session.id }
   }
 
-  projectionForSubject(subjectId: TeamContinuitySubjectId, sessionId: SessionId): ContextProjectionState | undefined {
-    const { memberId } = parseContinuitySubjectId(subjectId)
-    return this.options.projectionForMember(memberId, sessionId)
+  projectionForSubject(_sessionId: SessionId, sessionId: SessionId): ContextProjectionState | undefined {
+    return this.options.projectionForSession(sessionId)
   }
 
-  executeTransition(subjectId: TeamContinuitySubjectId, plan: TransitionPlan): Promise<void> {
-    const { memberId, scopeKey } = parseContinuitySubjectId(subjectId)
-    return this.options.executeTransition(memberId, plan, scopeKey)
+  executeTransition(sessionId: SessionId, plan: TransitionPlan): Promise<void> {
+    return this.options.executeTransition(sessionId, plan)
   }
 
   /**
@@ -208,7 +169,7 @@ export class TeamContextContinuityHost implements ContextContinuityHost<TeamCont
 }
 
 /** Build the engine coordinator over Team's Member lifecycle. */
-export function createTeamContextManagement(options: TeamContextContinuityOptions): ContextContinuityCoordinator<TeamContinuitySubjectId> {
+export function createTeamContextManagement(options: TeamContextContinuityOptions): ContextContinuityCoordinator<SessionId> {
   return new ContextContinuityCoordinator(new TeamContextContinuityHost(options), TEAM_CONTEXT_CODEC)
 }
 

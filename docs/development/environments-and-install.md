@@ -91,7 +91,7 @@ Release cadence is batched. Between releases, daily use of a local build is a li
 
 Stable and development profiles share `$DSH_HOME/storages/`. If a stable old version reads a ledger written by a newer version, schema validation can fail; update the stable profile after each release.
 
-The minimum compatible DSH version is `0.2.0-rc.2`. DSH's JSONL Session persistence migrates released historical formats itself (v0/v1/v2 → V3 → V4); old-format Session data needs no manual disposal. Do not add Team ledger or Member Session migration, old-format reads, or silent fallbacks.
+The minimum compatible DSH version is `0.2.0-rc.2`. DSH's JSONL Session persistence migrates released historical formats itself (v0/v1/v2 → V3 → V4); old-format Session data needs no manual disposal. Do not add Team ledger schema or DSH Session-format migrations, old-format reads, or silent fallbacks. Archiving a legacy Member default Session is lifecycle cleanup, not a Session-format migration.
 
 ### Rewriting and pushing history
 

@@ -1,5 +1,6 @@
 import { changeBaseline, nextChange } from './helpers/change-stream.ts'
-import { access, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve, basename, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -27,7 +28,7 @@ import SessionTitle from '@deepseek-ai/dsh-session-title'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import Storage from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
-import { AgentTeamLedger } from '../src/ledger.ts'
+import { AgentTeamLedger, agentTeamHumanActor } from '../src/ledger.ts'
 import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey } from '../src/member-scope.ts'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -36,7 +37,7 @@ import AgentTeam, { AGENT_TEAM_HUMAN_MEMBER_ID, teamPresetScopeMismatchMessage }
 import { checkpointRefFor, foldTeamContextProjection } from '../src/context-projection.ts'
 import { AGENT_TEAM_PLUGIN_ID, continuationCheckpointRefOf, handoffOf, isCheckpointContinuationMessage, isHandoffMessage } from '../src/context-source.ts'
 import { RECOVERY_DELAY_MS } from '../src/recovery.ts'
-import type { AgentTeamChannelRef, AgentTeamClaimRef, AgentTeamMemberId, AgentTeamRequestId } from '../src/types.ts'
+import type { AgentTeamAgentMember, AgentTeamChannelRef, AgentTeamClaimRef, AgentTeamMemberId, AgentTeamRequestId } from '../src/types.ts'
 import { MemoryStorageBackend } from './helpers/memory-backend.ts'
 import { installFixtureModelSelection } from './helpers/model-selection.ts'
 import { SqliteStorageBackend } from '../src/vendor/storage-sqlite/index.ts'
@@ -47,6 +48,12 @@ import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 const cleanups: Array<() => Promise<void>> = []
 const originalDshHome = process.env.DSH_HOME
 const requestId = (value: string): AgentTeamRequestId => value as AgentTeamRequestId
+
+function channelSessionId(ctx: Context, memberId: AgentTeamMemberId): SessionId {
+  const bindings = ctx.agentTeam['ledger']!.memberScopeSessions(memberId)
+  if (bindings.length !== 1) throw new Error(`Expected exactly one Channel Session for ${memberId}, found ${bindings.length}`)
+  return bindings[0]!.sessionId
+}
 /** The ENOENT shape the JSONL backend raises when a walk hits a win32 staging directory mid-rename. */
 const persistenceRaceError = (): Error =>
   Object.assign(new Error("scandir ENOENT: transient win32 staging directory raced the walk (test seam)"), { code: 'ENOENT' })
@@ -353,21 +360,20 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId, project, root, workspaces, archived } = await realHarness(adapter)
     const otherId = WorkspaceId('workspace:joined')
     workspaces.set(otherId, { id: otherId, path: join(root, 'other-project'), attachSession: async () => {} })
+    const homeChannel = await ctx.agentTeam.createChannel({ requestId: requestId('global-home-channel'), workspaceId,
+      name: 'home', description: '' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('global-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [homeChannel.channel.channelRef] })
     expect(added.status.availability, JSON.stringify(added.status)).toBe('active')
     const memberId = added.status.member.memberId
-    const agent = ctx.agents.get(added.status.member.sessionId)!
+    const homeBinding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(homeChannel.channel.channelRef))!
+    const agent = ctx.agents.get(homeBinding.sessionId)!
     await ctx.agentTeam.joinWorkspace({ requestId: requestId('global-join'), workspaceId: otherId, memberId })
     expect(ctx.agentTeam.membersForClient({ workspaceId: otherId }).map(status => status.member.memberId)).toEqual([memberId])
-    // The committed join wakes the idle Member once; the notice names the Workspace and the unchanged Session.
-    adapter.enqueue(textResponse('Acknowledged the participation change.'))
+    // Workspace membership remains a durable roster fact; it is not injected
+    // into an unrelated Channel Session or a legacy Member default Session.
     await agent.whenIdle()
-    expect(adapter.requests).toHaveLength(1)
-    const noticeRequest = JSON.stringify(adapter.requests[0]!.messages)
-    expect(noticeRequest).toContain('Team participation changed')
-    expect(noticeRequest).toContain(otherId)
-    expect(noticeRequest).toContain('Your Session and cwd have not moved')
+    expect(adapter.requests).toHaveLength(0)
     for (const [name, args] of [
       ['team_view', {}],
       ['team_thread', { action: 'status', threadRef: 'thread:missing' }],
@@ -389,10 +395,10 @@ describe('Agent Team Member lifecycle', () => {
     expect(result.isError, result.isError ? result.error.message : '').toBe(false)
     expect(ctx.agentTeam.view({ workspaceId: otherId }).items[0]?.message.body).toBe('Working in joined checkout')
     expect(agent.session.header.cwd).toBe(project)
-    expect(ctx.agents.get(added.status.member.sessionId)).toBe(agent)
+    expect(ctx.agents.get(homeBinding.sessionId)).toBe(agent)
     await ctx.agentTeam.leaveWorkspace({ requestId: requestId('global-leave'), workspaceId: otherId, memberId })
     expect(ctx.agentTeam.membersForClient({ workspaceId: otherId })).toEqual([])
-    expect(ctx.agents.get(added.status.member.sessionId)).toBe(agent)
+    expect(ctx.agents.get(homeBinding.sessionId)).toBe(agent)
     expect(ctx.agentTeam.memberForAgent(agent)).toEqual(added.status.member)
     expect(archived).toEqual([])
     expect(() => ctx.agentTeam.viewForAgent(agent, { workspaceId: otherId })).toThrow(/another Workspace/)
@@ -497,6 +503,8 @@ describe('Agent Team Member lifecycle', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('archive-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('archive-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
     // Creating a Claim is the President's write; the designation is the same
     // Human act production requires.
@@ -506,7 +514,7 @@ describe('Agent Team Member lifecycle', () => {
     // end-to-end.
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('archive-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Build the feature', recipients: [memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
-    const live = ctx.agents.get(added.status.member.sessionId)!
+    const live = ctx.agents.get(sessionId)!
     await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('archive-read'), workspaceId, taskRef: started.task!.taskRef })
     const claimed = await ctx.agentTeam.changeClaimForAgent(live, { requestId: requestId('archive-claim'), workspaceId, taskRef: started.task!.taskRef, action: 'claim', direction: 'implements the feature', baseRevision: started.thread.revision })
     if (claimed.kind !== 'committed') throw new Error(`expected committed claim, received ${claimed.kind}`)
@@ -514,14 +522,14 @@ describe('Agent Team Member lifecycle', () => {
 
     const result = await ctx.agentTeam.archiveMember({ requestId: requestId('archive'), memberId })
     expect(result.member.state).toBe('archived')
-    expect(result.member.sessionId).toBe(added.status.member.sessionId)
+    expect(result.member).not.toHaveProperty('sessionId')
     expect(result.releasedClaims).toEqual([expect.objectContaining({ owner: memberId, state: 'released' })])
     expect(result.removedAttention).toEqual([expect.objectContaining({ memberId, threadRef: started.task!.threadRef })])
 
     // Runtime effects: the live session is disposed and its Session archived
     // from grouping surfaces; private memory stays on disk.
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
-    expect(archived).toContain(added.status.member.sessionId)
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
+    expect(archived).toContain(sessionId)
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
     expect(ctx.agentTeam.members().find(status => status.member.memberId === memberId)).toMatchObject({ availability: 'archived', presence: 'unavailable' })
 
@@ -542,9 +550,11 @@ describe('Agent Team Member lifecycle', () => {
 
   it('retries an archive after the post-commit Session archive fails', async () => {
     const { ctx, workspaceId, archived, archiveFailures } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('archive-retry-channel'), workspaceId, name: 'engineering', description: '' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('archive-retry-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channel.channel.channelRef))!.sessionId
     archiveFailures.remaining = 1
 
     await expect(ctx.agentTeam.archiveMember({ requestId: requestId('archive-retry'), memberId }))
@@ -554,87 +564,136 @@ describe('Agent Team Member lifecycle', () => {
 
     const retried = await ctx.agentTeam.archiveMember({ requestId: requestId('archive-retry'), memberId })
     expect(retried.member.state).toBe('archived')
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
   })
 
   it('finishes a context renewal whose Session archive failed when the same request is retried', async () => {
     const { ctx, workspaceId, archived, archiveFailures } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('clear-retry-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('clear-retry-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     archiveFailures.remaining = 1
 
-    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-retry'), workspaceId, memberId }))
+    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-retry'), workspaceId, memberId, scopeKey }))
       .rejects.toThrow('workspace archive failed')
     const stranded = ctx.agentTeam.members().find(item => item.member.memberId === memberId)
     expect(stranded?.availability).toBe('unavailable')
     // The renewal mints its own Session id: read it back from the recorded
-    // binding rather than predicting what the caller asked for.
-    const target = stranded!.member.sessionId
+    // Channel binding rather than predicting what the caller asked for.
+    const target = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     // The retire half disposed the old generation but never archived it, so
     // the recorded binding and the live effects disagree until it is finished.
     expect(archived).toEqual([])
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(ctx.agents.get(target)).toBeUndefined()
 
     // The durable renewal is the desired binding: the same request finishes
     // the outstanding effects and answers with that recorded result instead
     // of refusing with "has no active session to clear".
-    const retried = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-retry'), workspaceId, memberId })
-    expect(retried.status.member.sessionId).toBe(target)
+    const retried = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-retry'), workspaceId, memberId, scopeKey })
+    expect(retried.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)?.sessionId).toBe(target)
     expect(retried.status.availability).toBe('active')
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
     expect(ctx.agents.get(target)).toBeDefined()
 
     // Still exactly one renewal: repeating the request never mints a second
     // binding, and the recorded receipt is what comes back.
-    const again = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-retry'), workspaceId, memberId })
+    const again = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-retry'), workspaceId, memberId, scopeKey })
     expect(again.receipt.operationId).toBe(retried.receipt.operationId)
     expect(again.status.availability).toBe('active')
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
   it('mints an opaque Session id instead of one derived from the requestId', async () => {
     const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('opaque-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('opaque-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const previousSessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     // A caller-shaped request id: the colons it carries, and the escaping they
     // attract, are what a fresh mint keeps out of the Session directory name
     // and the Client's Session list.
     const callerId = requestId('team-bridge:clear:cl1')
 
-    const renewed = await ctx.agentTeam.clearMemberContext({ requestId: callerId, workspaceId, memberId })
-    const sessionId = renewed.status.member.sessionId
+    const renewed = await ctx.agentTeam.clearMemberContext({ requestId: callerId, workspaceId, memberId, scopeKey })
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
 
-    expect(sessionId).not.toBe(added.status.member.sessionId)
+    expect(renewed.status.member).not.toHaveProperty('sessionId')
+    expect(sessionId).not.toBe(previousSessionId)
     expect(sessionId).toMatch(/^agent-team-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
     expect(sessionId).not.toContain('team-bridge')
     expect(sessionId).not.toContain('~')
 
     // An exact retry still resolves to the recorded binding: the mint is not
     // restatable by the caller, so the ledger's requestId record answers.
-    const again = await ctx.agentTeam.clearMemberContext({ requestId: callerId, workspaceId, memberId })
+    const again = await ctx.agentTeam.clearMemberContext({ requestId: callerId, workspaceId, memberId, scopeKey })
     expect(again.receipt.operationId).toBe(renewed.receipt.operationId)
-    expect(again.status.member.sessionId).toBe(sessionId)
+    expect(again.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)?.sessionId).toBe(sessionId)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
+  it('cold Host restart archives a legacy Member Session and restores only Channel domains', async () => {
+    const adapter = new ScriptedAdapter()
+    const before = await realHarness(adapter, 'jsonl', undefined, { sqlite: true })
+    const channel = await before.ctx.agentTeam.createChannel({ requestId: requestId('legacy-cold-channel'), workspaceId: before.workspaceId,
+      name: 'engineering', description: 'Cold-start migration fixture' })
+    const memberId = `member:${randomUUID()}` as AgentTeamMemberId
+    const legacySessionId = SessionId(`agent-team-${randomUUID()}`)
+    const member: AgentTeamAgentMember = Object.freeze({
+      memberId, workspaceId: before.workspaceId, handle: 'legacy', description: 'Pre-migration Member',
+      presetId: 'team-member', sessionId: legacySessionId, privateMemoryPath: join(before.root, 'legacy-member-memory'), state: 'enabled',
+    })
+    await before.ctx.agentTeam['ledger']!.addMember({
+      requestId: requestId('legacy-cold-member'), workspaceId: before.workspaceId, handle: member.handle,
+      description: member.description, presetId: member.presetId, channelRefs: [channel.channel.channelRef],
+      actor: agentTeamHumanActor(), member,
+    })
+    const legacy = await before.ctx.agents.create({ sessionId: legacySessionId, meta: { cwd: before.project } })
+    const channelKey = channelMemberScopeKey(channel.channel.channelRef)
+    await before.ctx.agentTeam['openChannelWorkDomain'](memberId, channel.channel.channelRef)
+    const channelSessionId = before.ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelKey)?.sessionId
+    if (channelSessionId === undefined) throw new Error('expected the legacy Member Channel domain to be bound')
+    expect(legacy.agent.session.id).toBe(legacySessionId)
+    expect(before.ctx.agents.get(channelSessionId)).toBeDefined()
+
+    // A genuinely cold Host: the next fixture gets a fresh Context and reopens
+    // the durable SQLite ledger and Session logs from disk.
+    await before.shutdown()
+    const cold = await realHarness(adapter, 'jsonl', { root: before.root }, { sqlite: true })
+
+    expect(cold.archived).toContain(legacySessionId)
+    expect(cold.ctx.agents.get(legacySessionId)).toBeUndefined()
+    expect(cold.ctx.agents.get(channelSessionId)).toBeDefined()
+    expect(cold.ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY)).toBe(false)
+    expect(cold.ctx.agentTeam['handles'].get(memberId)?.has(channelKey)).toBe(true)
+    expect(() => cold.ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
   it('finishes an interrupted context renewal during startup', async () => {
     const { ctx, workspaceId, archived, archiveFailures, teamFiber } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('clear-boot-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('clear-boot-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     archiveFailures.remaining = 1
 
-    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-boot'), workspaceId, memberId }))
+    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-boot'), workspaceId, memberId, scopeKey }))
       .rejects.toThrow('workspace archive failed')
     expect(archived).toEqual([])
     expect(ctx.agentTeam.members().find(item => item.member.memberId === memberId)?.availability).toBe('unavailable')
     // The renewal mints its own Session id; read it back from the recorded
     // binding rather than predicting what the caller asked for.
-    const target = ctx.agentTeam.members().find(item => item.member.memberId === memberId)!.member.sessionId
+    const target = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
 
     // Restarting replays the same ledger through the boot path: no live handle
     // survives a restart, so startup itself must archive the retired Session
@@ -642,9 +701,10 @@ describe('Agent Team Member lifecycle', () => {
     await teamFiber.dispose()
     await ctx.plugin(AgentTeam)
 
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
     const restored = ctx.agentTeam.members().find(item => item.member.memberId === memberId)
-    expect(restored?.member.sessionId).toBe(target)
+    expect(restored?.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)?.sessionId).toBe(target)
     expect(restored?.availability).toBe('active')
     expect(ctx.agents.get(target)).toBeDefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -652,37 +712,44 @@ describe('Agent Team Member lifecycle', () => {
 
   it('finishes a context renewal whose target Session activation failed', async () => {
     const { ctx, workspaceId, archived, presets } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('clear-activation-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('clear-activation-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     presets.failingMount = true
 
-    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-activation'), workspaceId, memberId }))
+    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-activation'), workspaceId, memberId, scopeKey }))
       .rejects.toThrow('failed to start a new context')
     const stranded = ctx.agentTeam.members().find(item => item.member.memberId === memberId)
     expect(stranded?.availability).toBe('unavailable')
     // The renewal mints its own Session id; read it back from the recorded
-    // binding rather than predicting what the caller asked for.
-    const target = stranded!.member.sessionId
+    // Channel binding rather than predicting what the caller asked for.
+    const target = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     // Here the retire half completed and the target never started — the two
     // failure windows are distinguishable, which is what reconciliation reads.
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
     expect(ctx.agents.get(target)).toBeUndefined()
 
     presets.failingMount = false
-    const retried = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-activation'), workspaceId, memberId })
-    expect(retried.status.member.sessionId).toBe(target)
+    const retried = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-activation'), workspaceId, memberId, scopeKey })
+    expect(retried.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)?.sessionId).toBe(target)
     expect(retried.status.availability).toBe('active')
     expect(ctx.agents.get(target)).toBeDefined()
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
   it('converges an archive interrupted after its commit during startup', async () => {
     const { ctx, workspaceId, archived, archiveFailures, teamFiber } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('arch-boot-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('arch-boot-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
     archiveFailures.remaining = 1
 
@@ -693,19 +760,21 @@ describe('Agent Team Member lifecycle', () => {
       .rejects.toThrow('workspace archive failed')
     expect(ctx.agentTeam.members().find(item => item.member.memberId === memberId)?.availability).toBe('archived')
     expect(archived).toEqual([])
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
 
     await teamFiber.dispose()
     await ctx.plugin(AgentTeam)
 
     // Startup finishes the owed hide half from the durable state alone and
     // never activates the archived Member as an enabled one.
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
     const restored = ctx.agentTeam.members().find(item => item.member.memberId === memberId)
     expect(restored).toMatchObject({ availability: 'archived', presence: 'unavailable' })
-    expect(restored?.member.sessionId).toBe(added.status.member.sessionId)
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(restored?.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)?.sessionId).toBe(sessionId)
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(false)
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
     expect(ctx.agentTeam.view({ workspaceId }).members).toEqual([])
     expect(ctx.agentTeam.members().filter(item => item.member.memberId === memberId)).toHaveLength(1)
@@ -714,11 +783,14 @@ describe('Agent Team Member lifecycle', () => {
 
   it('converges an archive whose Agent disposal failed during startup', async () => {
     const { ctx, workspaceId, archived, teamFiber } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('arch-dispose-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('arch-dispose-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
-    const handle = ctx.agentTeam['handles'].get(memberId)!.get(DEFAULT_MEMBER_SCOPE_KEY)!
+    const handle = ctx.agentTeam['handles'].get(memberId)!.get(scopeKey)!
     vi.spyOn(handle, 'dispose').mockRejectedValueOnce(new Error('agent disposal failed (test seam)'))
 
     // Durable state says archived while the generation is still live — the
@@ -726,15 +798,16 @@ describe('Agent Team Member lifecycle', () => {
     await expect(ctx.agentTeam.archiveMember({ requestId: requestId('arch-dispose'), memberId }))
       .rejects.toThrow('agent disposal failed')
     expect(ctx.agentTeam.members().find(item => item.member.memberId === memberId)?.availability).toBe('archived')
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeDefined()
-    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(true)
+    expect(ctx.agents.get(sessionId)).toBeDefined()
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(true)
 
     await teamFiber.dispose()
     await ctx.plugin(AgentTeam)
 
-    expect(archived).toEqual([added.status.member.sessionId])
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(archived).toEqual([sessionId])
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(false)
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
     expect(ctx.agentTeam.members().filter(item => item.member.memberId === memberId)).toHaveLength(1)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -742,9 +815,12 @@ describe('Agent Team Member lifecycle', () => {
 
   it('finishes a removal whose private-memory cleanup failed when the Host restarts', async () => {
     const { ctx, workspaceId, archived, teamFiber } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('remove-fs-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('remove-fs-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     const memoryPath = added.status.member.privateMemoryPath
     await writeFile(join(memoryPath, 'notes', 'kept.md'), 'persistent note')
     rmFault.match = join('agent-team', 'members')
@@ -753,26 +829,30 @@ describe('Agent Team Member lifecycle', () => {
       .rejects.toThrow('failed to clean up removed Member')
     rmFault.match = ''
     expect(ctx.agentTeam.members().find(item => item.member.memberId === memberId)?.availability).toBe('inactive')
-    // The Session half of the cleanup already ran; the memory half is owed.
-    expect(archived).toEqual([added.status.member.sessionId])
+    // The Channel Session half of cleanup already ran; the memory half is owed.
+    expect(archived).toEqual([sessionId])
     await expect(access(join(memoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
 
     await teamFiber.dispose()
     await ctx.plugin(AgentTeam)
 
     await expect(access(memoryPath)).rejects.toThrow()
-    expect(archived).toEqual([added.status.member.sessionId])
+    expect(archived).toEqual([sessionId])
     expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(false)
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
   it('keeps a failing private-memory cleanup from failing startup and retries it at the next boot', async () => {
     const { ctx, workspaceId, archived, teamFiber } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('boot-fs-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const removed = await ctx.agentTeam.addMember({ requestId: requestId('boot-fs-remove'), workspaceId,
-      handle: 'victim', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'victim', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const keeper = await ctx.agentTeam.addMember({ requestId: requestId('boot-fs-keep'), workspaceId,
-      handle: 'keeper', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'keeper', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const removedSessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(removed.status.member.memberId, scopeKey)!.sessionId
     await writeFile(join(removed.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
     rmFault.match = join('agent-team', 'members')
     await expect(ctx.agentTeam.removeMember({ requestId: requestId('boot-fs'), memberId: removed.status.member.memberId }))
@@ -787,7 +867,7 @@ describe('Agent Team Member lifecycle', () => {
     expect(ctx.agentTeam.members().find(item => item.member.memberId === removed.status.member.memberId)?.availability).toBe('inactive')
     expect(ctx.agentTeam.members().find(item => item.member.memberId === keeper.status.member.memberId)?.availability).toBe('active')
     await expect(access(removed.status.member.privateMemoryPath)).resolves.toBeUndefined()
-    expect(archived).toEqual([removed.status.member.sessionId])
+    expect(archived).toEqual([removedSessionId])
 
     // The fault clears like the failed call it stands for; the next startup
     // finishes what is still owed.
@@ -795,29 +875,32 @@ describe('Agent Team Member lifecycle', () => {
     await boot.dispose()
     await ctx.plugin(AgentTeam)
     await expect(access(removed.status.member.privateMemoryPath)).rejects.toThrow()
-    expect(archived).toEqual([removed.status.member.sessionId])
+    expect(archived).toEqual([removedSessionId])
     expect(ctx.agentTeam.members().find(item => item.member.memberId === keeper.status.member.memberId)?.availability).toBe('active')
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
   it('keeps a suspended Member suspended across startup and finishes a disposal-failed suspension on retry', async () => {
     const { ctx, workspaceId, archived, teamFiber } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('susp-boot-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('susp-boot-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
-    const handle = ctx.agentTeam['handles'].get(memberId)!.get(DEFAULT_MEMBER_SCOPE_KEY)!
+    const handle = ctx.agentTeam['handles'].get(memberId)!.get(scopeKey)!
     vi.spyOn(handle, 'dispose').mockRejectedValueOnce(new Error('agent disposal failed (test seam)'))
 
     await expect(ctx.agentTeam.suspendMember({ requestId: requestId('susp-boot'), memberId }))
       .rejects.toThrow('agent disposal failed')
     expect(ctx.agentTeam.members().find(item => item.member.memberId === memberId)?.availability).toBe('suspended')
-    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(true)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(true)
 
     const retried = await ctx.agentTeam.suspendMember({ requestId: requestId('susp-boot'), memberId })
     expect(retried.status.availability).toBe('suspended')
-    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(false)
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     // Suspended keeps the Session: nothing archives it, memory stays.
     expect(archived).toEqual([])
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
@@ -827,9 +910,11 @@ describe('Agent Team Member lifecycle', () => {
 
     const restored = ctx.agentTeam.members().find(item => item.member.memberId === memberId)
     expect(restored).toMatchObject({ availability: 'suspended', presence: 'unavailable' })
-    expect(restored?.member.sessionId).toBe(added.status.member.sessionId)
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(restored?.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)?.sessionId).toBe(sessionId)
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(false)
     expect(archived).toEqual([])
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -837,21 +922,24 @@ describe('Agent Team Member lifecycle', () => {
 
   it('finishes an interrupted suspension through explicit recovery instead of steering the stray generation', async () => {
     const { ctx, workspaceId, archived } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('susp-recover-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('susp-recover-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const handle = ctx.agentTeam['handles'].get(memberId)!.get(DEFAULT_MEMBER_SCOPE_KEY)!
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
+    const handle = ctx.agentTeam['handles'].get(memberId)!.get(scopeKey)!
     vi.spyOn(handle, 'dispose').mockRejectedValueOnce(new Error('agent disposal failed (test seam)'))
     await expect(ctx.agentTeam.suspendMember({ requestId: requestId('susp-recover'), memberId }))
       .rejects.toThrow('agent disposal failed')
-    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(true)
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(true)
 
     // The durable state already says no live generation, so explicit
     // recovery converges the stray handle instead of feeding it a resume.
-    const recovered = await ctx.agentTeam.recoverMember({ requestId: requestId('susp-recover-recover'), workspaceId, memberId })
+    const recovered = await ctx.agentTeam.recoverMember({ requestId: requestId('susp-recover-recover'), workspaceId, memberId, scopeKey })
     expect(recovered.status.availability).toBe('suspended')
-    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(DEFAULT_MEMBER_SCOPE_KEY))).toBe(false)
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(Boolean(ctx.agentTeam['handles'].get(memberId)?.has(scopeKey))).toBe(false)
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     expect(archived).toEqual([])
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
@@ -859,7 +947,9 @@ describe('Agent Team Member lifecycle', () => {
   it('creates, suspends, resumes, and removes an exact Team-owned Agent session', async () => {
     const { ctx, workspaceId, root, project } = await realHarness()
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
     expect(added.status.availability).toBe('active')
     expect(added.status.member.privateMemoryPath).toBe(join(root, 'dsh-home', 'agent-team', 'members', added.status.member.memberId.replaceAll(':', '-')))
     // The first-run scaffold states the index's four sections and routes the
@@ -872,7 +962,7 @@ describe('Agent Team Member lifecycle', () => {
     expect(scaffold).toContain('## Notes index')
     expect(scaffold).toContain('the bundled `member-memory-manager` skill')
     await expect(access(join(added.status.member.privateMemoryPath, 'notes'))).resolves.toBeUndefined()
-    const live = ctx.agents.get(added.status.member.sessionId)
+    const live = ctx.agents.get(sessionId)
     expect(live?.session.header.cwd).toBe(project)
     expect(live?.session.ownEvents()).toContainEqual(expect.objectContaining({ type: 'sandbox/mode', data: { mode: 'danger-full-access' } }))
     expect(ctx.agentTeam.memberForAgent(live!)).toEqual(added.status.member)
@@ -888,16 +978,17 @@ describe('Agent Team Member lifecycle', () => {
 
     const suspended = await ctx.agentTeam.suspendMember({ requestId: requestId('suspend'), memberId: added.status.member.memberId })
     expect(suspended.status.availability).toBe('suspended')
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     const resumed = await ctx.agentTeam.resumeMember({ requestId: requestId('resume'), memberId: added.status.member.memberId })
     expect(resumed.status.availability).toBe('active')
-    expect(resumed.status.member.sessionId).toBe(added.status.member.sessionId)
-    const resumedLive = ctx.agents.get(added.status.member.sessionId)
+    expect(resumed.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)?.sessionId).toBe(sessionId)
+    const resumedLive = ctx.agents.get(sessionId)
     expect(sessionTitle?.get(resumedLive!.session)).toMatchObject({ title: 'builder', source: { kind: 'user' } })
 
     const removed = await ctx.agentTeam.removeMember({ requestId: requestId('remove'), memberId: added.status.member.memberId })
     expect(removed.member.state).toBe('inactive')
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
     await expect(access(added.status.member.privateMemoryPath)).rejects.toThrow()
   })
 
@@ -905,8 +996,10 @@ describe('Agent Team Member lifecycle', () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId, archived } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('clear-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('clear-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const liveBefore = ctx.agents.get(added.status.member.sessionId)!
+    const previousSessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
+    const liveBefore = ctx.agents.get(previousSessionId)!
     // Give the Member a real turn so the clear has a transcript to erase.
     adapter.enqueue(textResponse('Initial work finished.'))
     // Listener-only wait: the Member is idle right after activation, so a
@@ -935,19 +1028,21 @@ describe('Agent Team Member lifecycle', () => {
     expect(ctx.agentTeam.members().find(member => member.member.memberId === added.status.member.memberId)!.presence).toBe('available')
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
 
-    const cleared = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear'), workspaceId, memberId: added.status.member.memberId })
+    const cleared = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear'), workspaceId, memberId: added.status.member.memberId, scopeKey })
     expect(cleared.status.availability).toBe('active')
     expect(cleared.status.presence).toBe('available')
-    expect(cleared.status.member.sessionId).not.toBe(added.status.member.sessionId)
+    expect(cleared.status.member).not.toHaveProperty('sessionId')
+    const currentSessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
+    expect(currentSessionId).not.toBe(previousSessionId)
 
     // The old live Session is disposed; the Member now runs a fresh handle
     // under a new id with an empty conversation (the constructor seed marker
     // is the only event left) and fork lineage back to the previous Session.
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
-    const liveAfter = ctx.agents.get(cleared.status.member.sessionId)!
+    expect(ctx.agents.get(previousSessionId)).toBeUndefined()
+    const liveAfter = ctx.agents.get(currentSessionId)!
     expect(liveAfter).not.toBe(liveBefore)
     expect(liveAfter.session.header.cwd).toBe(liveBefore.session.header.cwd)
-    expect(liveAfter.session.header.parentSession).toBe(added.status.member.sessionId)
+    expect(liveAfter.session.header.parentSession).toBe(previousSessionId)
     expect(liveAfter.session.ownEvents().filter(event => event.type === 'user/message' || event.type === 'turn/start')).toHaveLength(0)
     expect(liveAfter.session.ownEvents().length).toBeLessThan(liveBefore.session.ownEvents().length)
     const sessionTitle = ctx.get('sessionTitle')
@@ -969,12 +1064,12 @@ describe('Agent Team Member lifecycle', () => {
       }
     }
     const flushDeadline = Date.now() + 3000
-    while (Date.now() < flushDeadline && !(await listSessionIds()).has(added.status.member.sessionId)) {
+    while (Date.now() < flushDeadline && !(await listSessionIds()).has(previousSessionId)) {
       await new Promise(resolve => setTimeout(resolve, 25))
     }
-    expect((await listSessionIds()).has(added.status.member.sessionId)).toBe(true)
-    expect(archived).toContain(added.status.member.sessionId)
-    expect(archived).not.toContain(cleared.status.member.sessionId)
+    expect((await listSessionIds()).has(previousSessionId)).toBe(true)
+    expect(archived).toContain(previousSessionId)
+    expect(archived).not.toContain(currentSessionId)
 
     // Private memory and the workspace binding survive.
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
@@ -982,22 +1077,26 @@ describe('Agent Team Member lifecycle', () => {
 
     // The renewal replays cleanly and dedupes by request.
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
-    const again = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear'), workspaceId, memberId: added.status.member.memberId })
+    const again = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear'), workspaceId, memberId: added.status.member.memberId, scopeKey })
     expect(again.receipt.operationId).toBe(cleared.receipt.operationId)
-    expect(again.status.member.sessionId).toBe(cleared.status.member.sessionId)
+    expect(again.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)?.sessionId).toBe(currentSessionId)
 
     // Guards: unknown and suspended Members cannot clear.
-    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-unknown'), workspaceId, memberId: 'member:missing' as AgentTeamMemberId })).rejects.toThrow(/unknown Member/)
+    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-unknown'), workspaceId, memberId: 'member:missing' as AgentTeamMemberId, scopeKey })).rejects.toThrow(/unknown Member/)
     await ctx.agentTeam.suspendMember({ requestId: requestId('clear-suspend'), memberId: added.status.member.memberId })
-    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-suspended'), workspaceId, memberId: added.status.member.memberId }))
+    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('clear-suspended'), workspaceId, memberId: added.status.member.memberId, scopeKey }))
       .rejects.toThrow(/only enabled Members can start from a new context/)
   })
 
   it('surfaces an orphaned preset composition and rebuilds the Member on resume', async () => {
     const { ctx, workspaceId, presets } = await realHarness()
-    const added = await ctx.agentTeam.addMember({ requestId: requestId('add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [] })
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('orphan-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     expect(added.status.presence).toBe('available')
-    const live = ctx.agents.get(added.status.member.sessionId)!
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
+    const live = ctx.agents.get(sessionId)!
     expect(ctx.agentPresets.serviceFor(live, 'compaction')).toBeDefined()
 
     // Arm the orphan seam: this agent now resolves no preset composition,
@@ -1008,9 +1107,11 @@ describe('Agent Team Member lifecycle', () => {
     expect(orphaned.diagnostic).toMatchObject({ class: 'preset-composition' })
     expect(orphaned.diagnostic?.detail).toContain('preset composition was lost')
 
-    const recovered = await ctx.agentTeam.recoverMember({ requestId: requestId('recover'), workspaceId, memberId: added.status.member.memberId })
+    const recovered = await ctx.agentTeam.recoverMember({ requestId: requestId('recover'), workspaceId, memberId: added.status.member.memberId, scopeKey })
     expect(recovered.status.presence).toBe('available')
-    const rebuilt = ctx.agents.get(added.status.member.sessionId)!
+    expect(recovered.status.member).not.toHaveProperty('sessionId')
+    const rebuiltSessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
+    const rebuilt = ctx.agents.get(rebuiltSessionId)!
     expect(rebuilt).not.toBe(live)
     expect(ctx.agentPresets.serviceFor(rebuilt, 'compaction')).toBeDefined()
     expect(ctx.tools.schemas(rebuilt).length).toBeGreaterThan(0)
@@ -1018,8 +1119,11 @@ describe('Agent Team Member lifecycle', () => {
 
   it('renews an error Member from a new context, healing the broken composition', async () => {
     const { ctx, workspaceId, presets, archived } = await realHarness()
-    const added = await ctx.agentTeam.addMember({ requestId: requestId('add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [] })
-    const live = ctx.agents.get(added.status.member.sessionId)!
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('error-renew-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const previousSessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
+    const live = ctx.agents.get(previousSessionId)!
 
     // An error Member keeps its live idle handle, so starting from a new
     // context must work for it too — and doubles as a recovery path.
@@ -1027,12 +1131,13 @@ describe('Agent Team Member lifecycle', () => {
     const orphaned = ctx.agentTeam.members().find(member => member.member.memberId === added.status.member.memberId)!
     expect(orphaned.presence).toBe('error')
 
-    const cleared = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear'), workspaceId, memberId: added.status.member.memberId })
+    const cleared = await ctx.agentTeam.clearMemberContext({ requestId: requestId('clear'), workspaceId, memberId: added.status.member.memberId, scopeKey })
     expect(cleared.status.presence).toBe('available')
-    expect(cleared.status.member.sessionId).not.toBe(added.status.member.sessionId)
-    expect(archived).toEqual([added.status.member.sessionId])
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
-    const renewed = ctx.agents.get(cleared.status.member.sessionId)!
+    expect(cleared.status.member).not.toHaveProperty('sessionId')
+    expect(archived).toContain(previousSessionId)
+    const renewedSessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
+    expect(renewedSessionId).not.toBe(previousSessionId)
+    const renewed = ctx.agents.get(renewedSessionId)!
     expect(renewed).not.toBe(live)
     expect(ctx.agentPresets.serviceFor(renewed, 'compaction')).toBeDefined()
     expect(ctx.tools.schemas(renewed).length).toBeGreaterThan(0)
@@ -1049,8 +1154,10 @@ describe('Agent Team Member lifecycle', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('restart-channel'), workspaceId, name: 'engineering', description: '' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('restart-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
     await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('restart-send'), workspaceId, channelRef: channel.channel.channelRef, body: '@builder go' })
-    await ctx.agents.get(added.status.member.sessionId)!.whenIdle()
+    await ctx.agents.get(sessionId)!.whenIdle()
     const before = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
     expect(before?.presence).toBe('error')
     expect(before?.diagnostic?.detail).toContain('401')
@@ -1086,8 +1193,10 @@ describe('Agent Team Member lifecycle', () => {
     const adapter = new EmptyAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('pre-turn-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const added = await ctx.agentTeam.addMember({ requestId: requestId('pre-turn-add'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(added.status.member.sessionId)!
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
+    const agent = ctx.agents.get(sessionId)!
     const discarded: string[] = []
     ctx.on('agent/inbox/discarded', ({ message }) => { discarded.push(message.id) })
     // Park every Team wake instead of letting an idle Agent run and claim it:
@@ -1114,7 +1223,7 @@ describe('Agent Team Member lifecycle', () => {
 
     const failed = ctx.agentTeam.members().find(status => status.member.memberId === added.status.member.memberId)!
     expect(failed).toMatchObject({ presence: 'error', diagnostic: {
-      class: 'runtime', source: 'agent/inbox/discarded', sessionId: added.status.member.sessionId,
+      class: 'runtime', source: 'agent/inbox/discarded', sessionId,
     } })
     expect(failed.diagnostic?.occurredAt).toEqual(expect.any(String))
     steer.mockRestore()
@@ -1122,31 +1231,37 @@ describe('Agent Team Member lifecycle', () => {
 
   it('restarts a Member whose activation failed and rejects restart for suspended Members', async () => {
     const { ctx, workspaceId, presets } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('restart-failed-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     presets.failingMount = true
-    const added = await ctx.agentTeam.addMember({ requestId: requestId('add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [] })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)!.sessionId
     expect(added.status.availability).toBe('unavailable')
     expect(added.status.presence).toBe('unavailable')
     expect(added.status.diagnostic).toMatchObject({ class: 'preset-composition' })
     expect(added.status.diagnostic?.detail).toContain('failed to load')
-    expect(ctx.agents.get(added.status.member.sessionId)).toBeUndefined()
+    expect(ctx.agents.get(sessionId)).toBeUndefined()
 
     presets.failingMount = false
-    const restarted = await ctx.agentTeam.recoverMember({ requestId: requestId('restart'), workspaceId, memberId: added.status.member.memberId })
+    const restarted = await ctx.agentTeam.recoverMember({ requestId: requestId('restart'), workspaceId, memberId: added.status.member.memberId, scopeKey })
     expect(restarted.status.availability).toBe('active')
-    expect(restarted.status.member.sessionId).toBe(added.status.member.sessionId)
-    const live = ctx.agents.get(restarted.status.member.sessionId)!
+    expect(restarted.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam['ledger']!.memberScopeSessionFor(added.status.member.memberId, scopeKey)?.sessionId).toBe(sessionId)
+    const live = ctx.agents.get(sessionId)!
     expect(ctx.tools.schemas(live).length).toBeGreaterThan(0)
     // Restart is runtime-only: the durable ledger stays replay-consistent.
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
 
     await ctx.agentTeam.suspendMember({ requestId: requestId('suspend'), memberId: added.status.member.memberId })
-    await expect(ctx.agentTeam.recoverMember({ requestId: requestId('restart-suspended'), workspaceId, memberId: added.status.member.memberId }))
+    await expect(ctx.agentTeam.recoverMember({ requestId: requestId('restart-suspended'), workspaceId, memberId: added.status.member.memberId, scopeKey }))
       .rejects.toThrow('only enabled Members can be restarted')
   })
 
   it('resumes a suspended Member without consulting the persistence tree walk', async () => {
     const { ctx, workspaceId } = await realHarness()
-    const added = await ctx.agentTeam.addMember({ requestId: requestId('resume-add'), workspaceId, handle: 'restorer', description: 'Restores the exact session', presetId: 'team-member', channelRefs: [] })
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('resume-channel'), workspaceId, name: 'engineering', description: '' })
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('resume-add'), workspaceId, handle: 'restorer', description: 'Restores the exact session', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     expect(added.status.availability).toBe('active')
     const memberId = added.status.member.memberId
     await ctx.agentTeam.suspendMember({ requestId: requestId('resume-suspend'), memberId })
@@ -1159,12 +1274,15 @@ describe('Agent Team Member lifecycle', () => {
     ctx.sessionPersistence.list = async () => { throw persistenceRaceError() }
     const resumed = await ctx.agentTeam.resumeMember({ requestId: requestId('resume-resume'), memberId })
     expect(resumed.status.availability, JSON.stringify(resumed.status)).toBe('active')
-    expect(ctx.agents.get(resumed.status.member.sessionId)).toBeDefined()
+    expect(resumed.status.member).not.toHaveProperty('sessionId')
+    const sessionId = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!.sessionId
+    expect(ctx.agents.get(sessionId)).toBeDefined()
   })
 
   it('retries a transient persistence walk failure while restarting a Member', async () => {
     const { ctx, workspaceId, teamFiber } = await realHarness()
-    await ctx.agentTeam.addMember({ requestId: requestId('retry-add'), workspaceId, handle: 'retrier', description: 'Survives a transient walk failure', presetId: 'team-member', channelRefs: [] })
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('retry-channel'), workspaceId, name: 'engineering', description: '' })
+    await ctx.agentTeam.addMember({ requestId: requestId('retry-add'), workspaceId, handle: 'retrier', description: 'Survives a transient walk failure', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
 
     // Host restart remounts the plugin and the startup restore walks the
     // persistence tree once for every Member. The previous generation's
@@ -1190,34 +1308,27 @@ describe('Agent Team Member lifecycle', () => {
     expect(consulted).toBe(2)
   })
 
-  it('creates a Member with no description and no Channels and lights delivery on mention', async () => {
+  it('creates and restores a Channel-less Member without a default Session', async () => {
     const { ctx, workspaceId, teamFiber } = await realHarness()
     const bare = await ctx.agentTeam.addMember({ requestId: requestId('bare'), workspaceId, handle: 'bare', description: '', presetId: 'team-member', channelRefs: [] })
-    expect(bare.status.availability).toBe('active')
+    expect(bare.status.availability).toBe('unavailable')
     expect(bare.status.member.description).toBe('')
-    // The invariant companion replays the same durable record shape; an empty
-    // initial Channel list is valid and must not be rejected as divergent.
+    expect(bare.status.member).not.toHaveProperty('sessionId')
+    await expect(access(join(bare.status.member.privateMemoryPath, 'memory.md'))).resolves.toBeUndefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+
     await teamFiber.dispose()
     await ctx.plugin(AgentTeam)
     expect(ctx.agentTeam.status().agentMemberCount).toBe(1)
-    const agent = ctx.agents.get(bare.status.member.sessionId)!
-    expect(agent).toBeDefined()
+    const restored = ctx.agentTeam.members().find(item => item.member.memberId === bare.status.member.memberId)
+    expect(restored?.availability).toBe('unavailable')
+    expect(restored?.member).not.toHaveProperty('sessionId')
 
-    // A message to an empty Channel commits with an empty notification set.
-    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('bare-channel'), workspaceId, name: 'ops', description: 'Ops work' })
-    const before = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('pre-join'), workspaceId, channelRef: channel.channel.channelRef, body: 'Posted before anyone joined' })
-    expect(before.kind).toBe('committed')
-    expect(ctx.agentTeam.inboxForAgent(agent, { workspaceId })).toEqual({ humanMemberId: AGENT_TEAM_HUMAN_MEMBER_ID, items: [], recent: [], hasMore: false, totalUnreadCount: 0, totalDirectCount: 0 })
-
-    // Channel enrolment is retired — membership is derived from participation
-    // — so a Workspace participant with no Channels at all is reachable by
-    // mention, and that mention is what lights the delivery chain.
-    const after = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('post-join'), workspaceId, channelRef: channel.channel.channelRef, body: 'Pinged without joining', recipients: [bare.status.member.memberId] })
-    expect(after.kind).toBe('committed')
-    if (after.kind !== 'committed') throw new Error(`expected committed mention, received ${after.kind}`)
-    expect(ctx.agentTeam.inboxForAgent(agent, { workspaceId })).toMatchObject({ totalUnreadCount: 1, totalDirectCount: 1,
-      items: [expect.objectContaining({ task: expect.objectContaining({ taskRef: after.task!.taskRef }), directCount: 1 })] })
+    await expect(ctx.agentTeam.recoverMember({ requestId: requestId('bare-recover'), workspaceId,
+      memberId: bare.status.member.memberId })).rejects.toThrow(/has no Channel Session/)
+    await expect(ctx.agentTeam.clearMemberContext({ requestId: requestId('bare-clear'), workspaceId,
+      memberId: bare.status.member.memberId, scopeKey: DEFAULT_MEMBER_SCOPE_KEY }))
+      .rejects.toThrow(/default Member Session was removed/)
   })
 
   it('requires referenced Channel authority and rejects an incomplete Team preset before publication', async () => {
@@ -1234,7 +1345,7 @@ describe('Agent Team Member lifecycle', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('protocol-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('protocol-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const reviewer = await ctx.agentTeam.addMember({ requestId: requestId('protocol-reviewer'), workspaceId, handle: 'reviewer', description: 'Reviews changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     let callNumber = 0
     // The pull protocol ends in a Claim, which is the President's write.
     await ctx.agentTeam.setPresident({ requestId: requestId('protocol-president'), memberId: builder.status.member.memberId })
@@ -1280,7 +1391,7 @@ describe('Agent Team Member lifecycle', () => {
     expect(taskless.subject).toBe('Agent-led taskless discussion')
     expect(JSON.stringify(threadDirectory.threads)).not.toContain('One follow-up reply')
     // A second Member who joined after both Threads started sees them too.
-    const lateJoinerAgent = ctx.agents.get(reviewer.status.member.sessionId)!
+    const lateJoinerAgent = ctx.agents.get(channelSessionId(ctx, reviewer.status.member.memberId))!
     const lateJoinerView = await ctx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId(`team-protocol-${++callNumber}`), name: 'team_view', arguments: {}, agent: lateJoinerAgent }).then(result => {
       expect(result.isError).toBe(false)
       return result.value as Record<string, any>
@@ -1325,7 +1436,7 @@ describe('Agent Team Member lifecycle', () => {
       body: 'Agent-led task for @reviewer' })
     expect(enrolled).toMatchObject({ kind: 'committed', threadRef: expect.any(String) })
     const enrolledThreadRef = (enrolled as { threadRef: string }).threadRef
-    const reviewerAgent = ctx.agents.get(reviewer.status.member.sessionId)!
+    const reviewerAgent = ctx.agents.get(channelSessionId(ctx, reviewer.status.member.memberId))!
     const reviewerInbox = ctx.agentTeam.inboxForAgent(reviewerAgent, { workspaceId })
     expect(reviewerInbox).toMatchObject({ totalDirectCount: 1,
       items: [expect.objectContaining({ thread: expect.objectContaining({ threadRef: enrolledThreadRef }), directCount: 1 })] })
@@ -1414,8 +1525,8 @@ describe('Agent Team Member lifecycle', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('dm-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('dm-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const reviewer = await ctx.agentTeam.addMember({ requestId: requestId('dm-reviewer'), workspaceId, handle: 'reviewer', description: 'Reviews changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sender = ctx.agents.get(builder.status.member.sessionId)!
-    const recipient = ctx.agents.get(reviewer.status.member.sessionId)!
+    const sender = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
+    const recipient = ctx.agents.get(channelSessionId(ctx, reviewer.status.member.memberId))!
     let callNumber = 0
     const call = async (name: string, args: unknown) => {
       const result = await ctx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId(`team-dm-${++callNumber}`), name, arguments: args, agent: sender })
@@ -1515,7 +1626,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('clock-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('clock-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('clock-start'), workspaceId, channelRef: channel.channel.channelRef,
       body: 'Drive the clock', recipients: [builder.status.member.memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
@@ -1561,7 +1672,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('loop-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('loop-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('loop-start'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate the rejection flow' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('loop-follow'), workspaceId,
@@ -1597,7 +1708,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('safe-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('safe-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('safe-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate safe delivery' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('safe-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
@@ -1632,7 +1743,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('reply-window-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('reply-window-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const anchor = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('reply-window-anchor'), workspaceId,
       channelRef: channel.channel.channelRef, body: 'Please investigate the anchored path', recipients: [builder.status.member.memberId] })
     if (anchor.kind !== 'committed') throw new Error('expected committed anchor')
@@ -1679,7 +1790,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('replies-to-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('replies-to-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     // The anchor mentions nobody, so the only wake below is the reply's.
     const anchor = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('replies-to-anchor'), workspaceId,
       channelRef: channel.channel.channelRef, body: 'Please investigate the anchored path' })
@@ -1709,7 +1820,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('top-level-wake-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('top-level-wake-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const committed = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('top-level-wake'), workspaceId, channelRef: channel.channel.channelRef,
       body: 'Please investigate the top-level wake path', recipients: [builder.status.member.memberId] })
     expect(committed.kind).toBe('committed')
@@ -1738,8 +1849,8 @@ describe('Agent Team Member lifecycle', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('peer-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const starter = await ctx.agentTeam.addMember({ requestId: requestId('peer-starter'), workspaceId, handle: 'starter', description: 'Starts work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const peer = await ctx.agentTeam.addMember({ requestId: requestId('peer-peer'), workspaceId, handle: 'peer', description: 'Peers in', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const starterAgent = ctx.agents.get(starter.status.member.sessionId)!
-    const peerAgent = ctx.agents.get(peer.status.member.sessionId)!
+    const starterAgent = ctx.agents.get(channelSessionId(ctx, starter.status.member.memberId))!
+    const peerAgent = ctx.agents.get(channelSessionId(ctx, peer.status.member.memberId))!
     let callNumber = 0
     const call = async (name: string, args: unknown) => {
       const result = await ctx.tools.execute({ signal: new AbortController().signal,
@@ -1775,7 +1886,7 @@ describe('Agent Team Member lifecycle', () => {
       name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('bounded-builder'), workspaceId, handle: 'builder',
       description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue current project work.' }], source: { kind: 'user' } }))
     await adapter.started.promise
 
@@ -1808,7 +1919,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('task-update-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('task-update-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('task-update-start'), workspaceId,
       channelRef: channel.channel.channelRef, body: 'Prepare a close notification test' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
@@ -1846,7 +1957,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('wake-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('wake-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('wake-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate the wake path' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('wake-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
@@ -1872,7 +1983,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('resume-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('resume-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('resume-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate resume recovery' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('resume-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
@@ -1883,7 +1994,7 @@ describe('Agent Team Member lifecycle', () => {
 
     adapter.enqueue(textResponse('I will inspect recovered Inbox work.'))
     await ctx.agentTeam.resumeMember({ requestId: requestId('resume-enable'), memberId: builder.status.member.memberId })
-    const resumed = ctx.agents.get(builder.status.member.sessionId)!
+    const resumed = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     await resumed.whenIdle()
     expect(adapter.requests).toHaveLength(1)
     const request = JSON.stringify(adapter.requests[0]!.messages)
@@ -1925,7 +2036,7 @@ describe('Agent Team Member lifecycle', () => {
       const { ctx, workspaceId } = await realHarness(adapter)
       const channel = await ctx.agentTeam.createChannel({ requestId: requestId('automatic-recovery-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
       const builder = await ctx.agentTeam.addMember({ requestId: requestId('automatic-recovery-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-      const agent = ctx.agents.get(builder.status.member.sessionId)!
+      const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
       const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('automatic-recovery-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate automatic recovery' })
       if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
       await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('automatic-recovery-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
@@ -1956,9 +2067,10 @@ describe('Agent Team Member lifecycle', () => {
     try {
       const adapter = new ScriptedAdapter()
       const { ctx, workspaceId } = await realHarness(adapter)
-      const builder = await ctx.agentTeam.addMember({ requestId: requestId('recovery-trace-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
+      const channel = await ctx.agentTeam.createChannel({ requestId: requestId('recovery-trace-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+      const builder = await ctx.agentTeam.addMember({ requestId: requestId('recovery-trace-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
       const memberId = builder.status.member.memberId
-      const sessionId = builder.status.member.sessionId
+      const sessionId = channelSessionId(ctx, builder.status.member.memberId)
       const agent = ctx.agents.get(sessionId)!
       await agent.whenIdle()
       const info = vi.spyOn(ctx.logger, 'info')
@@ -1971,7 +2083,6 @@ describe('Agent Team Member lifecycle', () => {
       const scheduled = lines(info).find(line => line.includes('automatic recovery scheduled'))
       expect(scheduled).toBeDefined()
       expect(scheduled).toContain(`memberId '${memberId}'`)
-      expect(scheduled).toContain(`session '${sessionId}'`)
       expect(scheduled).toContain("errorKind 'transient network'")
       expect(scheduled).toContain('occurrence 1/3')
       expect(scheduled).toContain(`wait ${RECOVERY_DELAY_MS}ms`)
@@ -1993,7 +2104,6 @@ describe('Agent Team Member lifecycle', () => {
       const stoodDown = lines(warn).find(line => line.includes('automatic recovery stood down'))
       expect(stoodDown).toBeDefined()
       expect(stoodDown).toContain(`memberId '${memberId}'`)
-      expect(stoodDown).toContain(`session '${sessionId}'`)
       expect(stoodDown).toContain('3/3')
       expect(stoodDown).toContain('no further automatic wakeup')
       info.mockRestore()
@@ -2036,9 +2146,7 @@ describe('Agent Team Member lifecycle', () => {
       const { ctx, workspaceId } = await realHarness(adapter)
       const channel = await ctx.agentTeam.createChannel({ requestId: requestId('suspend-recovery-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
       const builder = await ctx.agentTeam.addMember({ requestId: requestId('suspend-recovery-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-      const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(builder.status.member.memberId, channelMemberScopeKey(channel.channel.channelRef))!
-      const agent = ctx.agents.get(binding.sessionId)!
-      await agent.whenIdle()
+      const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
       ctx.emit('agent/error', { agent, turn: 1, step: 1, error: new Error('fetch failed') })
       await ctx.agentTeam.suspendMember({ requestId: requestId('suspend-recovery'), memberId: builder.status.member.memberId })
@@ -2055,8 +2163,9 @@ describe('Agent Team Member lifecycle', () => {
     try {
       const adapter = new ScriptedAdapter()
       const { ctx, workspaceId } = await realHarness(adapter)
-      const builder = await ctx.agentTeam.addMember({ requestId: requestId('structured-transport-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-      const agent = ctx.agents.get(builder.status.member.sessionId)!
+      const channel = await ctx.agentTeam.createChannel({ requestId: requestId('structured-transport-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+      const builder = await ctx.agentTeam.addMember({ requestId: requestId('structured-transport-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+      const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
       ctx.emit('agent/error', { agent, turn: 1, step: 1, error: new LlmError('DeepSeek Messages transport failed', 'TRANSPORT') })
       adapter.enqueue(textResponse('Continuing after the transport failure.'))
@@ -2076,8 +2185,9 @@ describe('Agent Team Member lifecycle', () => {
     try {
       const adapter = new ScriptedAdapter()
       const { ctx, workspaceId } = await realHarness(adapter)
-      const builder = await ctx.agentTeam.addMember({ requestId: requestId('structured-terminal-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-      const agent = ctx.agents.get(builder.status.member.sessionId)!
+      const channel = await ctx.agentTeam.createChannel({ requestId: requestId('structured-terminal-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+      const builder = await ctx.agentTeam.addMember({ requestId: requestId('structured-terminal-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+      const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
       ctx.emit('agent/error', { agent, turn: 1, step: 1, error: new LlmError('upstream answered 429 while settling quota', 'QUOTA', { status: 402 }) })
       adapter.enqueue(textResponse('Never reached.'))
@@ -2099,7 +2209,7 @@ describe('Agent Team Member lifecycle', () => {
       const { ctx, workspaceId } = await realHarness(adapter)
       const channel = await ctx.agentTeam.createChannel({ requestId: requestId('manual-recovery-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
       const builder = await ctx.agentTeam.addMember({ requestId: requestId('manual-recovery-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-      const agent = ctx.agents.get(builder.status.member.sessionId)!
+      const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
       const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('manual-recovery-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate manual recovery' })
       if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
       await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('manual-recovery-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
@@ -2119,7 +2229,7 @@ describe('Agent Team Member lifecycle', () => {
       const steered = info.mock.calls.map(args => String(args[0])).find(line => line.includes('operator recovery continuation steered'))
       expect(steered).toBeDefined()
       expect(steered).toContain(`memberId '${builder.status.member.memberId}'`)
-      expect(steered).toContain(`session '${builder.status.member.sessionId}'`)
+      expect(steered).toContain(`session '${channelSessionId(ctx, builder.status.member.memberId)}'`)
       expect(steered).toContain('carrying 1 unread Thread(s)')
       expect(steered).toContain('not yet read by the model')
       info.mockRestore()
@@ -2143,8 +2253,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('error-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('error-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(builder.status.member.memberId, channelMemberScopeKey(channel.channel.channelRef))!
-    const agent = ctx.agents.get(binding.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('error-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate error recovery' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('error-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
@@ -2167,7 +2276,7 @@ describe('Agent Team Member lifecycle', () => {
     const { ctx, workspaceId, teamFiber } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('remount-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('remount-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('remount-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate remount recovery' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
     await ctx.agentTeam.changeAttentionForAgent(agent, { requestId: requestId('remount-follow'), workspaceId, taskRef: started.task!.taskRef, action: 'follow' })
@@ -2181,7 +2290,7 @@ describe('Agent Team Member lifecycle', () => {
     const info = vi.spyOn(ctx.logger, 'info')
     await teamFiber.dispose()
     await ctx.plugin(AgentTeam)
-    const restored = ctx.agents.get(builder.status.member.sessionId)!
+    const restored = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     await restored.whenIdle()
     const lastRequest = JSON.stringify(adapter.requests.at(-1)!.messages)
     expect(lastRequest).toContain('Team Inbox has unread work')
@@ -2192,7 +2301,7 @@ describe('Agent Team Member lifecycle', () => {
     const queued = info.mock.calls.map(args => String(args[0])).find(line => line.includes('Team Inbox notice queued'))
     expect(queued).toBeDefined()
     expect(queued).toContain(`memberId '${builder.status.member.memberId}'`)
-    expect(queued).toContain(`session '${builder.status.member.sessionId}'`)
+    expect(queued).toContain(`session '${channelSessionId(ctx, builder.status.member.memberId)}'`)
     expect(queued).toContain('cause Member activation')
     expect(queued).toContain('not yet read by the model')
     info.mockRestore()
@@ -2204,7 +2313,8 @@ describe('Agent Team Member lifecycle', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('renewal-trace-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('renewal-trace-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = builder.status.member.memberId
-    const retiredSessionId = builder.status.member.sessionId
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
+    const retiredSessionId = channelSessionId(ctx, builder.status.member.memberId)
     const agent = ctx.agents.get(retiredSessionId)!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('renewal-trace-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate renewal tracing' })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
@@ -2220,8 +2330,8 @@ describe('Agent Team Member lifecycle', () => {
 
     const info = vi.spyOn(ctx.logger, 'info')
     adapter.enqueue(textResponse('I will continue in the new context.'))
-    const renewed = await ctx.agentTeam.clearMemberContext({ requestId: requestId('renewal-trace-clear'), workspaceId, memberId })
-    const currentSessionId = renewed.status.member.sessionId
+    const renewed = await ctx.agentTeam.clearMemberContext({ requestId: requestId('renewal-trace-clear'), workspaceId, memberId, scopeKey })
+    const currentSessionId = channelSessionId(ctx, renewed.status.member.memberId)
     await ctx.agents.get(currentSessionId)!.whenIdle()
 
     // One line locates the current generation and the one it replaced, under
@@ -2252,12 +2362,13 @@ describe('Agent Team Member lifecycle', () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
     installFixtureModelSelection(ctx)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('pick-feedback-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({
       requestId: requestId('pick-feedback-add'), workspaceId, handle: 'builder',
-      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [],
+      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef],
       model: { provider: 'mock', model: 'configured-model' },
     })
-    const agent = ctx.agents.get(added.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     adapter.enqueue(textResponse('first response'))
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Say hello.' }], source: { kind: 'user' } }))
     await agent.whenIdle()
@@ -2288,12 +2399,13 @@ describe('Agent Team Member lifecycle', () => {
   it('sends the Member config edit to the next request and records it in the Session', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('config-feedback-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({
       requestId: requestId('config-feedback-add'), workspaceId, handle: 'builder',
-      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [],
+      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef],
       model: { provider: 'mock', model: 'first-model' },
     })
-    const agent = ctx.agents.get(added.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     adapter.enqueue(textResponse('first response'))
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Say hello.' }], source: { kind: 'user' } }))
     await agent.whenIdle()
@@ -2329,12 +2441,14 @@ describe('Agent Team Member lifecycle', () => {
     const options = { sqlite: true, modelSelection: true }
     const beforeAdapter = new ScriptedAdapter()
     const before = await realHarness(beforeAdapter, 'jsonl', undefined, options)
+    const channel = await before.ctx.agentTeam.createChannel({ requestId: requestId('cold-pick-channel'), workspaceId: before.workspaceId,
+      name: 'engineering', description: '' })
     const configured = { provider: 'mock', model: 'configured-model' }
     const added = await before.ctx.agentTeam.addMember({
       requestId: requestId('cold-pick-add'), workspaceId: before.workspaceId, handle: 'builder',
-      description: '', presetId: 'team-member', channelRefs: [], model: configured,
+      description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef], model: configured,
     })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(before.ctx, added.status.member.memberId)
     const agent = before.ctx.agents.get(sessionId)!
     agent.session.append('model/selection', chosen)
     beforeAdapter.enqueue(textResponse('consume the Session choice'))
@@ -2379,9 +2493,10 @@ describe('Agent Team Member lifecycle', () => {
   it('blocks a picked-model request when its source cannot be persisted, then retries without reverting', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter, 'jsonl', undefined, { modelSelection: true })
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('route-write-failure-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('route-write-failure-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [], model: { provider: 'mock', model: 'configured-model' } })
-    const agent = ctx.agents.get(added.status.member.sessionId)!
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef], model: { provider: 'mock', model: 'configured-model' } })
+    const agent = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     const ledger = Reflect.get(ctx.agentTeam, 'ledger') as AgentTeamLedger
     const write = vi.spyOn(ledger, 'recordMemberModelRoute').mockRejectedValue(new Error('route storage unavailable'))
     try {
@@ -2401,31 +2516,33 @@ describe('Agent Team Member lifecycle', () => {
 
   it('deduplicates route records per bound Session without waking shared projections', async () => {
     const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('route-ownership-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('route-ownership-add'), workspaceId,
-      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const ledger = Reflect.get(ctx.agentTeam, 'ledger') as AgentTeamLedger
     const memberId = added.status.member.memberId
     const source = { kind: 'session' as const, sessionVersion: 1, memberModelVersion: ledger.memberModelVersion(memberId) }
     const count = ledger.status().operationCount
     const cursor = ledger.projectionSequence()
-    await ledger.recordMemberModelRoute(memberId, added.status.member.sessionId, source)
-    await ledger.recordMemberModelRoute(memberId, added.status.member.sessionId, source)
+    await ledger.recordMemberModelRoute(memberId, channelSessionId(ctx, added.status.member.memberId), source)
+    await ledger.recordMemberModelRoute(memberId, channelSessionId(ctx, added.status.member.memberId), source)
     expect(ledger.status().operationCount).toBe(count + 1)
     expect(ledger.projectionSequence()).toBe(cursor)
     await expect(ledger.recordMemberModelRoute(memberId, SessionId('session:not-bound'), source)).rejects.toThrow('invalid Member model route record')
-    await expect(ledger.recordMemberModelRoute(memberId, added.status.member.sessionId, { ...source, sessionVersion: 0 })).rejects.toThrow('invalid Member model route record')
+    await expect(ledger.recordMemberModelRoute(memberId, channelSessionId(ctx, added.status.member.memberId), { ...source, sessionVersion: 0 })).rejects.toThrow('invalid Member model route record')
     ctx.agentTeam.validateLedger()
   })
 
   it('keeps a persisted Member session active after switching its model and restarting', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId, teamFiber } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('persisted-model-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({
       requestId: requestId('persisted-model-add'), workspaceId, handle: 'builder',
-      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [],
+      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef],
       model: { provider: 'mock', model: 'initial-model' },
     })
-    const agent = ctx.agents.get(added.status.member.sessionId)!
+    const agent = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     adapter.enqueue(textResponse('initial response'))
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Create a persisted transcript.' }], source: { kind: 'user' } }))
     await agent.whenIdle()
@@ -2445,7 +2562,7 @@ describe('Agent Team Member lifecycle', () => {
     await ctx.plugin(AgentTeam)
     await ctx.agentTeam.resumeMember({ requestId: requestId('persisted-model-resume'), memberId: added.status.member.memberId })
     const resumed = await waitFor(() => {
-      const restarted = ctx.agents.get(added.status.member.sessionId)
+      const restarted = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))
       return restarted !== undefined && restarted.status === 'idle' ? restarted : undefined
     })
     adapter.enqueue(textResponse('after the restart.'))
@@ -2474,7 +2591,7 @@ describe('Agent Team Member lifecycle', () => {
       description: 'Builds the implementation', presetId: 'team-member',
       channelRefs: [channel.channel.channelRef], model: { provider: 'mock', model: 'pinned-model' },
     })
-    const liveAgent = () => ctx.agents.get(added.status.member.sessionId)!
+    const liveAgent = () => ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     // Creation activates with the pinned selection instead of the Host default.
     expect(added.status.member.model).toEqual({ provider: 'mock', model: 'pinned-model' })
     expect(lastActivationOptions()).toMatchObject({ provider: 'mock', model: 'pinned-model' })
@@ -2489,7 +2606,7 @@ describe('Agent Team Member lifecycle', () => {
       model: { provider: 'mock', model: 'switched-model' },
     })
     expect(edited.status.availability).toBe('active')
-    expect(edited.status.member.sessionId).toBe(added.status.member.sessionId)
+    expect(channelSessionId(ctx, edited.status.member.memberId)).toBe(channelSessionId(ctx, added.status.member.memberId))
     expect(liveAgent()).toBe(liveBeforeEdit)
     expect(createSpy).not.toHaveBeenCalled()
     expect(resumeSpy).not.toHaveBeenCalled()
@@ -2530,7 +2647,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     const { ctx, workspaceId, archived, pressureState } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('rollover-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('rollover-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
     const memberId = added.status.member.memberId
     await writeFile(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'), 'persistent note')
 
@@ -2553,9 +2670,9 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     // The rollover completes asynchronously after the containing turn ends.
     const renewedStatus = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId ? current : undefined
     })
-    const newSessionId = renewedStatus.member.sessionId
+    const newSessionId = channelSessionId(ctx, renewedStatus.member.memberId)
 
     // Fresh generation: nothing inherited from the old log, and the lineage
     // parent points at the previous active Session. The swap's commit order is
@@ -2581,7 +2698,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     expect(archived).toContain(previousSessionId)
     expect(archived).not.toContain(newSessionId)
     await expect(access(join(added.status.member.privateMemoryPath, 'notes', 'kept.md'))).resolves.toBeUndefined()
-    expect(ctx.agentTeam.memberForAgent(liveAfter)?.sessionId).toBe(newSessionId)
+    expect(channelSessionId(ctx, added.status.member.memberId)).toBe(newSessionId)
 
     // The durable ledger records the Member-actor rollover and replays cleanly.
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -2637,7 +2754,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('cpref-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('cpref-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // A well-formed ref that resolves to no checkpoint in the Member's
     // lineage rejects at the tool boundary: the engine's gate answers from the
@@ -2654,7 +2771,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     await new Promise(resolve => setTimeout(resolve, 100))
 
     const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!
-    expect(current.member.sessionId).toBe(sessionId)
+    expect(channelSessionId(ctx, current.member.memberId)).toBe(sessionId)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
     // The rejection is durable and model-visible, and no pending intent was
     // recorded from the refused call. The sentence belongs to the engine; what
@@ -2676,9 +2793,9 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over fresh instead' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
-      return status !== undefined && status.member.sessionId !== sessionId ? status : undefined
+      return status !== undefined && channelSessionId(ctx, status.member.memberId) !== sessionId ? status : undefined
     })
-    expect(renewed.member.sessionId).not.toBe(sessionId)
+    expect(channelSessionId(ctx, renewed.member.memberId)).not.toBe(sessionId)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -2688,7 +2805,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('seam-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('seam-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // A rollover that PASSES tool-time validation can still fail at the
@@ -2713,7 +2830,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     expect(injected).toBe(true)
 
     const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!
-    expect(current.member.sessionId).toBe(sessionId)
+    expect(channelSessionId(ctx, current.member.memberId)).toBe(sessionId)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
     const poisoned = foldTeamContextProjection(live.session.ownEvents(), { sessionId: live.session.id, inheritedEventCount: live.session.inheritedEventCount })
     expect(poisoned.pending).toMatchObject({ toolCallId: 'call-seam-nc' })
@@ -2737,9 +2854,9 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
 
     const renewed = await waitFor(() => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
-      return status !== undefined && status.member.sessionId !== sessionId ? status : undefined
+      return status !== undefined && channelSessionId(ctx, status.member.memberId) !== sessionId ? status : undefined
     })
-    expect(renewed.member.sessionId).not.toBe(sessionId)
+    expect(channelSessionId(ctx, renewed.member.memberId)).not.toBe(sessionId)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -2749,7 +2866,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('cpref2-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('cpref2-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // A declared parameter carries its schema validation (a non-string
@@ -2766,7 +2883,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     }
 
     const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!
-    expect(current.member.sessionId).toBe(sessionId)
+    expect(channelSessionId(ctx, current.member.memberId)).toBe(sessionId)
     const results = live.session.ownEvents().filter(event => event.type === 'tool/result')
     const rejections = results.filter(event => {
       if (event.type !== 'tool/result') return false
@@ -2783,7 +2900,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('badfiles-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('badfiles-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // Tool argument validation is layered: the Harness schema validator
@@ -2811,7 +2928,7 @@ describe('Agent Team fresh context_rollover rollover (ticket 01)', () => {
     // tool's own execute check catches the blank string the schema cannot
     // express.
     const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!
-    expect(current.member.sessionId).toBe(sessionId)
+    expect(channelSessionId(ctx, current.member.memberId)).toBe(sessionId)
     const results = live.session.ownEvents().filter(event => event.type === 'tool/result')
     if (process.env.DSH_DEBUG_TOOL_RESULTS !== undefined) {
       for (const event of results) {
@@ -2868,7 +2985,7 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('gate-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('gate-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
     const memberId = added.status.member.memberId
 
     adapter.enqueue(toolCallResponse('call-nc', 'context_rollover', { handoff: 'handoff for the gate test' }))
@@ -2899,7 +3016,7 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     // readiness semantics are locked separately below).
     const newSessionId = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId ? current.member.sessionId : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId ? channelSessionId(ctx, current.member.memberId) : undefined
     })
     const liveAfter = await waitFor(() => ctx.agents.get(newSessionId)!)
 
@@ -2933,7 +3050,7 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('twice-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('twice-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Both generations call context_rollover as their first tool call with the
     // same provider call id, so the folded result seq repeats exactly.
@@ -2942,9 +3059,9 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     ctx.agents.get(firstSessionId)!.followup(createUserMessage({ content: [{ type: 'text', text: 'first' }], source: { kind: 'user' } }))
     const first = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const secondSessionId = first.member.sessionId
+    const secondSessionId = channelSessionId(ctx, first.member.memberId)
 
     // Generation 2: wait for the ledger flip AND the new agent's
     // registration before steering input at it — the flip precedes the
@@ -2956,17 +3073,17 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     secondSessionAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'second' }], source: { kind: 'user' } }))
     const second = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== secondSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== secondSessionId ? current : undefined
     })
 
     // Distinct generations, both archives preserved, and the ledger holds
     // exactly two rollover operations with distinct ids. Archiving rides
     // retirement, which follows the durable flip, so wait for both archives
     // rather than sampling the list straight after the flip.
-    expect(second.member.sessionId).not.toBe(firstSessionId)
-    expect(second.member.sessionId).not.toBe(secondSessionId)
+    expect(channelSessionId(ctx, second.member.memberId)).not.toBe(firstSessionId)
+    expect(channelSessionId(ctx, second.member.memberId)).not.toBe(secondSessionId)
     await waitForArchived(archived, firstSessionId, secondSessionId)
-    expect(archived).not.toContain(second.member.sessionId)
+    expect(archived).not.toContain(channelSessionId(ctx, second.member.memberId))
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -2976,7 +3093,7 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('hostile-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('hostile-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Path metacharacters, traversal segments, control characters, and an
     // unbounded length are all legal provider call ids; none of them may
@@ -2988,9 +3105,9 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     ctx.agents.get(firstSessionId)!.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over now' }], source: { kind: 'user' } }))
     const first = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const hostileSessionId = first.member.sessionId
+    const hostileSessionId = channelSessionId(ctx, first.member.memberId)
     // Bounded and url-safe: a fixed prefix plus one sha256 hex digest, never
     // the provider id verbatim.
     expect(hostileSessionId).toMatch(/^agent-team-rollover-[0-9a-f]{64}$/)
@@ -3008,9 +3125,9 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     secondSessionAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'colon' }], source: { kind: 'user' } }))
     const colon = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== secondSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== secondSessionId ? current : undefined
     })
-    const thirdSessionId = colon.member.sessionId
+    const thirdSessionId = channelSessionId(ctx, colon.member.memberId)
     // Same flip-to-registration window as above: wait for the agent itself.
     adapter.enqueue(toolCallResponse('x-y', 'context_rollover', { handoff: 'dash pair' }))
     adapter.enqueue(textResponse('dash continuation.'))
@@ -3018,10 +3135,10 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     thirdSessionAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'dash' }], source: { kind: 'user' } }))
     const dash = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== thirdSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== thirdSessionId ? current : undefined
     })
-    expect(dash.member.sessionId).not.toBe(thirdSessionId)
-    expect(dash.member.sessionId).toMatch(/^agent-team-rollover-[0-9a-f]{64}$/)
+    expect(channelSessionId(ctx, dash.member.memberId)).not.toBe(thirdSessionId)
+    expect(channelSessionId(ctx, dash.member.memberId)).toMatch(/^agent-team-rollover-[0-9a-f]{64}$/)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -3031,7 +3148,7 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('unread-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('unread-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // An unread Team fact lands while the rollover turn is still settling:
     // its Inbox notice would ordinarily wake the next turn first, so this is
@@ -3063,11 +3180,11 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
 
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId ? current : undefined
     })
     // The flip precedes the retire/activate span: wait for the new agent's
     // registration before reading its session log.
-    const liveAfter = await waitFor(() => ctx.agents.get(renewed.member.sessionId))
+    const liveAfter = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId)))
     await waitFor(() => liveAfter.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     // The first model-facing user message of the new generation is the
     // handoff snapshot, not the rederived Team Inbox notice.
@@ -3088,11 +3205,10 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('window-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('window-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     adapter.enqueue(toolCallResponse('call-nc', 'context_rollover', { handoff: 'window handoff' }))
     adapter.enqueue(textResponse('continuing.'))
-    ctx.agents.get(previousSessionId)!.followup(createUserMessage({ content: [{ type: 'text', text: 'hand off' }], source: { kind: 'user' } }))
 
     // Observe the exact commit window: the durable rollover operation is
     // visible while the old generation still runs and the new Session does
@@ -3102,23 +3218,24 @@ async function waitForArchived(archived: readonly SessionId[], ...sessionIds: re
     const disposeCommitted = ctx.on('agent-team/committed', () => {
       if (probed) return
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
-      if (status === undefined || status.member.sessionId === previousSessionId) return
+      if (status === undefined || channelSessionId(ctx, status.member.memberId) === previousSessionId) return
       probed = true
       expect(status.availability).not.toBe('active')
       expect(status.presence).toBe('unavailable')
-      expect(status.diagnostic).toMatchObject({ class: 'rollover', detail: 'context rollover in progress' })
+      expect(status.diagnostic).toMatchObject({ class: 'rollover', detail: 'Channel context transition in progress' })
       windowProbe.resolve()
     })
+    ctx.agents.get(previousSessionId)!.followup(createUserMessage({ content: [{ type: 'text', text: 'hand off' }], source: { kind: 'user' } }))
     const renewedSessionId = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId ? current.member.sessionId : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId ? channelSessionId(ctx, current.member.memberId) : undefined
     })
     await waitFor(() => ctx.agents.get(renewedSessionId)!)
     disposeCommitted()
     await windowProbe.promise
     // Once activation completes, the same Member reports active again.
     const settled = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)!
-    expect(settled.member.sessionId).toBe(renewedSessionId)
+    expect(channelSessionId(ctx, settled.member.memberId)).toBe(renewedSessionId)
     expect(settled.availability).toBe('active')
   })
 
@@ -3128,7 +3245,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('cp-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('cp-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // The checkpoint tool result lands in turn 1; concludeTurn closes the
@@ -3314,7 +3431,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('sib-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('sib-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // One step carrying two tool calls: the checkpoint plus a sibling
@@ -3355,7 +3472,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('failcp-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('failcp-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // Malformed arguments (missing name) reject at the schema layer; the
@@ -3379,7 +3496,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('tl-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('tl-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // Record two checkpoints, then read the timeline through the tool. Each
@@ -3430,7 +3547,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('tl-inc-channel'), workspaceId, name: 'engineering', description: 'Engineering Work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('tl-inc-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Generation 1 runs a turn, then a fresh rollover archives it as the
     // new generation's lineage ancestor.
@@ -3444,9 +3561,9 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
 
@@ -3478,7 +3595,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('ret-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('ret-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Turn 1 records the anchor; the continuation answers; turn 3+ makes
     // noise worth discarding; then the model returns to the anchor. Wait on
@@ -3508,9 +3625,9 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'return to the anchor' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const newSessionId = renewed.member.sessionId
+    const newSessionId = channelSessionId(ctx, renewed.member.memberId)
     const next = await waitFor(() => ctx.agents.get(newSessionId)!)
 
     // Seeded lineage: parent is the seed source (the same Session here),
@@ -3552,7 +3669,7 @@ describe('Agent Team checkpoint lineage (ticket 02 ancestors)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('anc-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('anc-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Generation 1: record the anchor, let its continuation settle.
     adapter.enqueue(toolCallResponse('call-anc-cp', 'context_checkpoint', { name: 'gen1 anchor' }))
@@ -3572,9 +3689,9 @@ describe('Agent Team checkpoint lineage (ticket 02 ancestors)', () => {
     gen1.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over fresh' }], source: { kind: 'user' } }))
     const gen2Status = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const secondSessionId = gen2Status.member.sessionId
+    const secondSessionId = channelSessionId(ctx, gen2Status.member.memberId)
     const gen2 = await waitFor(() => ctx.agents.get(secondSessionId)!)
     await waitFor(() => gen2.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await gen2.whenIdle()
@@ -3593,9 +3710,9 @@ describe('Agent Team checkpoint lineage (ticket 02 ancestors)', () => {
     gen2.followup(createUserMessage({ content: [{ type: 'text', text: 'return to the ancestor anchor' }], source: { kind: 'user' } }))
     const gen3Status = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== secondSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== secondSessionId ? current : undefined
     })
-    const thirdSessionId = gen3Status.member.sessionId
+    const thirdSessionId = channelSessionId(ctx, gen3Status.member.memberId)
     const gen3 = await waitFor(() => ctx.agents.get(thirdSessionId)!)
 
     // Lineage: the seed parent is the archived ancestor (generation 1),
@@ -3624,7 +3741,7 @@ describe('Agent Team checkpoint lineage (ticket 02 ancestors)', () => {
     const { ctx, workspaceId, teamFiber: initialFiber } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('repair-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('repair-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Record a checkpoint; its quiet continuation may deliver before or
     // after the crash point — the discriminating invariant is that restarts
@@ -3686,7 +3803,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const { ctx, workspaceId, pressureState } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('press-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('press-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // Below the handoff budget: no notice at all.
@@ -3724,7 +3841,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('rearm-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('rearm-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     pressureState.usageTokens = 200_000
     adapter.enqueue(textResponse('pressured turn.'))
@@ -3742,9 +3859,9 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'hand off' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId ? current : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
     // The new generation observes the budget again on its next turn.
@@ -3764,7 +3881,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     pressureState.usageTokens = 0
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('noauto-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Investigate the release', recipients: [memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
-    const live = ctx.agents.get(added.status.member.sessionId)!
+    const live = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     await waitForIdle(ctx, live)
     const read = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('noauto-read'), workspaceId, taskRef: started.task!.taskRef })
     // Creating a Claim is the President's write.
@@ -3791,7 +3908,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const memberId = added.status.member.memberId
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('advice-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Ship the feature', recipients: [memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
-    const live = ctx.agents.get(added.status.member.sessionId)!
+    const live = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     await waitForIdle(ctx, live)
     const memberRead = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('advice-member-read'), workspaceId, taskRef: started.task!.taskRef })
     // Creating a Claim is the President's write.
@@ -3876,7 +3993,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     pressureState.usageTokens = 0
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('narrow-advice-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Ship it', recipients: [memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
-    const live = ctx.agents.get(added.status.member.sessionId)!
+    const live = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     await waitForIdle(ctx, live)
     const memberRead = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('narrow-advice-read-claim'), workspaceId, taskRef: started.task!.taskRef })
     // Creating a Claim is the President's write.
@@ -3911,7 +4028,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const humanRead2 = await ctx.agentTeam.readThread({ requestId: requestId('narrow-advice-human-read-2'), workspaceId, taskRef: started.task!.taskRef })
     const accepted2 = await ctx.agentTeam.changeTask({ requestId: requestId('narrow-advice-accept-2'), workspaceId, taskRef: started.task!.taskRef, action: 'accept', baseRevision: humanRead2.thread.revision })
     if (accepted2.kind !== 'committed') throw new Error(`expected committed accept, received ${accepted2.kind}`)
-    pressureState.failFor.add(added.status.member.sessionId)
+    pressureState.failFor.add(channelSessionId(ctx, added.status.member.memberId))
     const degraded = await ctx.agentTeam.readThreadForAgent(live, { requestId: requestId('narrow-advice-read-degraded'), workspaceId, taskRef: started.task!.taskRef })
     // The read still succeeded (durable watermark advanced) with an
     // explicit unavailable advice instead of numbers.
@@ -3928,8 +4045,8 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const reviewer = await ctx.agentTeam.addMember({ requestId: requestId('notify-reviewer'), workspaceId, handle: 'reviewer', description: 'Reviews changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('notify-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Ship both semantics', recipients: [builder.status.member.memberId, reviewer.status.member.memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
-    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
-    const reviewerAgent = ctx.agents.get(reviewer.status.member.sessionId)!
+    const builderAgent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
+    const reviewerAgent = ctx.agents.get(channelSessionId(ctx, reviewer.status.member.memberId))!
     adapter.enqueue(textResponse('builder saw the task.'))
     adapter.enqueue(textResponse('reviewer saw the task.'))
     await waitForIdle(ctx, builderAgent)
@@ -4024,7 +4141,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('emptyclause-add'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('emptyclause-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Ship the early accept', recipients: [builder.status.member.memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
-    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+    const builderAgent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     adapter.enqueue(textResponse('builder saw the task.'))
     await waitForIdle(ctx, builderAgent)
     await ctx.agentTeam.readThreadForAgent(builderAgent, { requestId: requestId('emptyclause-initial-read'), workspaceId, taskRef: started.task!.taskRef })
@@ -4072,7 +4189,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     // route rather than whatever the last request happened to use.
     const added = await ctx.agentTeam.addMember({ requestId: requestId('route-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
     pressureState.usageTokens = 0
     adapter.enqueue(textResponse('first turn on the default route.'))
@@ -4109,7 +4226,7 @@ describe('Agent Team pressure policy integration (ticket 03)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('prestart-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('prestart-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // At the handoff budget, exactly one notice lands in this generation.
@@ -4153,7 +4270,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const { ctx, workspaceId, jobsState } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('jobs-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('jobs-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // A running job blocks the rollover; the rejection names it.
@@ -4182,9 +4299,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'try now that everything is reported' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === added.status.member.memberId)
-      return current !== undefined && current.member.sessionId !== sessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== sessionId ? current : undefined
     })
-    expect(renewed.member.sessionId).not.toBe(sessionId)
+    expect(channelSessionId(ctx, renewed.member.memberId)).not.toBe(sessionId)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -4194,7 +4311,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('hfix-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('hfix-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // One fresh rollover whose handoff delivers normally.
     adapter.enqueue(toolCallResponse('call-hfix-nc', 'context_rollover', { handoff: 'the reconstructed handoff text' }))
@@ -4203,9 +4320,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
     expect(archivedHandoffs(next)).toHaveLength(1)
@@ -4224,10 +4341,10 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
-    const resumed = await waitFor(() => ctx.agents.get(resumedStatus.member.sessionId)!)
+    const resumed = await waitFor(() => ctx.agents.get(channelSessionId(ctx, resumedStatus.member.memberId))!)
     await resumed.whenIdle()
     await new Promise(resolve => setTimeout(resolve, 100))
-    expect(resumed.session.id).toBe(renewed.member.sessionId)
+    expect(resumed.session.id).toBe(channelSessionId(ctx, renewed.member.memberId))
     expect(archivedHandoffs(resumed)).toHaveLength(1)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
@@ -4238,7 +4355,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('hgap-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('hgap-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Crash the rollover between its durable ledger commit and the handoff
     // delivery: the new Session's activation fails (preset mount throws), so
@@ -4252,12 +4369,12 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over now' }], source: { kind: 'user' } }))
     const committed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
-    expect(committed.member.sessionId).not.toBe(firstSessionId)
-    expect(ctx.agents.get(committed.member.sessionId)).toBeUndefined()
+    expect(channelSessionId(ctx, committed.member.memberId)).not.toBe(firstSessionId)
+    expect(ctx.agents.get(channelSessionId(ctx, committed.member.memberId))).toBeUndefined()
     expect(ctx.agents.get(firstSessionId)).toBeUndefined()
 
     // Host restart on the same ledger: activation of the never-materialized
@@ -4273,7 +4390,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
-    const resumed = await waitFor(() => ctx.agents.get(restarted.member.sessionId)!)
+    const resumed = await waitFor(() => ctx.agents.get(channelSessionId(ctx, restarted.member.memberId))!)
     await resumed.whenIdle()
     await waitFor(() => archivedHandoffs(resumed).length > 0 ? true : undefined)
     await resumed.whenIdle()
@@ -4292,7 +4409,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('seedcut-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('seedcut-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Record the anchor, then make noise past it.
     adapter.enqueue(toolCallResponse('call-seedcut-cp', 'context_checkpoint', { name: 'stable anchor' }))
@@ -4317,7 +4434,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'return to the anchor' }], source: { kind: 'user' } }))
     await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
@@ -4333,7 +4450,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
-    const resumed = await waitFor(() => ctx.agents.get(restarted.member.sessionId)!)
+    const resumed = await waitFor(() => ctx.agents.get(channelSessionId(ctx, restarted.member.memberId))!)
     await waitFor(() => archivedHandoffs(resumed).length > 0 ? true : undefined)
     await resumed.whenIdle()
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -4360,7 +4477,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('carry-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('carry-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Crash the rollover after its commit; the racing direct input lands in
     // the old generation's inbox after the intent (durable splice → carried
@@ -4380,13 +4497,13 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over into the crash' }], source: { kind: 'user' } }))
     const committed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
     disposeObserver()
     expect(injected).toBe(true)
-    expect(ctx.agents.get(committed.member.sessionId)).toBeUndefined()
+    expect(ctx.agents.get(channelSessionId(ctx, committed.member.memberId))).toBeUndefined()
 
     // Host restart: the recreated generation receives the reconstructed
     // handoff first, then the carried direct input behind it — exactly once,
@@ -4401,7 +4518,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
-    const resumed = await waitFor(() => ctx.agents.get(restarted.member.sessionId)!)
+    const resumed = await waitFor(() => ctx.agents.get(channelSessionId(ctx, restarted.member.memberId))!)
     await waitFor(() => {
       const bodies = resumed.session.ownEvents().filter(event => event.type === 'user/message')
         .map(event => JSON.stringify((event as { data: { content: readonly unknown[] } }).data.content))
@@ -4435,7 +4552,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('recb-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('recb-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // A job that starts between the durable result and the swap makes the seam
@@ -4454,7 +4571,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const poisoned = foldTeamContextProjection(live.session.ownEvents(), { sessionId: live.session.id, inheritedEventCount: live.session.inheritedEventCount })
     expect(poisoned.pending).toMatchObject({ toolCallId: 'call-recb-nc', handoff: 'the handoff a restart must finish' })
     expect(poisoned.pending?.turnEndSeq).not.toBe(-1)
-    expect(ctx.agentTeam.members().find(status => status.member.memberId === memberId)!.member.sessionId).toBe(sessionId)
+    expect(channelSessionId(ctx, memberId)).toBe(sessionId)
 
     // Host restart over the same ledger and Session store, with the job
     // settled: activation alone must finish the interrupted transition.
@@ -4466,9 +4583,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
 
     const renewed = await waitFor(() => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
-      return status !== undefined && status.member.sessionId !== sessionId ? status : undefined
+      return status !== undefined && channelSessionId(ctx, status.member.memberId) !== sessionId ? status : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
     await new Promise(resolve => setTimeout(resolve, 100))
@@ -4477,7 +4594,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const delivered = next.session.ownEvents().flatMap(event => event.type === 'user/message' && isHandoffMessage(event.data) ? [handoffOf(event.data)] : [])
     expect(delivered).toHaveLength(1)
     expect(delivered[0]?.previousSessionId).toBe(sessionId)
-    expect(delivered[0]?.newSessionId).toBe(renewed.member.sessionId)
+    expect(delivered[0]?.newSessionId).toBe(channelSessionId(ctx, renewed.member.memberId))
     expect(delivered[0]?.sections.find(section => section.name === 'HANDOFF')?.text).toBe('the handoff a restart must finish')
     expect(archivedHandoffs(next)).toHaveLength(1)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -4489,7 +4606,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('p1-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('p1-add'), workspaceId, handle: 'p1member', description: 'P1 replay skip', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Crash the rollover after its commit with racing direct input in the old
     // generation's inbox (durable splice -> carried candidate).
@@ -4508,13 +4625,13 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over into the P1 crash' }], source: { kind: 'user' } }))
     await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
     disposeObserver()
     expect(injected).toBe(true)
-    const currentSessionId = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!.member.sessionId
+    const currentSessionId = channelSessionId(ctx, memberId)
 
     // First restart: the current generation heals, runs the handoff turn, and
     // receives the carried input exactly once — it now has own turn activity.
@@ -4528,7 +4645,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
-    expect(firstRestart.member.sessionId).toBe(currentSessionId)
+    expect(channelSessionId(ctx, firstRestart.member.memberId)).toBe(currentSessionId)
     const firstRestartAgent = await waitFor(() => ctx.agents.get(currentSessionId)!)
     await waitFor(() => firstRestartAgent.session.ownEvents().some(event => event.type === 'turn/start') ? true : undefined)
     await firstRestartAgent.whenIdle()
@@ -4560,7 +4677,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
-    expect(restarted.member.sessionId).toBe(currentSessionId)
+    expect(channelSessionId(ctx, restarted.member.memberId)).toBe(currentSessionId)
     expect(restarted.diagnostic).toBeUndefined()
     expect(inspectedPrevious).toBe(0)
     expect(info.mock.calls.some(args => String(args[0]).includes('skipping carried-input replay'))).toBe(true)
@@ -4580,7 +4697,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('p2-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('p2-add'), workspaceId, handle: 'p2member', description: 'P2 fail-open', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Crash the rollover after its commit with racing direct input in the old
     // generation's inbox: the new Session never runs before the restart.
@@ -4599,7 +4716,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over into the P2 crash' }], source: { kind: 'user' } }))
     await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
@@ -4625,7 +4742,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
     expect(restarted.diagnostic).toBeUndefined()
-    const resumed = await waitFor(() => ctx.agents.get(restarted.member.sessionId)!)
+    const resumed = await waitFor(() => ctx.agents.get(channelSessionId(ctx, restarted.member.memberId))!)
     const replayWarnings = warn.mock.calls.map(args => String(args[0])).filter(text => text.includes('skipping the replay'))
     expect(replayWarnings.length).toBeGreaterThan(0)
     expect(replayWarnings.some(text => text.includes(previousSessionId) && text.includes('p2member'))).toBe(true)
@@ -4644,7 +4761,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('p4-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('p4-add'), workspaceId, handle: 'p4member', description: 'P4 format refusal', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Same crash shape as the corruption case: the rollover committed, the new
     // Session never ran, and direct input was racing in the old generation.
@@ -4655,7 +4772,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over into the P4 crash' }], source: { kind: 'user' } }))
     await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
@@ -4691,7 +4808,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('p2f-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('p2f-add'), workspaceId, handle: 'p2fmember', description: 'P2 fail-closed boundary', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const previousSessionId = added.status.member.sessionId
+    const previousSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Same crash shape as the fail-open case, but the unreadable cause is a
     // missing file (ENOENT), not log corruption: the bounded fail-open must
@@ -4703,7 +4820,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over into the fail-closed crash' }], source: { kind: 'user' } }))
     await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== previousSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== previousSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
@@ -4722,8 +4839,8 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'unavailable' && status.diagnostic?.class === 'session-unreadable' ? status : undefined
     })
-    expect(failed.member.sessionId).not.toBe(previousSessionId)
-    expect(ctx.agents.get(failed.member.sessionId)).toBeUndefined()
+    expect(channelSessionId(ctx, failed.member.memberId)).not.toBe(previousSessionId)
+    expect(ctx.agents.get(channelSessionId(ctx, failed.member.memberId))).toBeUndefined()
   })
 
   it('blocks activation with a session-refused diagnostic when the current binding is refused, and a restart replays the deterministic refusal', async () => {
@@ -4732,7 +4849,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('ref-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('ref-add'), workspaceId, handle: 'refused', description: 'Refused binding', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     expect(added.status.availability).toBe('active')
 
     // The Member's own current Session becomes deterministically refused.
@@ -4769,7 +4886,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('heal-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('heal-add'), workspaceId, handle: 'healing', description: 'Heal retry', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
 
     const realOpen = ctx.sessionPersistence.open.bind(ctx.sessionPersistence)
     ctx.sessionPersistence.open = async (id, access, options) => {
@@ -4823,7 +4940,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('tbound-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('tbound-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // Thread A: a direct mention wakes the Member; the delivered notice
@@ -4873,9 +4990,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'return to the thread-A boundary' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== sessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== sessionId ? current : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
     // Seeded at the boundary's completed-turn cut, in the same Session.
@@ -4897,7 +5014,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('xseq-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('xseq-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Generation 1 receives a direct mention; its notice delivery becomes a
     // team boundary at some event seq in generation 1.
@@ -4916,9 +5033,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const secondSessionId = renewed.member.sessionId
+    const secondSessionId = channelSessionId(ctx, renewed.member.memberId)
     const next = await waitFor(() => ctx.agents.get(secondSessionId)!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
@@ -4955,9 +5072,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     next.followup(createUserMessage({ content: [{ type: 'text', text: 'return to gen1' }], source: { kind: 'user' } }))
     const returned = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== secondSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== secondSessionId ? current : undefined
     })
-    const third = await waitFor(() => ctx.agents.get(returned.member.sessionId)!)
+    const third = await waitFor(() => ctx.agents.get(channelSessionId(ctx, returned.member.memberId))!)
     await waitFor(() => third.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await third.whenIdle()
     const inherited = third.session.snapshotEvents(0 as never, third.session.inheritedEventCount)
@@ -4972,7 +5089,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('twostart-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('twostart-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // A delivered mention seeds Thread A's first-arrival boundary; then the
@@ -5016,7 +5133,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('mix-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('mix-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const sessionId = added.status.member.sessionId
+    const sessionId = channelSessionId(ctx, added.status.member.memberId)
     const live = ctx.agents.get(sessionId)!
 
     // Thread A delivers a notice first; then the Member claims a Task on a
@@ -5055,7 +5172,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     await waitForIdle(ctx, live)
     await new Promise(resolve => setTimeout(resolve, 100))
     const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!
-    expect(current.member.sessionId).toBe(sessionId)
+    expect(channelSessionId(ctx, current.member.memberId)).toBe(sessionId)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -5065,7 +5182,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('order-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('order-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Unread Team facts exist at rollover time AND racing direct input
     // arrives in the transition window: the new generation must read the
@@ -5097,9 +5214,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over now' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     disposeObserver()
     await waitFor(() => {
       const bodies = next.session.ownEvents().filter(event => event.type === 'user/message')
@@ -5130,7 +5247,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('pendc-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('pendc-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Crash the rollover after its commit with racing direct input in the
     // old generation's inbox (durable splice → carried candidate).
@@ -5151,13 +5268,13 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over into the crash' }], source: { kind: 'user' } }))
     await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId
         && current.availability === 'unavailable'
         && current.diagnostic?.class === 'preset-composition' ? current : undefined
     })
     disposeObserver()
     expect(injected).toBe(true)
-    const newSessionId = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!.member.sessionId
+    const newSessionId = channelSessionId(ctx, memberId)
 
     // First restart: recovery steers the handoff (call 2, gated mid-request)
     // and the carried input rides the follow-up lane behind it. While the
@@ -5173,7 +5290,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
       const status = ctx.agentTeam.members().find(entry => entry.member.memberId === memberId)
       return status !== undefined && status.availability === 'active' ? status : undefined
     })
-    expect(firstRestart.member.sessionId).toBe(newSessionId)
+    expect(channelSessionId(ctx, firstRestart.member.memberId)).toBe(newSessionId)
     await adapter.started.promise
     const firstRestartAgent = (await waitFor(() => ctx.agents.get(newSessionId)!))!
     const pendingCarried = [...firstRestartAgent.inbox.nextStep, ...firstRestartAgent.inbox.nextTurn]
@@ -5227,7 +5344,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('biga-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('biga-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Generation 1's only work turn records an anchor while "large": the
     // meter reads far above the handoff budget for GENERATION 1's own
@@ -5250,9 +5367,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over fresh' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
     // The ancestor grew large by the time it is REPLAYED — no live
@@ -5276,7 +5393,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     await waitForIdle(ctx, next)
     await new Promise(resolve => setTimeout(resolve, 100))
     const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!
-    expect(current.member.sessionId).toBe(renewed.member.sessionId)
+    expect(channelSessionId(ctx, current.member.memberId)).toBe(channelSessionId(ctx, renewed.member.memberId))
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -5286,7 +5403,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('unmeas-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('unmeas-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const firstSessionId = added.status.member.sessionId
+    const firstSessionId = channelSessionId(ctx, added.status.member.memberId)
 
     // Generation 1 records an anchor; a fresh rollover follows.
     adapter.enqueue(toolCallResponse('call-unmeas-cp', 'context_checkpoint', { name: 'ancestor anchor' }))
@@ -5301,9 +5418,9 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     live.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over fresh' }], source: { kind: 'user' } }))
     const renewed = await waitFor(() => {
       const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)
-      return current !== undefined && current.member.sessionId !== firstSessionId ? current : undefined
+      return current !== undefined && channelSessionId(ctx, current.member.memberId) !== firstSessionId ? current : undefined
     })
-    const next = await waitFor(() => ctx.agents.get(renewed.member.sessionId)!)
+    const next = await waitFor(() => ctx.agents.get(channelSessionId(ctx, renewed.member.memberId))!)
     await waitFor(() => next.session.ownEvents().some(event => event.type === 'user/message') ? true : undefined)
     await next.whenIdle()
 
@@ -5323,7 +5440,7 @@ describe('Agent Team recovery hardening (ticket 04)', () => {
     await waitForIdle(ctx, next)
     await new Promise(resolve => setTimeout(resolve, 100))
     const current = ctx.agentTeam.members().find(status => status.member.memberId === memberId)!
-    expect(current.member.sessionId).toBe(renewed.member.sessionId)
+    expect(channelSessionId(ctx, current.member.memberId)).toBe(channelSessionId(ctx, renewed.member.memberId))
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
@@ -5556,8 +5673,9 @@ describe('Agent Team presence-scope invalidation (issue #21)', () => {
 
   it('wakes only presence waiters on Agent running/idle and leaves workspace and scope-less waiters parked', async () => {
     const { ctx, workspaceId } = await realHarness(new EmptyAdapter())
-    const builder = await ctx.agentTeam.addMember({ requestId: requestId('presence-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const memberChannel = await ctx.agentTeam.createChannel({ requestId: requestId('presence-member-channel'), workspaceId, name: 'member-work', description: 'Member Session domain' })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('presence-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [memberChannel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     // Presence versions are their own domain, so a presence waiter is parked
     // with a cursor sampled from the presence scope itself.
     const presenceBaseline = await changeBaseline(ctx.agentTeam, { kind: 'presence', workspaceId })
@@ -5592,8 +5710,9 @@ describe('Agent Team presence-scope invalidation (issue #21)', () => {
 
   it('reports Agent runtime failures through the presence scope only', async () => {
     const { ctx, workspaceId } = await realHarness(new EmptyAdapter())
-    const builder = await ctx.agentTeam.addMember({ requestId: requestId('presence-error-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('presence-error-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const builder = await ctx.agentTeam.addMember({ requestId: requestId('presence-error-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const presenceBaseline = await changeBaseline(ctx.agentTeam, { kind: 'presence', workspaceId })
     const presenceWaiter = nextChange(ctx.agentTeam, { kind: 'presence', workspaceId })
     const unscopedWaiter = nextChange(ctx.agentTeam)
@@ -5619,7 +5738,7 @@ describe('Agent Team change version domains', () => {
     const { ctx, workspaceId } = await realHarness(new EmptyAdapter())
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('domain-channel'), workspaceId, name: 'engineering', description: 'Version domains' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('domain-add'), workspaceId, handle: 'builder', description: 'Reads work', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const live = ctx.agents.get(added.status.member.sessionId)!
+    const live = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     const started = await ctx.agentTeam.sendMessage({ asTask: true, requestId: requestId('domain-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Unread work', recipients: [added.status.member.memberId] })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
 
@@ -5650,8 +5769,9 @@ describe('Agent Team change version domains', () => {
 
   it('wakes a presence waiter holding another domain cursor without moving any projection cursor', async () => {
     const { ctx, workspaceId } = await realHarness(new EmptyAdapter())
-    const added = await ctx.agentTeam.addMember({ requestId: requestId('domain-presence-add'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(added.status.member.sessionId)!
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('domain-presence-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('domain-presence-add'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, added.status.member.memberId))!
     const projection = (await changeBaseline(ctx.agentTeam)).version
 
     // A cursor taken from the projection domain must never park a presence
@@ -5672,11 +5792,12 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
   it("suspends B while A's capability edit waits for A's turn boundary", async () => {
     const adapter = new GatedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('isolation-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('isolation-builder'), workspaceId,
-      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const reviewer = await ctx.agentTeam.addMember({ requestId: requestId('isolation-reviewer'), workspaceId,
-      handle: 'reviewer', description: 'Reviews changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+      handle: 'reviewer', description: 'Reviews changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
     // A runs a held turn: model call 1 parks until the test releases it.
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue current project work.' }], source: { kind: 'user' } }))
@@ -5706,10 +5827,10 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
     expect(suspensionOutcome).toBe('settled')
     expect(applied.effect).toBe('applied')
     expect(applied.status.availability).toBe('active')
-    expect(applied.status.member.sessionId).toBe(builder.status.member.sessionId)
+    expect(channelSessionId(ctx, applied.status.member.memberId)).toBe(channelSessionId(ctx, builder.status.member.memberId))
     expect(applied.status.member.capabilities).toEqual({ tools: { allow: ['ordinary_tool'] } })
     expect(suspended.status.availability).toBe('suspended')
-    expect(ctx.agents.get(reviewer.status.member.sessionId)).toBeUndefined()
+    expect(ctx.agents.get(channelSessionId(ctx, reviewer.status.member.memberId))).toBeUndefined()
     // A's turn ran to completion after the boundary swap, untouched by B's suspension.
     await agent.whenIdle()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -5718,9 +5839,10 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
   it('keeps same-Member order: a stop queued behind a parked edit runs after the edit applies', async () => {
     const adapter = new GatedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('order-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('order-builder'), workspaceId,
-      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue current project work.' }], source: { kind: 'user' } }))
     await adapter.started.promise
@@ -5756,9 +5878,10 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
   it('defers an edit whose stop committed first and applies the stored intent at the next activation', async () => {
     const adapter = new GatedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('deferred-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('deferred-builder'), workspaceId,
-      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const memberId = builder.status.member.memberId
 
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue current project work.' }], source: { kind: 'user' } }))
@@ -5781,26 +5904,27 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
 
     const resumed = await ctx.agentTeam.resumeMember({ requestId: requestId('deferred-resume'), memberId })
     expect(resumed.status.availability).toBe('active')
-    expect(resumed.status.member.sessionId).toBe(builder.status.member.sessionId)
+    expect(channelSessionId(ctx, resumed.status.member.memberId)).toBe(channelSessionId(ctx, builder.status.member.memberId))
     expect(resumed.status.member.capabilities).toEqual({ tools: { allow: ['ordinary_tool'] } })
     expect(resumed.status.capabilityState).toBe('applied')
-    expect(ctx.agents.get(builder.status.member.sessionId)).toBeDefined()
+    expect(ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))).toBeDefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
   })
 
   it('activates exactly once when the same add request arrives concurrently', async () => {
     const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('dup-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const request = { requestId: requestId('dup-add'), workspaceId, handle: 'duplicate',
-      description: 'Concurrent duplicate', presetId: 'team-member', channelRefs: [] }
+      description: 'Concurrent duplicate', presetId: 'team-member', channelRefs: [channel.channel.channelRef] }
     const [first, second] = await Promise.all([ctx.agentTeam.addMember(request), ctx.agentTeam.addMember(request)])
 
     expect(second.status.member.memberId).toBe(first.status.member.memberId)
-    expect(second.status.member.sessionId).toBe(first.status.member.sessionId)
+    expect(channelSessionId(ctx, second.status.member.memberId)).toBe(channelSessionId(ctx, first.status.member.memberId))
     // The hard idempotency evidence: the duplicate resolves to the same
     // committed operation, not a second row.
     expect(second.receipt).toEqual(first.receipt)
     expect(ctx.agentTeam.members().filter(item => item.member.memberId === first.status.member.memberId)).toHaveLength(1)
-    const live = ctx.agents.get(first.status.member.sessionId)
+    const live = ctx.agents.get(channelSessionId(ctx, first.status.member.memberId))
     expect(live).toBeDefined()
     expect(ctx.agentTeam.memberForAgent(live!)).toEqual(first.status.member)
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -5808,19 +5932,20 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
 
   it('runs distinct add requests concurrently with disjoint members', async () => {
     const { ctx, workspaceId } = await realHarness()
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('parallel-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const [left, right] = await Promise.all([
       ctx.agentTeam.addMember({ requestId: requestId('parallel-left'), workspaceId, handle: 'left',
-        description: 'Left member', presetId: 'team-member', channelRefs: [] }),
+        description: 'Left member', presetId: 'team-member', channelRefs: [channel.channel.channelRef] }),
       ctx.agentTeam.addMember({ requestId: requestId('parallel-right'), workspaceId, handle: 'right',
-        description: 'Right member', presetId: 'team-member', channelRefs: [] }),
+        description: 'Right member', presetId: 'team-member', channelRefs: [channel.channel.channelRef] }),
     ])
 
     expect(left.status.availability).toBe('active')
     expect(right.status.availability).toBe('active')
     expect(right.status.member.memberId).not.toBe(left.status.member.memberId)
-    expect(right.status.member.sessionId).not.toBe(left.status.member.sessionId)
-    expect(ctx.agents.get(left.status.member.sessionId)).toBeDefined()
-    expect(ctx.agents.get(right.status.member.sessionId)).toBeDefined()
+    expect(channelSessionId(ctx, right.status.member.memberId)).not.toBe(channelSessionId(ctx, left.status.member.memberId))
+    expect(ctx.agents.get(channelSessionId(ctx, left.status.member.memberId))).toBeDefined()
+    expect(ctx.agents.get(channelSessionId(ctx, right.status.member.memberId))).toBeDefined()
     const handles = ctx.agentTeam.members().map(item => item.member.handle)
     expect(handles).toEqual(expect.arrayContaining(['left', 'right']))
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
@@ -5829,9 +5954,10 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
   it('drains a parked lifecycle chain on Host shutdown without waiting for the turn to end', async () => {
     const adapter = new GatedAdapter()
     const { ctx, workspaceId, teamFiber } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('shutdown-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('shutdown-builder'), workspaceId,
-      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue current project work.' }], source: { kind: 'user' } }))
     await adapter.started.promise
@@ -5865,9 +5991,10 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
   it('resolves a parked boundary wait when the turn is cancelled', async () => {
     const adapter = new GatedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('cancel-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('cancel-builder'), workspaceId,
-      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
-    const agent = ctx.agents.get(builder.status.member.sessionId)!
+      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const agent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
     agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Continue current project work.' }], source: { kind: 'user' } }))
     await adapter.started.promise
@@ -5897,10 +6024,11 @@ describe('Agent Team member execution isolation (state-requests 02)', () => {
   it('logs each lifecycle wait class with the Member, Session, and duration', async () => {
     const adapter = new GatedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('waitlog-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('waitlog-builder'), workspaceId,
-      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [] })
+      handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = builder.status.member.memberId
-    const sessionId = builder.status.member.sessionId
+    const sessionId = channelSessionId(ctx, builder.status.member.memberId)
     const agent = ctx.agents.get(sessionId)!
     const info = vi.spyOn(ctx.logger, 'info')
 
@@ -5965,20 +6093,21 @@ describe('Agent Team model route rejection (issue #43 #6)', () => {
     })).rejects.toThrow(/provider 'no-such-provider' is not registered/)
   })
 
-  it('accepts a registered provider and leaves unpinned Members alone', async () => {
+  it('accepts a registered provider for a Channel Session and leaves channel-less Members unbound', async () => {
     const { ctx, workspaceId } = await realHarness(new ScriptedAdapter())
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('good-provider-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const pinned = await ctx.agentTeam.addMember({
       requestId: requestId('good-provider-add'), workspaceId, handle: 'builder',
-      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [],
+      description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef],
       model: { provider: 'mock', model: 'fine' },
     })
     expect(pinned.status.availability).toBe('active')
-    // No model at all: the Host default inheritance path, untouched.
+    // No model and no Channel membership: the Member has no live Session.
     const inherited = await ctx.agentTeam.addMember({
       requestId: requestId('no-model-add'), workspaceId, handle: 'painter',
       description: 'Paints the UI', presetId: 'team-member', channelRefs: [],
     })
-    expect(inherited.status.availability).toBe('active')
+    expect(inherited.status).toMatchObject({ availability: 'unavailable', presence: 'unavailable' })
   })
 })
 
@@ -6057,8 +6186,8 @@ describe('Agent Team President office', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('task-channel'), workspaceId, name: 'engineering', description: '' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('task-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const lead = await ctx.agentTeam.addMember({ requestId: requestId('task-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
-    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
+    const builderAgent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
+    const leadAgent = ctx.agents.get(channelSessionId(ctx, lead.status.member.memberId))!
 
     // Vacant office: nobody may create a Task, and the refusal says so.
     await expect(ctx.agentTeam.sendMessageForAgent(builderAgent, { requestId: requestId('task-vacant'), workspaceId,
@@ -6086,8 +6215,8 @@ describe('Agent Team President office', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('surface-channel'), workspaceId, name: 'engineering', description: '' })
     const lead = await ctx.agentTeam.addMember({ requestId: requestId('surface-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('surface-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
-    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+    const leadAgent = ctx.agents.get(channelSessionId(ctx, lead.status.member.memberId))!
+    const builderAgent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
 
     // No office yet: neither Member carries the Task switch, both carry the
     // proposal path — the surface never advertises a capability it lacks.
@@ -6116,7 +6245,7 @@ describe('Agent Team President office', () => {
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('claim-channel'), workspaceId, name: 'engineering', description: '' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('claim-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const builderId = builder.status.member.memberId
-    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+    const builderAgent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     await ctx.agentTeam.setPresident({ requestId: requestId('claim-president'), memberId: builderId })
     const started = await ctx.agentTeam.sendMessage({ requestId: requestId('claim-task'), workspaceId, channelRef: channel.channel.channelRef, body: 'Implement', asTask: true })
     if (started.kind !== 'committed') throw new Error(`expected committed start, received ${started.kind}`)
@@ -6131,7 +6260,7 @@ describe('Agent Team President office', () => {
     // Losing the office does not take the author's close away: `done` stays the
     // author's own write, and `list` stays readable.
     const lead = await ctx.agentTeam.addMember({ requestId: requestId('claim-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
+    const leadAgent = ctx.agents.get(channelSessionId(ctx, lead.status.member.memberId))!
     await ctx.agentTeam.setPresident({ requestId: requestId('claim-move'), memberId: lead.status.member.memberId })
     const leadRead = await ctx.agentTeam.readThreadForAgent(leadAgent, { requestId: requestId('claim-lead-read'), workspaceId, taskRef })
     await expect(ctx.agentTeam.changeClaimForAgent(leadAgent, { requestId: requestId('claim-lead-create'), workspaceId, taskRef,
@@ -6150,7 +6279,7 @@ describe('Agent Team President office', () => {
     const { ctx, workspaceId } = await realHarness()
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('propose-channel'), workspaceId, name: 'engineering', description: '' })
     const builder = await ctx.agentTeam.addMember({ requestId: requestId('propose-add-builder'), workspaceId, handle: 'builder', description: 'Builder', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const builderAgent = ctx.agents.get(builder.status.member.sessionId)!
+    const builderAgent = ctx.agents.get(channelSessionId(ctx, builder.status.member.memberId))!
     const view = () => ctx.agentTeam.viewForAgent(builderAgent, { workspaceId, includeCatalog: true })
     expect(view().tasks).toEqual([])
 
@@ -6162,7 +6291,7 @@ describe('Agent Team President office', () => {
     expect(view().tasks).toEqual([])
 
     const lead = await ctx.agentTeam.addMember({ requestId: requestId('propose-add-lead'), workspaceId, handle: 'lead', description: 'Lead', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
-    const leadAgent = ctx.agents.get(lead.status.member.sessionId)!
+    const leadAgent = ctx.agents.get(channelSessionId(ctx, lead.status.member.memberId))!
     await ctx.agentTeam.setPresident({ requestId: requestId('propose-president'), memberId: lead.status.member.memberId })
     const withHolder = await ctx.agentTeam.proposeForAgent(builderAgent, { requestId: requestId('propose-2'), workspaceId,
       channelRef: channel.channel.channelRef, kind: 'task', summary: 'Same direction, told to the holder.' })

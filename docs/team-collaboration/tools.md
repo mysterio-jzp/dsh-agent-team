@@ -116,7 +116,7 @@ A restart that lands between the durable rollover commit and the new Session's a
 
 ## `context_checkpoint`
 
-`context_checkpoint` records one named checkpoint of the calling Member's current context. Like `context_rollover` it performs no lifecycle side effect in the tool body. The durable checkpoint is the successful `tool/call`+`tool/result` pair the Session projection folds, and the returned ref is deterministic from the Member Session identity plus the tool call id, so the model can cite it before the result exists and a repeated provider call id in another generation never collides.
+`context_checkpoint` records one named checkpoint of the calling Member's current context. Like `context_rollover` it performs no lifecycle side effect in the tool body. The durable checkpoint is the successful `tool/call`+`tool/result` pair the Session projection folds, and the returned ref is deterministic from the calling Channel Session identity plus the tool call id, so the model can cite it before the result exists and a repeated provider call id in another generation never collides.
 
 The checkpoint resolves at its containing turn's end, so the model records it as the final action of a completed unit of work; after the turn the Host schedules one quiet continuation message so the Member can keep working toward the recorded anchor. Delivery is exactly-once across restarts: the projection's delivery record is durable, and a checkpoint whose continuation already landed is never re-scheduled.
 

@@ -77,7 +77,7 @@ dsh web
 
 每次发布后随即把稳定 profile 装到该版本（按精确版本号，理由见上）。稳定 profile 与开发 profile 共享全局 ledger 存储（`$DSH_HOME/storages/`）。稳定 profile 停留在旧版，而 ledger 已被新版写入。这时启动会因记录 schema 校验失败而崩溃。2026-08 的 0.1.1 即是这种"写得出、读不回"的中间版本。
 
-本 bundle 的最低兼容版本是 DSH `0.2.0-rc.2`。DSH 的 JSONL Session persistence 会自行迁移已发布的旧格式（v0/v1/v2 → V3 → V4）。旧格式 Session 数据无需手动处置。不要为 Team ledger 或 Member Session 添加迁移、读取旧格式或静默回退逻辑。
+本 bundle 的最低兼容版本是 DSH `0.2.0-rc.2`。DSH 的 JSONL Session persistence 会自行迁移已发布的旧格式（v0/v1/v2 → V3 → V4）。旧格式 Session 数据无需手动处置。不要添加 Team ledger schema 或 DSH Session 格式迁移、旧格式读取或静默回退。归档旧 Member default Session 属于 lifecycle cleanup，不是 Session 格式迁移。
 
 ### 重写与推送历史
 

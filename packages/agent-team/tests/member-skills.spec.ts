@@ -101,14 +101,18 @@ async function memberSkillsHarness(): Promise<{
 }
 
 async function addMember(ctx: Context, workspaceId: WorkspaceId, handle: string): Promise<{ memberId: AgentTeamMemberId; sessionId: SessionId; privateMemoryPath: string }> {
+  const channel = await ctx.agentTeam.createChannel({ requestId: requestId(`channel-${handle}`), workspaceId,
+    name: `skills-${handle}`, description: 'Member skill test' })
   const added = await ctx.agentTeam.addMember({
     requestId: requestId(`add-${handle}`), workspaceId, handle, description: 'Skills member',
-    presetId: 'team-member', channelRefs: [],
+    presetId: 'team-member', channelRefs: [channel.channel.channelRef],
   })
   expect(added.status.availability).toBe('active')
+  const binding = ctx.agentTeam['ledger']!.memberScopeSessions(added.status.member.memberId)[0]
+  if (binding === undefined) throw new Error('new Channel member has no bound Session')
   return {
     memberId: added.status.member.memberId,
-    sessionId: added.status.member.sessionId,
+    sessionId: binding.sessionId,
     privateMemoryPath: added.status.member.privateMemoryPath,
   }
 }

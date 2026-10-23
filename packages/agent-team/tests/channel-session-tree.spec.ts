@@ -20,7 +20,7 @@ import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
-import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession } from '../src/member-scope.ts'
+import { channelMemberScopeKey, memberScopeSession } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { AgentTeamChannelRef, AgentTeamChannelRowReason, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId } from '../src/types.ts'
@@ -392,28 +392,34 @@ describe('Channel rows in the Member session tree', () => {
     const chRunning = await newChannelFor(ctx, nextChannelName())
     const chWarning = await newChannelFor(ctx, nextChannelName())
     const memberId = 'member:rollup' as AgentTeamMemberId
-    const defaultSessionId = SessionId('session:rollup')
     const ledger = ctx.agentTeam['ledger']!
 
     await ledger.addMember({
       requestId: requestId('add-rollup'), workspaceId: alpha, handle: 'rollup', description: 'Peer', presetId: 'team-member',
       channelRefs: [chNormal, chRunning], actor: agentTeamHumanActor(),
       member: {
-        memberId, sessionId: defaultSessionId, workspaceId: alpha, handle: 'rollup', description: 'Peer',
+        memberId, workspaceId: alpha, handle: 'rollup', description: 'Peer',
         presetId: 'team-member', privateMemoryPath: '/tmp/rollup', state: 'enabled' as const,
       },
     })
-    await ctx.agentTeam['reconcileChannelWorkDomains'](ledger)
-
+    const normalScopeKey = channelMemberScopeKey(chNormal)
+    const runningScopeKey = channelMemberScopeKey(chRunning)
+    const normalSessionId = SessionId('session:rollup:normal')
+    const runningSessionId = SessionId('session:rollup:running')
+    await ledger.bindMemberScopeSession({
+      requestId: requestId('bind-rollup-normal'), workspaceId: alpha, workspaceRoot: cwd, memberId,
+      binding: memberScopeSession(normalScopeKey, normalSessionId), actor: agentTeamHumanActor(),
+    })
+    await ledger.bindMemberScopeSession({
+      requestId: requestId('bind-rollup-running'), workspaceId: alpha, workspaceRoot: cwd, memberId,
+      binding: memberScopeSession(runningScopeKey, runningSessionId), actor: agentTeamHumanActor(),
+    })
     const fakeHandle = (sessionId: SessionId, status: 'idle' | 'running' = 'idle') => ({
       agent: { id: sessionId, status, ctx, session: { id: sessionId } },
       dispose: async () => {},
     })
-    ctx.agentTeam['registerHandle'](memberId, 'default' as never, fakeHandle(defaultSessionId, 'idle') as never)
-    ctx.agentTeam['memberRuntime'].recordAppliedCapabilities(memberId, undefined)
-
-    const bindNormal = ledger.memberScopeSessionFor(memberId, channelMemberScopeKey(chNormal))!
-    const bindRunning = ledger.memberScopeSessionFor(memberId, channelMemberScopeKey(chRunning))!
+    const bindNormal = ledger.memberScopeSessionFor(memberId, normalScopeKey)!
+    const bindRunning = ledger.memberScopeSessionFor(memberId, runningScopeKey)!
     ctx.agentTeam['registerHandle'](memberId, channelMemberScopeKey(chNormal), fakeHandle(bindNormal.sessionId, 'idle') as never)
     ctx.agentTeam['registerHandle'](memberId, channelMemberScopeKey(chRunning), fakeHandle(bindRunning.sessionId, ' idle'.trim() as 'idle') as never)
 

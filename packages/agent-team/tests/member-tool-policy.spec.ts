@@ -229,12 +229,16 @@ interface MemberFacts {
 }
 
 async function addMember(ctx: Context, workspaceId: WorkspaceId, handle: string, capabilities?: AgentTeamMemberCapabilities): Promise<MemberFacts> {
+  const channel = await ctx.agentTeam.createChannel({ requestId: requestId(`channel-${handle}`), workspaceId,
+    name: `policy-${handle}`, description: 'Member policy test' })
   const added = await ctx.agentTeam.addMember({
     requestId: requestId(`add-${handle}`), workspaceId, handle, description: 'Policy member',
-    presetId: 'team-member', channelRefs: [], ...(capabilities === undefined ? {} : { capabilities }),
+    presetId: 'team-member', channelRefs: [channel.channel.channelRef], ...(capabilities === undefined ? {} : { capabilities }),
   })
   expect(added.status.availability).toBe('active')
-  return { memberId: added.status.member.memberId, sessionId: added.status.member.sessionId, privateMemoryPath: added.status.member.privateMemoryPath }
+  const binding = ctx.agentTeam['ledger']!.memberScopeSessions(added.status.member.memberId)[0]
+  if (binding === undefined) throw new Error('new Channel member has no bound Session')
+  return { memberId: added.status.member.memberId, sessionId: binding.sessionId, privateMemoryPath: added.status.member.privateMemoryPath }
 }
 
 function liveAgent(ctx: Context, facts: MemberFacts): Agent {
@@ -340,7 +344,8 @@ describe('Agent Team member tool policy', () => {
       capabilities: { tools: { allow: ['ordinary_tool', 'spare_tool'] } },
     })
     expect(widened.status.member.capabilities).toEqual({ tools: { allow: ['ordinary_tool', 'spare_tool'] } })
-    expect(widened.status.member.sessionId).toBe(narrow.sessionId)
+    expect(widened.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam.workDomainForAgent(agent)?.sessionId).toBe(narrow.sessionId)
     expect(toolNames(ctx, agent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
 
     // The next model turn sees the widened surface in its request tools and
@@ -388,7 +393,8 @@ describe('Agent Team member tool policy', () => {
     adapter.release()
     const settled = await edit
     expect(settled.status.availability).toBe('active')
-    expect(settled.status.member.sessionId).toBe(narrow.sessionId)
+    expect(settled.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam.workDomainForAgent(agent)?.sessionId).toBe(narrow.sessionId)
     expect(settled.status.member.capabilities).toEqual({ tools: { allow: ['ordinary_tool', 'spare_tool'] } })
     expect(toolNames(ctx, agent)).toEqual([...memberSurfaceTools, 'ordinary_tool', 'spare_tool'].sort())
     const suspended = await suspending
@@ -603,7 +609,8 @@ describe('Agent Team member tool policy', () => {
     })
     expect(pinned.effect).toBe('applied')
     expect(pinned.status.member.model).toEqual({ provider: 'mock', model: 'pinned' })
-    expect(pinned.status.member.sessionId).toBe(member.sessionId)
+    expect(pinned.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam.workDomainForAgent(agent)?.sessionId).toBe(member.sessionId)
     expect(pinned.status.capabilityState).toBe('applied')
 
     adapter.enqueue([
@@ -687,7 +694,8 @@ describe('Agent Team member tool policy', () => {
     const settled = await edit
     expect(settled.effect).toBe('applied')
     expect(settled.status.capabilityState).toBe('applied')
-    expect(settled.status.member.sessionId).toBe(member.sessionId)
+    expect(settled.status.member).not.toHaveProperty('sessionId')
+    expect(ctx.agentTeam.workDomainForAgent(agent)?.sessionId).toBe(member.sessionId)
     await turnDone
     expect(await catalogNames(ctx, agent)).toEqual(['alpha', 'beta'])
     ctx.agentTeam.validateLedger()

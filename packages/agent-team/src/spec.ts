@@ -97,7 +97,8 @@ const memberCapabilitiesSchema = z.object({
 
 const memberSchema = z.object({
   memberId: memberIdSchema,
-  sessionId: sessionIdSchema,
+  // Older operations carry a default Session id; new Members omit it entirely.
+  sessionId: sessionIdSchema.optional(),
   workspaceId: workspaceIdSchema,
   handle: z.string().min(1),
   description: z.string(),
@@ -441,7 +442,12 @@ const storedAgentTeamOperationSchema = z.discriminatedUnion('kind', [
     ...operationBase,
     previousOperationId: operationIdSchema.nullable(),
     kind: z.literal('team/member-session-renewed'),
-    data: z.object({ member: memberSchema, previousSessionId: sessionIdSchema, scopeKey: memberScopeKeySchema.optional() }).strict(),
+    data: z.object({
+      member: memberSchema, previousSessionId: sessionIdSchema,
+      // Older scoped renewals stored the target in `member.sessionId`.
+      newSessionId: sessionIdSchema.optional(),
+      scopeKey: memberScopeKeySchema.optional(),
+    }).strict(),
   }).strict(),
   z.object({
     ...operationBase,

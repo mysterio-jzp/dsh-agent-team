@@ -215,7 +215,7 @@ export function TeamChannelsPanel(props: TeamChannelsPanelProps) {
               ...members.map(status => ({
                 id: status.member.memberId,
                 label: status.member.handle,
-                ...(status.presence === 'unavailable' ? { disabled: true, hint: t('memberUnavailableReason') } : {}),
+                ...(status.member.state !== 'enabled' ? { disabled: true, hint: t('memberUnavailableReason') } : {}),
                 icon: <TeamPresenceDot status={status} t={t} />,
               })),
             ]}

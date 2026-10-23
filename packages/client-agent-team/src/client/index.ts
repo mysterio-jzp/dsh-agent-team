@@ -203,6 +203,10 @@ function openMemberSessionImpl(
   /** Surfaces a failure to the row instead of leaving the click silent. */
   reportFailure?: (message: string) => void,
 ): void {
+  if (sessionId === undefined) {
+    reportFailure?.('This Member has no default Session; open a Channel Session instead.')
+    return
+  }
   const snapshot = navigation.getSnapshot()
   const current = currentMainSessionId(ctx)
   // The return target is captured on first entry only — switching between

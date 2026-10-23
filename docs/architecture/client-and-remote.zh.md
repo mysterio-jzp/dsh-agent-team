@@ -49,9 +49,9 @@ Client plugin apply
 
 `dsh.client.inject` 描述 client module graph；它不保证 apply order、service readiness 或 slot declaration order。如果 declaration 可能稍后出现，使用 `ctx.slots.inject()`。registration 跟随 declaration lifetime，并随 owning fiber disposal。
 
-Team mode 拥有 conversation seat，而不是一个 panel：`TeamNavigation.mode` 是 mode 是否成立的唯一判据，它的 seat 是 key 为 `conversation` 的 `main` shadow —— 该 shadow 在 mode 成立且没有嵌入 Member Session 视图时绘制。侧边栏底部、shipped 设置行旁边的入口先清空占据中栏的 global panel，再翻转 mode；保持这个 selection 为空也是 Shell 右侧栏可用的前提，因为只要有任何 panel 被选中，Shell 就不画右栏里的 Session 内容。因此另一个 panel 拿走中栏即结束 mode。
+Team mode 拥有 conversation seat，而不是一个 panel：`TeamNavigation.mode` 是 mode 是否成立的唯一判据，它的 seat 是 key 为 `conversation` 的 `main` shadow —— 该 shadow 在 mode 成立且没有嵌入 Channel Session 视图时绘制。侧边栏底部、shipped 设置行旁边的入口先清空占据中栏的 global panel，再翻转 mode；保持这个 selection 为空也是 Shell 右侧栏可用的前提，因为只要有任何 panel 被选中，Shell 就不画右栏里的 Session 内容。因此另一个 panel 拿走中栏即结束 mode。
 
-selection 为 null 时 Team 不介入：嵌入的 Member Session 视图会清空 panel 来独占中栏，mode 必须活过这一段。恢复的 mode 通过自己的 seat 绘制，不选中任何东西；挂载时已有 panel 被选中时，那个 panel 保留中栏，mode 主动让位。
+selection 为 null 时 Team 不介入：嵌入的 Channel Session 视图会清空 panel 来独占中栏，mode 必须活过这一段。恢复的 mode 通过自己的 seat 绘制，不选中任何东西；挂载时已有 panel 被选中时，那个 panel 保留中栏，mode 主动让位。
 
 Slot parent 的 `children` declaration 同时是 render site 和 render authority。两个存活的 parent entries 不能声明同一个 child slot。特别是 Team 的 `sidebar.workspaces` shadow 不得重新声明 shipped `sidebar.workspaces.directoryFlow`。即使 Team entry priority 更高，Harness SlotCore 也会拒绝这个 duplicate。不要复制 private WorkspaceBrowser、ConversationRoot、Shell 或 private CSS 来规避它。
 
@@ -70,7 +70,7 @@ UI work 的边界如下：
 
   Agent Inbox 仍由 Host 持有，并通过 `team_inbox` 提供。
 - Sidebar row order（Channels/Agents）是每个 browser 的 Human presentation preference，保存在 `localStorage`。加载时折叠到 Remote default order 上。保留的 refs 保持顺序，移除的 refs 丢弃，新的 refs 追加。它从不成为 ledger fact。Whole-row native drag 复用 Harness list interaction model。它是 Team-owned rows 唯一的重排控件。
-- 嵌入的 Team Member Session 使用未修改的 shipped composer。Team 不注册任何成员会话的 composer 表面。它不接管 seat，没有 trigger sources，没有 dock 提示条。rc.1 把 trigger-menu overlay 移进了 `conversation.composer.bar` 的 children。接管者会一并继承渲染义务，并使 overlay 悬空。Team 自有的命令/成员引用入口相对 shipped 词汇表不再有不可替代的价值，因此一并移除。普通会话与 Member Session 共享同一 composer 与词汇表。
+- 嵌入的 Channel Session 使用未修改的 shipped composer。Team 不注册任何 Channel Session 的 composer 表面。它不接管 seat，没有 trigger sources，没有 dock 提示条。rc.1 把 trigger-menu overlay 移进了 `conversation.composer.bar` 的 children。接管者会一并继承渲染义务，并使 overlay 悬空。Team 自有的命令/成员引用入口相对 shipped 词汇表不再有不可替代的价值，因此一并移除。普通会话与 Channel Session 共享同一 composer 与词汇表。
 - 有对应能力时复用 public Harness primitives 和 `--dsw-*` theme tokens。
 - CSS 保持在 CSS Modules 中；不要 import private Harness CSS。
 - Runtime presence 必须与 Claim 和 Task state 分离。

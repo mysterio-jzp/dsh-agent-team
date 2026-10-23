@@ -81,9 +81,32 @@ beforeAll(async () => {
   }
 
   const memberOf = (handle: string) => team.members({ workspaceId: workspace.id }).find(candidate => candidate.member.handle === handle)
+  const channel = await team.createChannel({
+    requestId: 'ui-preview-channel' as never,
+    workspaceId: workspace.id,
+    name: 'delivery',
+    description: '预览样本：气泡、分组、有人@我、引用回复、长文折叠、Task 条目',
+  })
+  const channelRef = channel.channel.channelRef
+  for (const agent of AGENTS) {
+    await team.joinChannel({
+      requestId: `ui-preview-join-${agent.handle}` as never,
+      workspaceId: workspace.id,
+      channelRef,
+      memberId: memberOf(agent.handle)!.member.memberId,
+    })
+  }
+
   const agentFor = (handle: string) => {
     const entry = memberOf(handle)
-    return entry === undefined ? undefined : scaffold.ctx.agents.get(entry.member.sessionId)
+    if (entry === undefined) return undefined
+    const ledger = (team as unknown as {
+      ledger: {
+        memberScopeSessions(memberId: string): readonly { scopeKind: string; scopeRef?: string; sessionId: string }[]
+      }
+    }).ledger
+    const binding = ledger.memberScopeSessions(entry.member.memberId).find(scope => scope.scopeKind === 'channel' && scope.scopeRef === channelRef)
+    return binding === undefined ? undefined : scaffold.ctx.agents.get(binding.sessionId)
   }
   // Activation lands asynchronously (handle-based persistence, then the awaited
   // AgentLoop create), so the handle is polled for rather than assumed.
@@ -103,22 +126,6 @@ beforeAll(async () => {
         contextWindow: 128_000,
       })
     }
-  }
-
-  const channel = await team.createChannel({
-    requestId: 'ui-preview-channel' as never,
-    workspaceId: workspace.id,
-    name: 'delivery',
-    description: '预览样本：气泡、分组、有人@我、引用回复、长文折叠、Task 条目',
-  })
-  const channelRef = channel.channel.channelRef
-  for (const agent of AGENTS) {
-    await team.joinChannel({
-      requestId: `ui-preview-join-${agent.handle}` as never,
-      workspaceId: workspace.id,
-      channelRef,
-      memberId: memberOf(agent.handle)!.member.memberId,
-    })
   }
 
   const opener = await team.sendMessage({

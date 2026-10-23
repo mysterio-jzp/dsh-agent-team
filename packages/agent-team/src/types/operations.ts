@@ -127,6 +127,8 @@ export interface AgentTeamMemberSessionRenewedOperation extends AgentTeamOperati
     readonly member: AgentTeamAgentMember
     /** The Session the Member ran on before this renewal. */
     readonly previousSessionId: SessionId
+    /** Explicit target for scoped renewals; absent only on legacy operations that stored it in `member.sessionId`. */
+    readonly newSessionId?: SessionId | undefined
     /**
      * The work domain this Session transition acts on, when it is not the
      * legacy `default` domain; absent means `default`. See

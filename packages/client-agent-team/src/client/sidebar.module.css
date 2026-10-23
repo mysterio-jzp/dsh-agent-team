@@ -511,19 +511,7 @@ button.channelRowSelect:focus-visible { outline: 2px solid var(--dsw-alias-borde
   outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
   outline-offset: -2px;
 }
-/* The leaf-row convention: while this Member's Session is the conversation
-   seat, its card carries the resident fill the workspace overview yields. */
-.agentSelect[aria-current='page'] {
-  background: var(--dsw-alias-interactive-bg-hover);
-  border-radius: var(--dsw-radius-md, 12px);
-}
-/* While any row-level interaction state paints the full-row fill, suppress
-   the card's own resident fill so the two never stack into a visible seam. */
-.agentRow:hover .agentSelect[aria-current='page'],
-.agentRow:focus-within .agentSelect[aria-current='page'],
-.agentRow[data-menu-open] .agentSelect[aria-current='page'] {
-  background: transparent;
-}
+.agentSelect:disabled { cursor: default; }
 .agentAvatar {
   align-items: center;
   cursor: default;
