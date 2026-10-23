@@ -4718,62 +4718,29 @@ export default class AgentTeam extends TypertRemoteService {
         else agent.steer(notice)
       })
     }
-    // A fact wakes the Session of the Channel it happened in, and only that
-    // one: a Member owns no Session of its own, so there is nothing to fall
-    // back to. A fact that names no single Channel is not a wake at all —
-    // DM, Member-level and Workspace-level facts land in the ledger and the
-    // Inbox, and the Member reads them on its next Channel run.
-    const domainKey = ledger.domainKeyOf(operation)
-    for (const memberId of domainKey === undefined ? [] : ledger.affectedMembersOf(operation)) {
-      const scopeKey = domainKey!
-      this.afterCommit(`notification for '${this.memberLabel(memberId)}'`,
-        () => void this.wakeWorkDomain(memberId, scopeKey, receipt, operation.kind))
+    // A Thread fact may wake only a Session that is already live for its exact
+    // Channel. Post-commit routing must not activate a missing Channel Session
+    // or redirect the notification to the Member's default Session.
+    const scopeKey = ledger.domainKeyOf(operation)
+    if (scopeKey !== undefined) {
+      for (const memberId of ledger.affectedMembersOf(operation)) {
+        const member = ledger.getMember(memberId)
+        if (member === undefined || member.state !== 'enabled') continue
+        const handle = this.handleFor(memberId, scopeKey)
+        if (handle === undefined) {
+          if (ledger.notificationFacts(memberId, undefined, scopeKey).length === 0) continue
+          this.afterCommit(`notification for '${this.memberLabel(memberId)}'`, () => {
+            throw new Error(`no active Channel Session for work domain '${scopeKey}' of '${memberId}'; committed ${operation.kind} was not delivered`)
+          })
+          continue
+        }
+        this.afterCommit(`notification for '${this.memberLabel(memberId)}'`,
+          () => this.notifyMemberSurface(handle.agent, { kind: 'commit', receipt, operationKind: operation.kind }))
+      }
     }
     // Task acceptance no longer schedules standalone auto compaction: it is
     // a semantic checkpoint/context cue (delivered as ordinary Team
     // notification), and the Team pressure policy owns compaction entry.
-  }
-
-  /**
-   * Wake one Member's own work domain, mounting it first when the ledger still
-   * binds a Session this process is not running. Dropping such a fact instead
-   * would leave it durable and unread; falling back to the Member's default
-   * Session would deliver the discussion's facts somewhere else. Mounting runs
-   * in the Member's lifecycle chain so the same domain can never be started
-   * twice, and a failure is recorded against this exact domain rather than
-   * thrown into post-commit bookkeeping, where it would only become a log line.
-   */
-  private async wakeWorkDomain(memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey, receipt: AgentTeamOperationReceipt, operationKind: AgentTeamOperation['kind']): Promise<void> {
-    const mounted = await this.enqueueLifecycle(memberId, async () => {
-      const live = this.handleFor(memberId, scopeKey)
-      if (live !== undefined) return live
-      const member = this.requireLedger().getMember(memberId)
-      if (member === undefined || member.state !== 'enabled') return undefined
-      const binding = this.requireLedger().memberScopeSessionFor(memberId, scopeKey)
-      if (binding === undefined) return undefined
-      try {
-        await this.activateMember(member, binding)
-      } catch (error) {
-        this.setDomainDiagnostic(memberId, scopeKey, { ...this.activationDiagnosticOf(error, binding.sessionId), sessionId: binding.sessionId })
-        this.emitMemberPresenceChanged(member)
-        return undefined
-      }
-      return this.handleFor(memberId, scopeKey)
-    }).catch((error: unknown) => {
-      // Every failure path names its domain on the row, not just the activation
-      // one: a queued transition that was refused would otherwise leave the
-      // Channel row saying "creating" with nothing to explain it.
-      this.ctx.logger.warn(`agent-team: could not wake work domain '${scopeKey}' of '${memberId}': ${error instanceof Error ? error.message : String(error)}`)
-      const binding = this.ledger?.memberScopeSessionFor(memberId, scopeKey)
-      this.setDomainDiagnostic(memberId, scopeKey, {
-        ...this.activationDiagnosticOf(error, binding?.sessionId ?? SessionId('')),
-        ...(binding === undefined ? {} : { sessionId: binding.sessionId }),
-      })
-      const member = this.ledger?.getMember(memberId)
-      if (member !== undefined) this.emitMemberPresenceChanged(member)
-      return undefined
-    })
-    if (mounted !== undefined) this.notifyMemberSurface(mounted.agent, { kind: 'commit', receipt, operationKind })
   }
 
   /**

@@ -21,6 +21,7 @@ Team 是每个 DSH home 内唯一的协作域。append-only operation ledger 是
 - startup 绝不把非 enabled Member 激活为 enabled。启动阶段失败的 effect 只记日志，下一次 boot 重试，不让 boot 失败。同一 Member 的 lifecycle operation 按提交序串行；不同 Member 从不排在彼此的等待之后。
 - 非默认 Session 在其 Thread 绑定解析出的 Workspace 中激活。快照第一项作为 cwd；Host 在 provisioning 前检查所有快照路径都是可访问目录，其他目录只注入该工作域自己的 instructions。任一路径缺失时只拒绝该域 activation，并保留域级 diagnostic，不把 Member 默认状态标为 unavailable。
 - ledger append 之后剩下的是 delivery 效果：commit listeners、Client change invalidation、participation notice。每个受影响的 Member 还会收到一次 wake。每一项都经过同一条边界：失败只记日志，不让操作本身失败。失败的 listener 或 wake 仍以 committed result 作答，而不是虚假的回滚。只有 invariant divergence 继续 reject。失败的 Inbox wake 清掉这个 wake 记录的 notice state。因此，下一次触及该 Member 的 commit 重新推导同一批 durable Inbox facts 并重试，不追加第二次操作。DM 保留显式的 recorded-but-not-delivered 错误。
+- 某个 Channel 中的 Thread 事实只能通过该 Member 在同一 Channel 已经 live 的 Session 通知。若没有活动 Session，Host 会记录 commit 后的投递失败并保留 ledger 中的持久事实；既不会为通知激活 Session，也不会把通知改投到 Member 的 default Session。
 
 ## 哪些操作会唤醒 Member，以及成员卡住时怎么选
 

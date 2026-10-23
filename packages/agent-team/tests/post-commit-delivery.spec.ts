@@ -211,7 +211,7 @@ describe('post-commit delivery', () => {
     expect(defaultSeam.state.calls).toHaveLength(0)
   })
 
-  it('names the Channel when a Channel fact has no live domain and falls back to default', async () => {
+  it('reports an inactive Channel route without falling back to the default Session', async () => {
     const { ctx } = await harness()
     const warn = vi.spyOn(ctx.logger, 'warn')
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('fallback-channel'), workspaceId: alpha, name: 'engineering', description: 'Engineering' })
@@ -219,21 +219,19 @@ describe('post-commit delivery', () => {
     const seam = wakeSeam(SessionId(`session:default:${member.memberId}`))
     seam.state.fail = false
     ctx.agentTeam['handles'].set(member.memberId, new Map([[DEFAULT_MEMBER_SCOPE_KEY, { agent: seam.agent, dispose: async () => {} } as unknown as AgentHandle]]))
-    // The line names the Member by handle, which is how an operator locates the
-    // route; the bound Human seat logs its own line for its own route.
-    const fallbackFor = (lines: readonly string[]): readonly string[] =>
-      lines.filter(line => line.includes('no live Session for work domain') && line.includes(`of '${member.handle}'`))
 
     const sent = await ctx.agentTeam.sendMessage({ asTask: false, requestId: requestId('fallback-send'), workspaceId: alpha,
       channelRef: channel.channel.channelRef, body: 'Needs a look', recipients: [member.memberId] })
     expect(sent.kind).toBe('committed')
-    expect(seam.state.calls).toHaveLength(1)
-    const fallbacks = fallbackFor(warn.mock.calls.map(args => String(args[0])))
-    expect(fallbacks).toHaveLength(1)
-    const line = fallbacks[0]!
+    expect(seam.state.calls).toHaveLength(0)
+    const failures = warn.mock.calls.map(args => String(args[0]))
+      .filter(line => line.includes('post-commit notification') && line.includes('no active Channel Session'))
+    expect(failures).toHaveLength(1)
+    const line = failures[0]!
+    expect(line).toContain(`notification for '${member.handle}'`)
     expect(line).toContain(`'${channelMemberScopeKey(channel.channel.channelRef)}'`)
-    expect(line).toContain(`of '${member.handle}'`)
-    expect(line).toContain(`Channels: ${channel.channel.channelRef}`)
+    expect(line).toContain(`of '${member.memberId}'`)
+    expect(line).toContain('committed team/message-sent was not delivered')
     warn.mockRestore()
   })
 

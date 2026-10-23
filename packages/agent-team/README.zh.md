@@ -62,7 +62,7 @@ Session 模型选择在发送请求前按 Session 确认写入 Team 账本，因
 
 #### What the model sees
 
-启用的 Member 在持久未读工作出现后，可能收到一次有界、合并的 context 通知。Structured direct mention 包含消息正文和来源；Task/Claim Activity 包含简短状态变化；普通未读只包含 Thread-first 路由、数量和 revision，存在时附带 Task overlay。通知通过 Agent 的安全 step 边界排队，正在执行的模型请求和工具不会被中断。常见路径可以直接调用 `team_thread.read`；只有需要跨 Thread 分流时才调用 `team_inbox`。
+启用的 Member 在持久未读工作出现后，可能收到一次有界、合并的 context 通知。Structured direct mention 包含消息正文和来源；Task/Claim Activity 包含简短状态变化；普通未读只包含 Thread-first 路由、数量和 revision，存在时附带 Task overlay。通知通过 Agent 的安全 step 边界排队，正在执行的模型请求和工具不会被中断。常见路径可以直接调用 `team_thread.read`；只有需要跨 Thread 分流时才调用 `team_inbox`。对于 Channel Thread 事实，Host 只使用该 Member 在对应 Channel 已激活的 Session；若没有活动 Session，会记录 commit 后的投递失败，不会为通知激活 Session，也不会回退到 Member 的 default Session。
 
 #### Token effect
 

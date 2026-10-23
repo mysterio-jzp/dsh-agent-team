@@ -62,7 +62,7 @@ Session model choices are acknowledged per Session in the Team operation ledger 
 
 #### What the model sees
 
-An enabled Member may receive one bounded, coalesced context notification after durable unread work appears. Structured direct mentions include their Message body and source; Task/Claim Activities include concise state transitions; ordinary unread includes only a Thread-first route, counts, and revisions, with a Task overlay where present. The notification is queued at the Agent's safe step boundary, so active model requests and tools are not interrupted. It routes the common path directly to `team_thread.read`; the model uses `team_inbox` only when it needs to triage remaining Threads.
+An enabled Member may receive one bounded, coalesced context notification after durable unread work appears. Structured direct mentions include their Message body and source; Task/Claim Activities include concise state transitions; ordinary unread includes only a Thread-first route, counts, and revisions, with a Task overlay where present. The notification is queued at the Agent's safe step boundary, so active model requests and tools are not interrupted. It routes the common path directly to `team_thread.read`; the model uses `team_inbox` only when it needs to triage remaining Threads. For Channel Thread facts, the Host uses only that Member's already-active Session for the Channel; if none is active, it logs the post-commit delivery failure without activating a Session or falling back to the Member's default Session.
 
 #### Token effect
 
