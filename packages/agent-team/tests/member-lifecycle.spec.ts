@@ -3019,6 +3019,72 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     expect(continuationCheckpointRefOf(firstUser.data)).toBeDefined()
   })
 
+  it('continues after a checkpoint and rolls over inside a Channel work domain while keeping the default domain intact', async () => {
+    const adapter = new ScriptedAdapter()
+    const { ctx, workspaceId } = await realHarness(adapter)
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('ch-cp-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('ch-cp-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+    const memberId = added.status.member.memberId
+    const defaultSessionId = added.status.member.sessionId
+    const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
+    const channelBinding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!
+    expect(channelBinding).toBeDefined()
+    expect(channelBinding.sessionId).not.toBe(defaultSessionId)
+    const channelAgent = ctx.agents.get(channelBinding.sessionId)!
+    expect(channelAgent).toBeDefined()
+
+    // A Channel mention wakes the Channel work domain's Agent; its first turn
+    // records a checkpoint, which must conclude turn 1 and automatically
+    // deliver the quiet continuation in turn 2 on the Channel Agent (never stalling).
+    adapter.enqueue(toolCallResponse('call-ch-cp-1', 'context_checkpoint', { name: 'Recovery routing assignment after scope split' }))
+    adapter.enqueue(textResponse('continuing in the Channel domain after checkpoint.'))
+    const started = await ctx.agentTeam.sendMessage({
+      asTask: true,
+      requestId: requestId('ch-cp-task'),
+      workspaceId,
+      channelRef: channel.channel.channelRef,
+      body: '@builder please split scope and checkpoint',
+      recipients: [memberId],
+    })
+    expect(started.kind).toBe('committed')
+
+    await waitFor(() => channelAgent.session.ownEvents().some(event => event.type === 'assistant/message') ? true : undefined)
+    await channelAgent.whenIdle()
+
+    const channelEvents = channelAgent.session.ownEvents()
+    const turns = channelEvents.filter(event => event.type === 'turn/start').map(event => (event as { data: { turn: number } }).data.turn)
+    expect(turns).toEqual([1, 2])
+    const turn2Index = channelEvents.findIndex(event => event.type === 'turn/start' && (event as { data: { turn: number } }).data.turn === 2)
+    const firstUserTurn2 = channelEvents.slice(turn2Index + 1).find(event => event.type === 'user/message')
+    expect(firstUserTurn2?.type).toBe('user/message')
+    if (firstUserTurn2?.type !== 'user/message') throw new Error('expected continuation user message in Channel domain')
+    expect(continuationCheckpointRefOf(firstUserTurn2.data)).toBe(checkpointRefFor(channelBinding.sessionId, 'call-ch-cp-1'))
+
+    // Next, calling `context_rollover` inside the Channel work domain swaps
+    // that Channel domain's Session to a fresh generation and delivers the
+    // handoff there, while the Member's `default` Session binding stays untouched.
+    adapter.enqueue(toolCallResponse('call-ch-ro-1', 'context_rollover', {
+      handoff: 'Channel domain handoff after checkpoint.',
+      checkpointRef: checkpointRefFor(channelBinding.sessionId, 'call-ch-cp-1'),
+    }))
+    adapter.enqueue(textResponse('resumed in the rolled-over Channel generation.'))
+    channelAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'roll over the Channel context' }], source: { kind: 'user' } }))
+
+    const rolledBinding = await waitFor(() => {
+      const current = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)
+      return current !== undefined && current.sessionId !== channelBinding.sessionId ? current : undefined
+    })
+    const nextChannelAgent = await waitFor(() => ctx.agents.get(rolledBinding.sessionId))
+    await waitFor(() => nextChannelAgent.session.ownEvents().some(event => event.type === 'assistant/message') ? true : undefined)
+    await nextChannelAgent.whenIdle()
+
+    expect(ctx.agentTeam.members().find(status => status.member.memberId === memberId)?.member.sessionId).toBe(defaultSessionId)
+    expect(ctx.agents.get(defaultSessionId)).toBeDefined()
+    const handoffEvent = nextChannelAgent.session.ownEvents().find(event => event.type === 'user/message' && isHandoffMessage(event.data))
+    expect(handoffEvent).toBeDefined()
+    expect(() => ctx.agentTeam.validateLedger()).not.toThrow()
+  })
+
   it('records a checkpoint alongside sibling calls with results settling in model order', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)

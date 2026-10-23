@@ -137,6 +137,48 @@ describe('the Team context-continuity host', () => {
     expect(host.subjectForAgent({ id: 'agent:other' } as Agent)).toBeUndefined()
   })
 
+  it('tracks the active work domain when a Member runs both default and Channel domains', () => {
+    const defaultScope = 'default' as AgentTeamMemberScopeKey
+    const defaultSession = SessionId('session:default')
+    const defaultAgent = { id: 'agent:default' } as Agent
+    const channelAgent = { id: 'agent:channel' } as Agent
+    const host = new TeamContextContinuityHost({
+      agentForMember: (id, scopeKey) => {
+        if (id !== MEMBER_ID) return undefined
+        if (scopeKey === defaultScope) return defaultAgent
+        if (scopeKey === SCOPE_KEY) return channelAgent
+        return undefined
+      },
+      surfaceForAgent: candidate => {
+        if (candidate === defaultAgent) return { member, scopeKey: defaultScope }
+        if (candidate === channelAgent) return { member, scopeKey: SCOPE_KEY }
+        return undefined
+      },
+      sessionForMemberScope: (id, scopeKey) => {
+        if (id !== MEMBER_ID) return undefined
+        if (scopeKey === defaultScope) return defaultSession
+        if (scopeKey === SCOPE_KEY) return SESSION_ID
+        return undefined
+      },
+      scopesForMember: id => (id === MEMBER_ID ? [defaultScope, SCOPE_KEY] : []),
+      memberForAgent: candidate => (candidate === defaultAgent || candidate === channelAgent ? member : undefined),
+      projectionForMember: () => undefined,
+      executeTransition: () => Promise.resolve(),
+      log: () => {},
+    })
+
+    // Without a prior domain inspection, fallback returns the first running domain.
+    expect(host.agentForSubject(MEMBER_ID)).toBe(defaultAgent)
+    // Once a continuity check or event inspects the Channel Agent or its Session,
+    // agentForSubject resolves to that Channel Agent rather than `default`.
+    expect(host.subjectForAgent(channelAgent)).toEqual({ id: MEMBER_ID, sessionId: SESSION_ID })
+    expect(host.agentForSubject(MEMBER_ID)).toBe(channelAgent)
+    host.projectionForSubject(MEMBER_ID, defaultSession)
+    expect(host.agentForSubject(MEMBER_ID)).toBe(defaultAgent)
+    host.projectionForSubject(MEMBER_ID, SESSION_ID)
+    expect(host.agentForSubject(MEMBER_ID)).toBe(channelAgent)
+  })
+
   it('treats Team notices as rederived and foreign messages as real input', () => {
     const host = new TeamContextContinuityHost({
       agentForMember: () => undefined,

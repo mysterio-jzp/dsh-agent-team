@@ -107,17 +107,31 @@ export interface TeamContextContinuityOptions {
  * queued messages are rederived Team notices, and the projection bridge.
  */
 export class TeamContextContinuityHost implements ContextContinuityHost<AgentTeamMemberId> {
+  /**
+   * Last work domain whose live Agent or Session was inspected for a Member.
+   * When a Member runs more than one domain (`default` plus `channel:<ref>`),
+   * `agentForSubject(memberId)` returns the domain currently driving a
+   * continuity decision before falling back to any running domain.
+   */
+  private readonly activeScopeByMember = new Map<AgentTeamMemberId, AgentTeamMemberScopeKey>()
+
   constructor(private readonly options: TeamContextContinuityOptions) {}
 
   /**
-   * The Agent of one Member, resolved through a domain that Member actually
-   * runs. The engine's subject vocabulary predates per-Channel domains, so it
-   * names no domain; Team answers with a running one and never with the
-   * retired `default`, because the engine uses identity here only to confirm
-   * the generation it is about to swap is still the live one.
+   * The Agent of one Member, resolved through the domain currently under
+   * continuity evaluation (or any domain that Member actually runs). The
+   * engine's subject vocabulary names the Member id without a domain key;
+   * tracking the last inspected domain ensures multi-domain Members resolve
+   * the same domain that emitted the checkpoint or rollover event.
    */
   agentForSubject(memberId: AgentTeamMemberId): Agent | undefined {
-    for (const scopeKey of this.options.scopesForMember(memberId)) {
+    const scopes = this.options.scopesForMember(memberId)
+    const activeScope = this.activeScopeByMember.get(memberId)
+    if (activeScope !== undefined && scopes.includes(activeScope)) {
+      const activeAgent = this.options.agentForMember(memberId, activeScope)
+      if (activeAgent !== undefined) return activeAgent
+    }
+    for (const scopeKey of scopes) {
       const agent = this.options.agentForMember(memberId, scopeKey)
       if (agent !== undefined) return agent
     }
@@ -134,10 +148,17 @@ export class TeamContextContinuityHost implements ContextContinuityHost<AgentTea
     if (surface === undefined) return undefined
     const sessionId = this.options.sessionForMemberScope(surface.member.memberId, surface.scopeKey)
     if (sessionId === undefined) throw new Error(`agent-team: Member '${surface.member.memberId}' runs work domain '${surface.scopeKey}' without a Session`)
+    this.activeScopeByMember.set(surface.member.memberId, surface.scopeKey)
     return { id: surface.member.memberId, sessionId }
   }
 
   projectionForSubject(memberId: AgentTeamMemberId, sessionId: SessionId): ContextProjectionState | undefined {
+    for (const scopeKey of this.options.scopesForMember(memberId)) {
+      if (this.options.sessionForMemberScope(memberId, scopeKey) === sessionId) {
+        this.activeScopeByMember.set(memberId, scopeKey)
+        break
+      }
+    }
     return this.options.projectionForMember(memberId, sessionId)
   }
 

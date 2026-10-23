@@ -1141,10 +1141,10 @@ export default class AgentTeam extends TypertRemoteService {
       // recovery sequence for this Session. Every domain keeps that sequence
       // its own, so this is the Session's own subject either way.
       if (event.type === 'assistant/message') this.pressurePolicy.onAssistantMessage(session.id)
-      // Context management (the generation swap) is the Member's own: a
-      // discussion's domain has no rollover remedy (see `requestNewContext`),
-      // so only the `default` domain's facts can carry a transition.
-      if (live.scopeKey === DEFAULT_MEMBER_SCOPE_KEY) this.contextManagement.onSessionEvent(live.memberId, live.handle.agent, event)
+      // Every renewable Member work domain (`default` and `channel:<ref>`)
+      // forwards Session events to context continuity so checkpoint
+      // continuations and rollover transitions run for that domain's Session.
+      if (this.renewsContextForAgent(live.handle.agent)) this.contextManagement.onSessionEvent(live.memberId, live.handle.agent, event)
     })
     const domain = await this.ctx.storageDomain.open(agentTeamDomainSpec)
     this.ctx.effect(() => async () => {
@@ -2208,7 +2208,8 @@ export default class AgentTeam extends TypertRemoteService {
       // Member row no longer names it, is a design error and stops here.
       const domainKey = this.scopeKeyOfSession(plan.previousSessionId)
       if (domainKey === undefined) throw new Error(`Agent Member '${stored.handle}' cannot roll over: Session '${plan.previousSessionId}' is not a running work domain of this Member`)
-      if (stored.sessionId !== plan.previousSessionId && this.scopeKeyOfSession(stored.sessionId) !== domainKey) {
+      const currentBinding = this.requireLedger().memberScopeSessionFor(memberId, domainKey)
+      if (currentBinding?.sessionId !== plan.previousSessionId) {
         throw new Error(`Agent Member '${stored.handle}' is no longer bound to the rolled-over Session`)
       }
       const active = this.handleFor(memberId, domainKey)
@@ -2219,7 +2220,7 @@ export default class AgentTeam extends TypertRemoteService {
       // resolves this wait too; the running recheck below still refuses the
       // swap instead of committing against a turn that never idled.
       if (this.runningAgents.has(active.agent.id)) {
-        await this.waitLogged('wait-turn', { label: stored.handle, sessionId: stored.sessionId },
+        await this.waitLogged('wait-turn', { label: stored.handle, sessionId: plan.previousSessionId },
           'for the turn to converge before the Session transition',
           () => Promise.race([active.agent.whenIdle(), this.shutdown.promise]))
       }
@@ -2282,7 +2283,10 @@ export default class AgentTeam extends TypertRemoteService {
       })
       const reactivated = this.handleFor(memberId, domainKey)
       if (reactivated === undefined) {
-        throw new Error(`Agent Member '${stored.handle}' failed to activate its next context: ${this.memberFailures.get(memberId)?.activation ?? 'unknown error'}`)
+        const activationFailure = domainKey === DEFAULT_MEMBER_SCOPE_KEY
+          ? this.memberFailures.get(memberId)?.activation
+          : (this.domainFailures.get(memberId)?.get(domainKey) ?? this.memberFailures.get(memberId)?.activation)
+        throw new Error(`Agent Member '${stored.handle}' failed to activate its next context: ${activationFailure ?? 'unknown error'}`)
       }
       // The handoff is the first model-facing context of the new generation.
       // It rides the step-priority inbox lane (steer) so a later rederived
@@ -3462,7 +3466,7 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private async reconstructMissingHandoff(member: AgentTeamAgentMember, agent: Agent): Promise<void> {
     const previousSessionId = agent.session.header.parentSession
-      ?? this.requireLedger().previousSessionForMember(member.memberId)
+      ?? this.requireLedger().previousSessionForMember(member.memberId, this.scopeKeyOfSession(agent.session.id))
     if (previousSessionId === undefined) return
     const previousRead = await this.sessionReader.read(previousSessionId)
     if (!previousRead.ok) {
@@ -3550,7 +3554,7 @@ export default class AgentTeam extends TypertRemoteService {
    * artifact, so no retry can ever read it).
    */
   private async replayCarriedInput(member: AgentTeamAgentMember, agent: Agent, generationStarted: boolean): Promise<number> {
-    const transition = this.requireLedger().lastTransitionForMember(member.memberId)
+    const transition = this.requireLedger().lastTransitionForMember(member.memberId, this.scopeKeyOfSession(agent.session.id))
     if (transition === undefined || transition.targetSessionId !== agent.session.id) return 0
     // A generation that already started its own turns needs no previous-Session
     // replay: its carried input was delivered with the handoff (or superseded)
@@ -3872,7 +3876,12 @@ export default class AgentTeam extends TypertRemoteService {
    */
   async rolloverSessionForAgent(agent: Agent, request: AgentTeamRolloverSessionRequest): Promise<AgentTeamDurableMemberResult> {
     const actor = this.memberCall(agent, request.workspaceId)
-    const result = await this.requireLedger().rolloverMemberSession({ ...request, actor })
+    const scopeKey = this.scopeKeyOfSession(agent.session.id)
+    const result = await this.requireLedger().rolloverMemberSession({
+      ...request,
+      ...(scopeKey === undefined || scopeKey === DEFAULT_MEMBER_SCOPE_KEY ? {} : { scopeKey }),
+      actor,
+    })
     if (result.committed) this.emitCommitted(result.value.receipt)
     return result.value
   }
