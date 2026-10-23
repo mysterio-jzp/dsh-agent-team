@@ -179,23 +179,6 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
     const humanMemberId = view?.humanMemberId
     return (ref: AgentTeamMemberId) => rosterMember(members, humanMemberId, humanName, ref, channelRef)
   }, [rosterKey, humanName, channelRef])
-  const taskNumberOf = useMemo(() => {
-    const numbers = view?.taskNumbers ?? []
-    return (taskRef: AgentTeamTaskRef): number | undefined => numbers.find(entry => entry.taskRef === taskRef)?.taskNumber
-  }, [view])
-  const handlePanelRead = useCallback((read: AgentTeamThreadRef): void => {
-    setUnreadByThread(current => {
-      if (!current.has(read)) return current
-      const next = new Map(current)
-      next.delete(read)
-      return next
-    })
-  }, [])
-  const handlePanelPromoted = useCallback((taskRef: AgentTeamTaskRef): void => {
-    if (panelThreadRef !== undefined) selectThread(panelThreadRef, channelRef, taskRef, taskNumberOf(taskRef))
-    setPanelThreadRef(undefined)
-  }, [panelThreadRef, channelRef, selectThread, taskNumberOf])
-  const handlePanelClose = useCallback((): void => { setPanelThreadRef(undefined) }, [])
   // Which face a row may draw: the reference the author's own Member record
   // carries. The Human is deliberately not a case here — that row reads the
   // profile's bytes through `avatarUrl`, and the two must not stand in for one

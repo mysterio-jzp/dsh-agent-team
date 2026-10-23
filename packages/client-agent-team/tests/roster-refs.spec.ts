@@ -87,8 +87,8 @@ describe('rosterMember', () => {
     const withChannels = [{
       ...status('member:6e8a5b10-df16-4ec0-943a-63738010953f', 'tars', 'active'),
       channels: [
-        { channelRef, channelName: '工程', sessionId: 'session-channel' as unknown as SessionId, state: 'ready' as const },
-        { channelRef: otherRef, channelName: '发布', sessionId: 'session-other' as unknown as SessionId, state: 'ready' as const },
+        { channelRef, channelName: '工程', sessionId: 'session-channel' as unknown as SessionId, state: 'ready' as const, activity: 'normal' as const },
+        { channelRef: otherRef, channelName: '发布', sessionId: 'session-other' as unknown as SessionId, state: 'ready' as const, activity: 'normal' as const },
       ],
     }]
     const ref = 'member:6e8a5b10-df16-4ec0-943a-63738010953f' as AgentTeamMemberId
@@ -98,7 +98,7 @@ describe('rosterMember', () => {
     // A Channel this Member holds no Session for, or one still being created,
     // falls back to the Member's own Session instead of a dead link.
     expect(rosterMember(withChannels, humanMemberId, 'Human', ref, 'channel:88888888-2222-4333-8333-888888888888' as AgentTeamChannelRef)?.sessionId).toBe('session-tars')
-    const creating = [{ ...withChannels[0]!, channels: [{ channelRef, channelName: '工程', state: 'creating' as const }] }]
+    const creating = [{ ...withChannels[0]!, channels: [{ channelRef, channelName: '工程', state: 'creating' as const, activity: 'running' as const }] }]
     expect(rosterMember(creating, humanMemberId, 'Human', ref, channelRef)).toMatchObject({ sessionId: 'session-tars', openable: true })
   })
   it('leaves unknown and ambiguous member refs unresolved', () => {
