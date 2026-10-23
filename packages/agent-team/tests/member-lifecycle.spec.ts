@@ -1,5 +1,5 @@
 import { changeBaseline, nextChange } from './helpers/change-stream.ts'
-import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve, basename, sep } from 'node:path'
@@ -419,7 +419,6 @@ describe('Agent Team Member lifecycle', () => {
       handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
     const memberId = added.status.member.memberId
     await ctx.agentTeam.joinWorkspace({ requestId: requestId('external-join'), workspaceId: otherId, memberId })
-    await ctx.agents.get(added.status.member.sessionId)!.whenIdle()
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('external-channel'), workspaceId: otherId,
       name: 'external work', description: '' })
     await ctx.agentTeam.updateChannelWorkingDirectories({ requestId: requestId('external-directory'), workspaceId: otherId,
@@ -455,7 +454,6 @@ describe('Agent Team Member lifecycle', () => {
       handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
     const memberId = added.status.member.memberId
     await ctx.agentTeam.joinWorkspace({ requestId: requestId('cwd-owner-join'), workspaceId: channelWorkspaceId, memberId })
-    await ctx.agents.get(added.status.member.sessionId)!.whenIdle()
     const memberWorkspace = workspaces.get(workspaceId)!
     workspaces.set(workspaceId, { ...memberWorkspace, attachSession: attachMemberWorkspaceSession })
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('cwd-owner-channel'), workspaceId: channelWorkspaceId,
@@ -1530,7 +1528,7 @@ describe('Agent Team Member lifecycle', () => {
     let callNumber = 0
     const call = async (name: string, args: unknown) => {
       const result = await ctx.tools.execute({ signal: new AbortController().signal, callId: ToolCallId(`team-dm-${++callNumber}`), name, arguments: args, agent: sender })
-      expect(result.isError).toBe(false)
+      expect(result.isError, result.error?.message).toBe(false)
       if (result.isError) throw new Error(result.error.message)
       return result.value as Record<string, any>
     }
@@ -2002,26 +2000,29 @@ describe('Agent Team Member lifecycle', () => {
     expect(request).not.toContain('Unread while suspended')
   })
 
-  it('keeps automatic recovery inside the Channel Agent domain', async () => {
+  it('keeps automatic recovery on the Channel Session after removing the Member default Session', async () => {
     vi.useFakeTimers()
     try {
       const adapter = new ScriptedAdapter()
       const { ctx, workspaceId } = await realHarness(adapter)
       const channel = await ctx.agentTeam.createChannel({ requestId: requestId('channel-recovery-route-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
-      const builder = await ctx.agentTeam.addMember({ requestId: requestId('channel-recovery-route-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+      const sibling = await ctx.agentTeam.createChannel({ requestId: requestId('channel-recovery-route-sibling'), workspaceId, name: 'release', description: 'Release work' })
+      const builder = await ctx.agentTeam.addMember({ requestId: requestId('channel-recovery-route-builder'), workspaceId, handle: 'builder', description: 'Builds changes', presetId: 'team-member', channelRefs: [channel.channel.channelRef, sibling.channel.channelRef] })
       const memberId = builder.status.member.memberId
-      const defaultAgent = ctx.agents.get(builder.status.member.sessionId)!
+      expect(builder.status.member.sessionId).toBeUndefined()
       const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channel.channel.channelRef))!
+      const siblingBinding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(sibling.channel.channelRef))!
       const channelAgent = ctx.agents.get(binding.sessionId)!
-      await Promise.all([defaultAgent.whenIdle(), channelAgent.whenIdle()])
-      const defaultSteer = vi.spyOn(defaultAgent, 'steer').mockImplementation(input => { defaultAgent.inbox.append('next-turn', input) })
+      const siblingAgent = ctx.agents.get(siblingBinding.sessionId)!
+      await Promise.all([channelAgent.whenIdle(), siblingAgent.whenIdle()])
       const channelSteer = vi.spyOn(channelAgent, 'steer').mockImplementation(input => { channelAgent.inbox.append('next-turn', input) })
+      const siblingSteer = vi.spyOn(siblingAgent, 'steer').mockImplementation(input => { siblingAgent.inbox.append('next-turn', input) })
 
       ctx.emit('agent/error', { agent: channelAgent, turn: 1, step: 1, error: new Error('fetch failed') })
       await vi.advanceTimersByTimeAsync(RECOVERY_DELAY_MS)
 
       expect(channelSteer).toHaveBeenCalledTimes(1)
-      expect(defaultSteer).not.toHaveBeenCalled()
+      expect(siblingSteer).not.toHaveBeenCalled()
       expect(channelSteer.mock.calls[0]![0].source).toMatchObject({ kind: AGENT_TEAM_PLUGIN_ID, form: 'notice' })
     } finally {
       vi.restoreAllMocks()
@@ -2118,10 +2119,11 @@ describe('Agent Team Member lifecycle', () => {
     try {
       const adapter = new ScriptedAdapter()
       const { ctx, workspaceId } = await realHarness(adapter)
-      const memberA = await ctx.agentTeam.addMember({ requestId: requestId('cross-member-recovery-a'), workspaceId, handle: 'alpha', description: 'First Member', presetId: 'team-member', channelRefs: [] })
-      const memberB = await ctx.agentTeam.addMember({ requestId: requestId('cross-member-recovery-b'), workspaceId, handle: 'beta', description: 'Second Member', presetId: 'team-member', channelRefs: [] })
-      const agentA = ctx.agents.get(memberA.status.member.sessionId)!
-      const agentB = ctx.agents.get(memberB.status.member.sessionId)!
+      const channel = await ctx.agentTeam.createChannel({ requestId: requestId('cross-member-recovery-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
+      const memberA = await ctx.agentTeam.addMember({ requestId: requestId('cross-member-recovery-a'), workspaceId, handle: 'alpha', description: 'First Member', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+      const memberB = await ctx.agentTeam.addMember({ requestId: requestId('cross-member-recovery-b'), workspaceId, handle: 'beta', description: 'Second Member', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
+      const agentA = ctx.agents.get(channelSessionId(ctx, memberA.status.member.memberId))!
+      const agentB = ctx.agents.get(channelSessionId(ctx, memberB.status.member.memberId))!
       await Promise.all([agentA.whenIdle(), agentB.whenIdle()])
       const recoverySteer = vi.spyOn(agentB, 'steer').mockImplementation(input => { agentB.inbox.append('next-turn', input) })
 
@@ -3276,17 +3278,17 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     expect(continuationCheckpointRefOf(firstUser.data)).toBeDefined()
   })
 
-  it('continues after a checkpoint and rolls over inside a Channel work domain while keeping the default domain intact', async () => {
+  it('continues after a checkpoint and rolls over inside a Channel work domain without a Member default Session', async () => {
     const adapter = new ScriptedAdapter()
     const { ctx, workspaceId } = await realHarness(adapter)
     const channel = await ctx.agentTeam.createChannel({ requestId: requestId('ch-cp-channel'), workspaceId, name: 'engineering', description: 'Engineering work' })
     const added = await ctx.agentTeam.addMember({ requestId: requestId('ch-cp-add'), workspaceId, handle: 'builder', description: 'Builds the implementation', presetId: 'team-member', channelRefs: [channel.channel.channelRef] })
     const memberId = added.status.member.memberId
-    const defaultSessionId = added.status.member.sessionId
+    expect(added.status.member.sessionId).toBeUndefined()
     const scopeKey = channelMemberScopeKey(channel.channel.channelRef)
     const channelBinding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, scopeKey)!
     expect(channelBinding).toBeDefined()
-    expect(channelBinding.sessionId).not.toBe(defaultSessionId)
+    expect(ctx.agents.get(channelBinding.sessionId)).toBeDefined()
     const channelAgent = ctx.agents.get(channelBinding.sessionId)!
     expect(channelAgent).toBeDefined()
 
@@ -3335,8 +3337,7 @@ describe('Agent Team checkpoint selection and return (ticket 02)', () => {
     await waitFor(() => nextChannelAgent.session.ownEvents().some(event => event.type === 'assistant/message') ? true : undefined)
     await nextChannelAgent.whenIdle()
 
-    expect(ctx.agentTeam.members().find(status => status.member.memberId === memberId)?.member.sessionId).toBe(defaultSessionId)
-    expect(ctx.agents.get(defaultSessionId)).toBeDefined()
+    expect(ctx.agentTeam.members().find(status => status.member.memberId === memberId)?.member.sessionId).toBeUndefined()
     const handoffEvent = nextChannelAgent.session.ownEvents().find(event => event.type === 'user/message' && isHandoffMessage(event.data))
     expect(handoffEvent).toBeDefined()
     expect(() => ctx.agentTeam.validateLedger()).not.toThrow()

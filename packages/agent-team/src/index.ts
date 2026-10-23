@@ -1385,7 +1385,15 @@ export default class AgentTeam extends TypertRemoteService {
     }
     for (const binding of this.requireLedger().memberScopeSessions(member.memberId)) {
       if (binding.scopeKind !== 'channel' || this.handleFor(member.memberId, binding.scopeKey) !== undefined) continue
-      await this.activateMember(member, binding, undefined, knownSessions)
+      try {
+        await this.activateMember(member, binding, undefined, knownSessions)
+      } catch (error) {
+        // One broken Channel must not prevent the Member's other Sessions from
+        // restoring, or block the rest of the Host's startup sequence.
+        this.setActivationDiagnostic(member.memberId, binding.scopeKey,
+          { ...this.activationDiagnosticOf(error, binding.sessionId), sessionId: binding.sessionId })
+        this.ctx.logger.warn(`agent-team: could not restore Channel work domain '${binding.scopeKey}' of member '${member.handle}': ${error instanceof Error ? error.message : String(error)}`)
+      }
     }
   }
 
@@ -1931,7 +1939,7 @@ export default class AgentTeam extends TypertRemoteService {
     const ledger = this.requireLedger()
     const member = ledger.getMember(request.memberId)
     if (member === undefined || !ledger.participatesIn(request.memberId, request.workspaceId)) throw new Error(`unknown Member '${request.memberId}' in workspace '${request.workspaceId}'`)
-    this.recovery.stopTracking(request.memberId, 'manual')
+    this.stopRecoveryForMember(request.memberId, 'manual')
     if (member.state !== 'enabled') {
       const hasLiveDomain = ledger.memberScopeSessions(request.memberId)
         .some(binding => this.handleFor(request.memberId, binding.scopeKey) !== undefined)
@@ -2331,17 +2339,14 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   /** Automatic-recovery wakeup; throwing tells the coordinator the target is gone. */
-  private injectRecovery(memberId: AgentTeamMemberId): void {
-    const bindings = this.requireLedger().memberScopeSessions(memberId)
-    const live = bindings.flatMap(binding => {
-      const handle = this.handleFor(memberId, binding.scopeKey)
-      return handle === undefined ? [] : [{ binding, handle }]
-    })
-    const member = live[0] === undefined ? undefined : this.memberForAgent(live[0].handle.agent)
-    if (member === undefined || member.state !== 'enabled') throw new Error(`member '${memberId}' cannot be recovered automatically`)
-    for (const { binding, handle } of live) {
-      this.steerResume(member, this.automaticResumeText(), 'automatic recovery', handle, binding.scopeKey)
-    }
+  private injectRecovery(memberId: AgentTeamMemberId, sessionId: SessionId): void {
+    const binding = this.requireLedger().memberScopeSessions(memberId).find(candidate => candidate.sessionId === sessionId)
+    if (binding === undefined) throw new Error(`Member '${memberId}' no longer owns recovery Session '${sessionId}'`)
+    const handle = this.handleFor(memberId, binding.scopeKey)
+    if (handle === undefined) throw new Error(`Member '${memberId}' has no live handle for recovery Session '${sessionId}'`)
+    const member = this.memberForAgent(handle.agent)
+    if (member === undefined || member.state !== 'enabled') throw new Error(`Member '${memberId}' cannot recover Session '${sessionId}' automatically`)
+    this.steerResume(member, this.automaticResumeText(), 'automatic recovery', handle, binding.scopeKey)
   }
 
   /**
@@ -3138,7 +3143,7 @@ export default class AgentTeam extends TypertRemoteService {
   /** Relay body: the DM itself plus one bounded line of adjacent context. */
   private dmRelayText(senderAgent: Agent, recipient: AgentTeamAgentMember, body: string, occurredAt: string, excluding: AgentTeamOperationId, workspaceId: WorkspaceId): string {
     const sender = this.memberForAgent(senderAgent)
-    const prior = this.requireLedger().dmHistoryBetween(senderAgent.id, recipient.memberId, excluding)
+    const prior = this.requireLedger().dmHistoryBetween(senderAgent.session.id, recipient.memberId, excluding)
     const header = `Direct message from @${sender?.handle ?? 'a Team Member'} at ${formatTeamTimestamp(occurredAt)}:`
     const context = prior === undefined ? '' : `\n\n[most recent prior DM between you: ${prior}]`
     return `${header}\nWorkspace: ${workspaceId}\n\n${body}${context}`
@@ -4548,13 +4553,13 @@ export default class AgentTeam extends TypertRemoteService {
    * unclassified activation failure.
    */
   private activationDiagnosticOf(error: unknown, sessionId: SessionId): AgentTeamMemberDiagnostic {
-    if (error instanceof PresetCompositionError) return { class: 'preset-composition' as const, detail: error.message }
+    if (error instanceof PresetCompositionError) return { class: 'preset-composition' as const, detail: error.message, sessionId }
     const failure = error instanceof StoredSessionReadError ? error.failure : sessionFailureOf(error, sessionId)
     if (failure !== undefined) {
       const shared = { detail: failure.detail, ...(failure.location === undefined ? {} : { location: failure.location }), sessionId: failure.sessionId }
       return failure.kind === 'refused' ? { class: 'session-refused' as const, ...shared } : { class: 'session-unreadable' as const, ...shared }
     }
-    return { class: 'activation' as const, detail: error instanceof Error ? error.message : String(error) }
+    return { class: 'activation' as const, detail: error instanceof Error ? error.message : String(error), sessionId }
   }
 
   private clearMemberFailure(

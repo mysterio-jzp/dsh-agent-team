@@ -2357,7 +2357,7 @@ export class AgentTeamLedger {
       const recipient = this.requireMember(request.recipientMemberId)
       if (!this.participatesIn(recipient.memberId, request.workspaceId)) throw new Error(`Agent Member '${recipient.memberId}' is not in Workspace '${request.workspaceId}'`)
       if (recipient.state !== 'enabled') throw new Error(`Agent Member '${recipient.memberId}' is ${recipient.state}; DM delivery requires an enabled Member`)
-      if (recipient.memberId === AGENT_TEAM_HUMAN_MEMBER_ID || !recipient.sessionId) throw new Error('DM recipient must be an Agent Member')
+      if (recipient.memberId === AGENT_TEAM_HUMAN_MEMBER_ID) throw new Error('DM recipient must be an Agent Member')
       if (recipient.memberId === sender.memberId) throw new Error('Members cannot DM themselves')
       const operation: AgentTeamDmSentOperation = Object.freeze({
         ...this.operationBase(request, this.nextSequence()), kind: 'team/dm-sent',
@@ -2380,7 +2380,8 @@ export class AgentTeamLedger {
    * the DM being delivered, so messages the reader sent are `you → them`.
    */
   dmHistoryBetween(senderSessionId: SessionId, recipientMemberId: AgentTeamMemberId, excluding?: AgentTeamOperationId): string | undefined {
-    const sender = [...this.state.members.values()].find(member => member.sessionId === senderSessionId)
+    const sender = this.memberOfBoundSession(senderSessionId)
+      ?? [...this.state.members.values()].find(member => member.sessionId === senderSessionId)
     if (sender === undefined) return undefined
     for (let index = this.state.ordered.length - 1; index >= 0; index -= 1) {
       const operation = this.state.ordered[index]!

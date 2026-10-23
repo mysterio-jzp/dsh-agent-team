@@ -410,22 +410,20 @@ describe('Member work-domain bindings', () => {
 
 describe('A Member row that still carries a Session of its own', () => {
   /**
-   * The Member row of a current ledger still names a `sessionId`, because every
-   * record written before this change carries it and the durable domain is
-   * strict. The row must therefore be admitted — and it must no longer be
-   * treated as a work domain: the default Session is a leftover, not a place
-   * facts are delivered.
+   * Legacy Member rows still carry `sessionId` in the strict durable schema,
+   * but reopening them must not recreate a default work-domain binding.
    */
-  it('cold reopen: admits a Member row that still carries sessionId, and treats it as no domain', async () => {
+  it('cold reopen: admits a legacy Member sessionId without restoring a default domain', async () => {
     const test = await fixture()
     const scopeKey = channelMemberScopeKey(test.channelRef)
     await bind(test, scopeKey, SessionId('session:scoped-thread'))
 
     const cold = await reopen([...test.facility.get('agent_team')!.table('operations').entries()])
 
-    // The row is readable and keeps both its own domain and the Channel one.
+    // The durable row remains readable, but only the explicit Channel binding
+    // is a work domain; the old Member Session is not reattached.
     expect(cold.getMember(test.memberId)?.memberId).toBe(test.memberId)
-    expect(cold.memberScopeSessions(test.memberId).map(binding => binding.scopeKey)).toEqual([DEFAULT_MEMBER_SCOPE_KEY, scopeKey])
-    expect(cold.memberScopeSessionFor(test.memberId, DEFAULT_MEMBER_SCOPE_KEY)?.scopeKey).toBe(DEFAULT_MEMBER_SCOPE_KEY)
+    expect(cold.memberScopeSessions(test.memberId).map(binding => binding.scopeKey)).toEqual([scopeKey])
+    expect(cold.memberScopeSessionFor(test.memberId, DEFAULT_MEMBER_SCOPE_KEY)).toBeUndefined()
   })
 })

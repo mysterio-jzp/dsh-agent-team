@@ -20,7 +20,7 @@ import { WorkspaceId } from '@deepseek-ai/dsh-workspace'
 import { MemoryMediaPool, MemoryStorageBackend } from './helpers/memory-backend.ts'
 import AgentTeam from '../src/index.ts'
 import { agentTeamHumanActor } from '../src/ledger.ts'
-import { channelMemberScopeKey, memberScopeSession } from '../src/member-scope.ts'
+import { DEFAULT_MEMBER_SCOPE_KEY, channelMemberScopeKey, memberScopeSession } from '../src/member-scope.ts'
 import * as agentTeamInvariant from '../src/invariant.ts'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { AgentTeamChannelRef, AgentTeamChannelRowReason, AgentTeamMemberId, AgentTeamOperation, AgentTeamOperationId, AgentTeamRequestId } from '../src/types.ts'
@@ -460,6 +460,7 @@ describe('Channel rows in the Member session tree', () => {
       agent: { id: binding.sessionId, status: 'idle', ctx, session: { id: binding.sessionId } },
       dispose: async () => {},
     } as never)
+    ctx.agentTeam['clearMemberFailure'](memberId, 'activation', channelMemberScopeKey(ch))
 
     const activityOf = () => ctx.agentTeam.membersForClient({ workspaceId: alpha })
       .find(row => row.member.memberId === memberId)!.channels[0]!.activity

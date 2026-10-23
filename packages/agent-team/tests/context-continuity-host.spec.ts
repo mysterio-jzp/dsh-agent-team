@@ -13,13 +13,11 @@ import { createUserMessage, type Message, type UserMessage } from '@deepseek-ai/
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { isDroppedNotice, type ContextProjectionState, type PressureGate, type PressureJudgement, type TransitionPlan } from '@contexera/dsh-context-continuity'
 import { AGENT_TEAM_PLUGIN_ID } from '../src/context-source.ts'
-import { TEAM_CONTEXT_CODEC, TeamContextContinuityHost, TeamPressurePolicy, TeamPressurePolicyHost, continuitySubjectId, createTeamContextManagement, parseContinuitySubjectId } from '../src/context-continuity-host.ts'
-import type { AgentTeamAgentMember, AgentTeamMemberId, AgentTeamMemberScopeKey } from '../src/types.ts'
+import { TEAM_CONTEXT_CODEC, TeamContextContinuityHost, TeamPressurePolicy, TeamPressurePolicyHost, createTeamContextManagement } from '../src/context-continuity-host.ts'
+import type { AgentTeamAgentMember, AgentTeamMemberId } from '../src/types.ts'
 
 const MEMBER_ID = 'member:one' as AgentTeamMemberId
 const SESSION_ID = SessionId('session:one')
-const SCOPE_KEY = 'channel:channel:one' as AgentTeamMemberScopeKey
-const SUBJECT_ID = continuitySubjectId(MEMBER_ID, SCOPE_KEY)
 
 /** The model-facing text of one message. */
 function bodyOf(message: { readonly content: readonly unknown[] }): string {
@@ -118,7 +116,7 @@ describe('the Team context-continuity host', () => {
     expect(identity.requestId).toBe(`agent-team:rollover:${digest}`)
   })
 
-  it('resolves subjects and Agents in both directions per (Member, scopeKey)', () => {
+  it('resolves Sessions and Agents in both directions', () => {
     const host = new TeamContextContinuityHost({
       agentForSession: id => (id === SESSION_ID ? agent : undefined),
       memberForAgent: candidate => (candidate === agent ? member : undefined),
@@ -128,18 +126,17 @@ describe('the Team context-continuity host', () => {
     })
 
     expect(host.agentForSubject(SESSION_ID)).toBe(agent)
+    expect(host.agentForSubject(SessionId('session:missing'))).toBeUndefined()
     expect(host.subjectForAgent(agent)).toEqual({ id: SESSION_ID, sessionId: SESSION_ID })
     expect(host.subjectForAgent({ id: 'agent:other' } as Agent)).toBeUndefined()
   })
 
-  it('isolates transitions and idle Agent checks across concurrent work domains of the same Member', async () => {
-    const defaultScope = 'default' as AgentTeamMemberScopeKey
-    const defaultSession = SessionId('session:default')
-    const defaultSubject = continuitySubjectId(MEMBER_ID, defaultScope)
+  it('isolates transitions and idle Agent checks across concurrent Sessions of the same Member', async () => {
+    const siblingSession = SessionId('session:sibling')
     let resolveChannelIdle!: () => void
     const channelIdlePromise = new Promise<void>(resolve => { resolveChannelIdle = resolve })
-    const defaultAgent = { id: 'agent:default', whenIdle: () => Promise.resolve() } as unknown as Agent
-    const channelAgent = { id: 'agent:channel', whenIdle: () => channelIdlePromise } as unknown as Agent
+    const siblingAgent = { id: 'agent:sibling', session: { id: siblingSession }, whenIdle: () => Promise.resolve() } as unknown as Agent
+    const channelAgent = { id: 'agent:channel', session: { id: SESSION_ID }, whenIdle: () => channelIdlePromise } as unknown as Agent
     const channelProjection: ContextProjectionState = {
       sessionId: SESSION_ID,
       inheritedEventCount: 0,
@@ -153,8 +150,8 @@ describe('the Team context-continuity host', () => {
       seenTopics: [],
       lastTurnEndSeq: 5,
     }
-    const defaultProjection: ContextProjectionState = {
-      sessionId: defaultSession,
+    const siblingProjection: ContextProjectionState = {
+      sessionId: siblingSession,
       inheritedEventCount: 0,
       checkpoints: [],
       pending: null,
@@ -166,71 +163,46 @@ describe('the Team context-continuity host', () => {
       seenTopics: [],
       lastTurnEndSeq: 8,
     }
-    const executeTransition = vi.fn((_memberId: AgentTeamMemberId, _plan: TransitionPlan) => Promise.resolve())
+    const executeTransition = vi.fn((_sessionId: SessionId, _plan: TransitionPlan) => Promise.resolve())
     const management = createTeamContextManagement({
-      agentForMember: (id, scopeKey) => {
-        if (id !== MEMBER_ID) return undefined
-        if (scopeKey === defaultScope) return defaultAgent
-        if (scopeKey === SCOPE_KEY) return channelAgent
-        return undefined
-      },
-      surfaceForAgent: candidate => {
-        if (candidate === defaultAgent) return { member, scopeKey: defaultScope }
-        if (candidate === channelAgent) return { member, scopeKey: SCOPE_KEY }
-        return undefined
-      },
-      sessionForMemberScope: (id, scopeKey) => {
-        if (id !== MEMBER_ID) return undefined
-        if (scopeKey === defaultScope) return defaultSession
-        if (scopeKey === SCOPE_KEY) return SESSION_ID
-        return undefined
-      },
-      memberForAgent: candidate => (candidate === defaultAgent || candidate === channelAgent ? member : undefined),
-      projectionForMember: (id, sessionId) => {
-        if (id !== MEMBER_ID) return undefined
-        if (sessionId === SESSION_ID) return channelProjection
-        if (sessionId === defaultSession) return defaultProjection
-        return undefined
-      },
+      agentForSession: sessionId => sessionId === SESSION_ID ? channelAgent : sessionId === siblingSession ? siblingAgent : undefined,
+      memberForAgent: candidate => (candidate === channelAgent || candidate === siblingAgent ? member : undefined),
+      projectionForSession: sessionId => sessionId === SESSION_ID ? channelProjection : sessionId === siblingSession ? siblingProjection : undefined,
       executeTransition,
       log: () => {},
     })
 
-    // 1. Channel domain records a rollover tool result and ends its turn, but
-    //    its Agent has not converged to idle yet.
-    management.onSessionEvent(SUBJECT_ID, channelAgent, {
+    // Channel Session records a rollover and ends its turn, but its Agent has
+    // not converged to idle yet.
+    management.onSessionEvent(SESSION_ID, channelAgent, {
       type: 'tool/result',
       seq: 4,
       data: { toolCallId: 'call-channel-1', toolName: 'context_rollover', content: [] },
     } as unknown as SessionEvent)
-    expect(management.isTransitioning(SUBJECT_ID)).toBe(true)
-    expect(management.isTransitioning(defaultSubject)).toBe(false)
+    expect(management.isTransitioning(SESSION_ID)).toBe(true)
+    expect(management.isTransitioning(siblingSession)).toBe(false)
 
-    management.onSessionEvent(SUBJECT_ID, channelAgent, { type: 'turn/end', seq: 5 } as unknown as SessionEvent)
+    management.onSessionEvent(SESSION_ID, channelAgent, { type: 'turn/end', seq: 5 } as unknown as SessionEvent)
     expect(executeTransition).not.toHaveBeenCalled()
 
-    // 2. Before channelAgent.whenIdle() resolves, the same Member's default
-    //    domain finishes a turn (triggering subjectForAgent + projectionForSubject
-    //    inside scheduleCheckpointContinuations).
-    management.onSessionEvent(defaultSubject, defaultAgent, { type: 'turn/end', seq: 8 } as unknown as SessionEvent)
+    // A sibling Channel Session may finish independently while the rollover
+    // Agent is still waiting to become idle.
+    management.onSessionEvent(siblingSession, siblingAgent, { type: 'turn/end', seq: 8 } as unknown as SessionEvent)
     await new Promise(resolve => setImmediate(resolve))
     expect(executeTransition).not.toHaveBeenCalled()
-    expect(management.isTransitioning(SUBJECT_ID)).toBe(true)
+    expect(management.isTransitioning(SESSION_ID)).toBe(true)
 
-    // 3. Now channelAgent converges to idle: its transition must still validate
-    //    against channelAgent, run executeTransition, and clear the pending slot
-    //    so later rollovers in the Channel domain are not wedged.
     resolveChannelIdle()
     await new Promise(resolve => setImmediate(resolve))
 
     expect(executeTransition).toHaveBeenCalledTimes(1)
-    expect(executeTransition.mock.calls[0]?.[0]).toBe(MEMBER_ID)
+    expect(executeTransition.mock.calls[0]?.[0]).toBe(SESSION_ID)
     expect(executeTransition.mock.calls[0]?.[1]).toMatchObject({
       previousSessionId: SESSION_ID,
       handoff: 'Channel handoff.',
       trigger: 'model',
     })
-    expect(management.isTransitioning(SUBJECT_ID)).toBe(false)
+    expect(management.isTransitioning(SESSION_ID)).toBe(false)
   })
 
   it('treats Team notices as rederived and foreign messages as real input', () => {
@@ -281,6 +253,7 @@ describe('the Team context-continuity host', () => {
       agentForSession: id => (id === SESSION_ID ? live : undefined),
       memberForAgent: candidate => (candidate === live ? member : undefined),
       projectionForSession: () => ({
+        sessionId: SESSION_ID,
         pending: { toolCallId: 'call-1', resultSeq: 4, turn: 2, handoff: 'Handoff prose.', relatedFiles: [], turnEndSeq: -1 },
         checkpoints: [],
       }) as unknown as ContextProjectionState,

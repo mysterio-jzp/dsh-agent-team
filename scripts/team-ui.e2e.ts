@@ -3265,6 +3265,7 @@ it('keeps the fact under the reader still and never remounts the conversation ac
   const sessionId = memberChannelSessionId(host, member.memberId)
   await expect.poll(() => scaffold!.ctx.agents.get(sessionId) !== undefined).toBe(true)
   const agent = scaffold.ctx.agents.get(sessionId)!
+  await expect.poll(() => host.memberForAgent(agent) !== undefined).toBe(true)
   const selection = scaffold.ctx.agentDefaultModel.currentSelection()
   agent.session.append('request/context', { provider: selection.provider, model: selection.model, contextWindow: 128_000 })
   // A Task Thread with an active Claim: the banner lists exactly this shape.
