@@ -1920,6 +1920,32 @@ describe('Agent Team Member lifecycle', () => {
     }
   })
 
+  it('keeps another Member recovery timer when disposing a Member', async () => {
+    vi.useFakeTimers()
+    try {
+      const adapter = new ScriptedAdapter()
+      const { ctx, workspaceId } = await realHarness(adapter)
+      const memberA = await ctx.agentTeam.addMember({ requestId: requestId('cross-member-recovery-a'), workspaceId, handle: 'alpha', description: 'First Member', presetId: 'team-member', channelRefs: [] })
+      const memberB = await ctx.agentTeam.addMember({ requestId: requestId('cross-member-recovery-b'), workspaceId, handle: 'beta', description: 'Second Member', presetId: 'team-member', channelRefs: [] })
+      const agentA = ctx.agents.get(memberA.status.member.sessionId)!
+      const agentB = ctx.agents.get(memberB.status.member.sessionId)!
+      await Promise.all([agentA.whenIdle(), agentB.whenIdle()])
+      const recoverySteer = vi.spyOn(agentB, 'steer').mockImplementation(input => { agentB.inbox.append('next-turn', input) })
+
+      ctx.emit('agent/error', { agent: agentB, turn: 1, step: 1, error: new Error('fetch failed') })
+      await ctx.agentTeam.suspendMember({ requestId: requestId('cross-member-recovery-suspend-a'), memberId: memberA.status.member.memberId })
+      adapter.enqueue(textResponse('B completed a clean turn.'))
+      agentB.followup(createUserMessage({ content: [{ type: 'text', text: 'Complete a clean turn.' }], source: { kind: 'user' } }))
+      await agentB.whenIdle()
+      await vi.advanceTimersByTimeAsync(RECOVERY_DELAY_MS)
+
+      expect(recoverySteer).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
+      vi.useRealTimers()
+    }
+  })
+
   it('cancels an automatic wakeup when a Member is suspended before the delay', async () => {
     vi.useFakeTimers()
     try {

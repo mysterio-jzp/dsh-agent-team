@@ -673,8 +673,11 @@ export default class AgentTeam extends TypertRemoteService {
    */
   private readonly humanUpdateCheck = createHumanUpdateChecker({ currentVersion: HUMAN_PROFILE_VERSION })
 
-  /** Automatic recovery is isolated per live Session, including Channel domains. */
-  private readonly recoveries = new Map<SessionId, RecoveryCoordinator>()
+  /** Owner-tagged automatic-recovery coordinators, isolated per live Session. */
+  private readonly recoveries = new Map<
+    SessionId,
+    { readonly memberId: AgentTeamMemberId; readonly coordinator: RecoveryCoordinator }
+  >()
   /**
    * Team's domain half of the continuity projection: the durable ref naming,
    * the Team-notice rule, and the boundary judgement (committed messages,
@@ -1071,7 +1074,7 @@ export default class AgentTeam extends TypertRemoteService {
       // while the coordinator's own lines stay bounded by state changes.
       const kind = classifyRecoverableError(error)
       this.ctx.logger.debug(`agent-team: ${this.memberScope(member.memberId, agent.id)} reported an error classified as ${kind === undefined ? 'not automatically recoverable' : `recoverable ${kind}`}: ${message}`)
-      this.recoveryForSession(agent.session.id).onError(member.memberId, error)
+      this.recoveryForSession(member.memberId, agent.session.id).onError(member.memberId, error)
       this.emitMemberPresenceChanged(member)
     })
     this.ctx.on('agent/status', ({ agent, status }) => {
@@ -1102,7 +1105,7 @@ export default class AgentTeam extends TypertRemoteService {
       // Member as working after every turn until an unrelated change arrives.
       if (status === 'idle' && member !== undefined) {
         if (!this.sessionFailures.has(agent.session.id)) {
-          this.recoveries.get(agent.session.id)?.onCleanTurnEnd(member.memberId)
+          this.recoveries.get(agent.session.id)?.coordinator.onCleanTurnEnd(member.memberId)
         }
         this.emitMemberPresenceChanged(member)
       }
@@ -1152,7 +1155,7 @@ export default class AgentTeam extends TypertRemoteService {
       // through the runtime), so the chains below can drain to zero first.
       this.shutdown.resolve()
       this.memberRuntime.releaseTurnWaits()
-      for (const recovery of this.recoveries.values()) recovery.dispose()
+      for (const { coordinator } of this.recoveries.values()) coordinator.dispose()
       this.recoveries.clear()
       this.contextManagement.dispose()
       this.pressurePolicy.dispose()
@@ -4972,29 +4975,34 @@ export default class AgentTeam extends TypertRemoteService {
     this.ctx.logger.info(`agent-team: Team Inbox notice queued for ${scope} cause ${causeText} attempt ${attempt} lane '${sequenced ? 'follow-up turn' : 'next step'}' (${facts}): queued for the Member's next step, not yet read by the model`)
   }
 
-  private recoveryForSession(sessionId: SessionId): RecoveryCoordinator {
-    let recovery = this.recoveries.get(sessionId)
-    if (recovery === undefined) {
-      recovery = new RecoveryCoordinator({
-        wake: targetMemberId => { this.injectRecovery(targetMemberId, sessionId) },
-        report: fact => { this.reportRecovery(fact, sessionId) },
-      })
-      this.recoveries.set(sessionId, recovery)
+  private recoveryForSession(memberId: AgentTeamMemberId, sessionId: SessionId): RecoveryCoordinator {
+    const entry = this.recoveries.get(sessionId)
+    if (entry !== undefined) {
+      if (entry.memberId !== memberId) {
+        throw new AgentTeamInvariantError(`recovery Session '${sessionId}' is owned by Member '${entry.memberId}', not '${memberId}'`)
+      }
+      return entry.coordinator
     }
-    return recovery
+    const coordinator = new RecoveryCoordinator({
+      wake: targetMemberId => { this.injectRecovery(targetMemberId, sessionId) },
+      report: fact => { this.reportRecovery(fact, sessionId) },
+    })
+    this.recoveries.set(sessionId, { memberId, coordinator })
+    return coordinator
   }
 
   private stopRecoveryForMember(memberId: AgentTeamMemberId, reason: RecoveryClearReason): void {
-    for (const [sessionId, recovery] of this.recoveries) {
-      recovery.stopTracking(memberId, reason)
+    for (const [sessionId, entry] of this.recoveries) {
+      if (entry.memberId !== memberId) continue
+      entry.coordinator.stopTracking(memberId, reason)
       if (reason === 'session-disposed') this.recoveries.delete(sessionId)
     }
   }
 
   private stopRecoveryForSession(memberId: AgentTeamMemberId, sessionId: SessionId, reason: RecoveryClearReason): void {
-    const recovery = this.recoveries.get(sessionId)
-    if (recovery === undefined) return
-    recovery.stopTracking(memberId, reason)
+    const entry = this.recoveries.get(sessionId)
+    if (entry === undefined || entry.memberId !== memberId) return
+    entry.coordinator.stopTracking(memberId, reason)
     if (reason === 'session-disposed') this.recoveries.delete(sessionId)
   }
 
