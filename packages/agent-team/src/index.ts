@@ -4152,12 +4152,9 @@ export default class AgentTeam extends TypertRemoteService {
   }
 
   /**
-   * Start one Member's work domain on the Session its binding records: the
-   * `default` domain for identity and lifecycle work, one discussion's Session
-   * for its own facts. Everything the activation reads about the Member is
-   * Member-scoped; everything it reads about the Session comes from `binding`,
-   * so a domain resumes, seeds, and parents its own lineage and never the
-   * Member's other one.
+   * Start the Session recorded for one Member domain: `default` for Member-level
+   * context or the Member×Channel domain for that Channel's collaboration. The
+   * binding supplies the Session lineage, separate from the Member identity.
    */
   private async activateMember(member: AgentTeamAgentMember, binding: AgentTeamMemberScopeSession, knownWorkspacePath?: string, knownSessions?: ReadonlySet<SessionId>, forkedFrom?: SessionId, options?: { readonly deferNotify?: boolean; readonly seed?: readonly SessionEvent[]; readonly inheritedEventCount?: SessionLogOffset; readonly healed?: boolean }): Promise<void> {
     const { scopeKey, sessionId } = binding

@@ -309,7 +309,14 @@ async function realHarness(
     list: () => [],
     resolveByPath: async (path: string) => {
       const canonicalPath = await realpath(path)
-      return [...workspaces.values()].find(workspace => workspace.path === canonicalPath)
+      for (const workspace of workspaces.values()) {
+        try {
+          if (await realpath(workspace.path) === canonicalPath) return workspace
+        } catch {
+          // A stale fake Workspace path cannot own this Session cwd.
+        }
+      }
+      return undefined
     },
     // The registry-global archive set the real registry exposes: the Host
     // reads it to decide whether a retired Session's archive effect is still
@@ -422,6 +429,45 @@ describe('Agent Team Member lifecycle', () => {
     expect(channelAgent?.session.header.cwd).toBe(externalDirectory)
     expect(ctx.agentTeam.workDomainForAgent(channelAgent!)?.workingDirectories).toEqual([externalDirectory])
     expect(attachSession).not.toHaveBeenCalled()
+  })
+
+  it('attaches an external Channel cwd to the registered Workspace that owns it', async () => {
+    const adapter = new ScriptedAdapter()
+    adapter.enqueue(textResponse('Participation recorded.'))
+    const { ctx, workspaceId, root, workspaces } = await realHarness(adapter)
+    const channelWorkspaceId = WorkspaceId('workspace:channel-external-owner')
+    const cwdWorkspaceId = WorkspaceId('workspace:cwd-owner')
+    const channelRoot = join(root, 'channel-project')
+    const externalDirectory = join(root, 'external-project')
+    await Promise.all([mkdir(channelRoot), mkdir(externalDirectory)])
+    const attachChannelSession = vi.fn(async () => {})
+    const attachCwdSession = vi.fn(async () => {})
+    const attachMemberWorkspaceSession = vi.fn(async () => {})
+    workspaces.set(channelWorkspaceId, { id: channelWorkspaceId, path: channelRoot, attachSession: attachChannelSession })
+    workspaces.set(cwdWorkspaceId, { id: cwdWorkspaceId, path: externalDirectory, attachSession: attachCwdSession })
+    const added = await ctx.agentTeam.addMember({ requestId: requestId('cwd-owner-add'), workspaceId,
+      handle: 'builder', description: '', presetId: 'team-member', channelRefs: [] })
+    const memberId = added.status.member.memberId
+    await ctx.agentTeam.joinWorkspace({ requestId: requestId('cwd-owner-join'), workspaceId: channelWorkspaceId, memberId })
+    await ctx.agents.get(added.status.member.sessionId)!.whenIdle()
+    const memberWorkspace = workspaces.get(workspaceId)!
+    workspaces.set(workspaceId, { ...memberWorkspace, attachSession: attachMemberWorkspaceSession })
+    const channel = await ctx.agentTeam.createChannel({ requestId: requestId('cwd-owner-channel'), workspaceId: channelWorkspaceId,
+      name: 'external owner', description: '' })
+    await ctx.agentTeam.updateChannelWorkingDirectories({ requestId: requestId('cwd-owner-directory'), workspaceId: channelWorkspaceId,
+      channelRef: channel.channel.channelRef, workingDirectories: [externalDirectory] })
+
+    await ctx.agentTeam.addChannelMember({ requestId: requestId('cwd-owner-membership'), workspaceId: channelWorkspaceId,
+      channelRef: channel.channel.channelRef, memberId })
+
+    const binding = ctx.agentTeam['ledger']!.memberScopeSessionFor(memberId, channelMemberScopeKey(channel.channel.channelRef))
+    if (binding === undefined) throw new Error('Expected the Channel work-domain binding')
+    const channelAgent = ctx.agents.get(binding.sessionId)
+    expect(channelAgent?.session.header.cwd).toBe(externalDirectory)
+    expect(attachCwdSession).toHaveBeenCalledTimes(1)
+    expect(attachCwdSession).toHaveBeenCalledWith(binding.sessionId)
+    expect(attachMemberWorkspaceSession).not.toHaveBeenCalled()
+    expect(attachChannelSession).not.toHaveBeenCalled()
   })
 
   it('opens the new Channel work domain for an initial Member as the Channel is created', async () => {

@@ -5982,11 +5982,8 @@ export class AgentTeamLedger {
   }
 
   /**
-   * The Workspace a Member's context belongs to. A Channel domain follows the
-   * Member, not the Channel: a Member brought into a Channel from elsewhere
-   * keeps the Workspace it belongs to, so one Channel can hold Members from
-   * several Workspaces and each keeps its own. The Channel is consulted only
-   * to prove the key names a live domain, never to borrow its Workspace.
+   * The default domain belongs to the Member's creation Workspace; a Channel
+   * domain belongs to the Workspace that owns its Channel.
    */
   private workspaceForScopeFrom(projection: Projection, memberId: AgentTeamMemberId, scopeKey: AgentTeamMemberScopeKey): WorkspaceId | undefined {
     const member = projection.members.get(memberId)
