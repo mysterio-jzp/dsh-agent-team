@@ -26,7 +26,7 @@ import { diagnosticText, TeamPresenceDot } from './TeamPresenceDot.tsx'
 import { TeamThreadMembers } from './TeamThreadMembers.tsx'
 import { TeamMessage } from './TeamMessage.tsx'
 import { TeamRunDivider } from './TeamRunDivider.tsx'
-import { firstSentence, formatActivity, formatClaimState, formatRiskClass, formatTaskStatus, formatTaskTitle, mentionNameOf, mentionNamesOf, mentionedMemberIds, mentionsHuman, taskStatusDot, type MentionHandle } from './team-formatters.ts'
+import { claimStateDot, firstSentence, formatActivity, formatClaimState, formatRiskClass, formatTaskStatus, formatTaskTitle, mentionNameOf, mentionNamesOf, mentionedMemberIds, mentionsHuman, taskStatusDot, type MentionHandle } from './team-formatters.ts'
 import { TeamStateDot } from './TeamStateDot.tsx'
 import { HumanTodoAnswerMark, HumanTodoBoard, isUnsettledTodo, listedState, useAnsweredTodos, type HumanTodoTimes } from './HumanTodoBoard.tsx'
 import { mintRequestId, uploadComposerFiles } from './requests.ts'
@@ -731,7 +731,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // message that answered each one so a row can find its own to-do.
   const listedTodos = todos ?? []
   const answeredTodos = useAnsweredTodos(listedTodos)
-  const effectiveChannelRef = task?.channelRef ?? channelRef
+  const effectiveChannelRef = task?.channelRef ?? activeProjection?.anchor.channelRef ?? channelRef
   const channelMemberIds = useMemo(() => new Set(channelView?.members.filter(item => item.channelRef === effectiveChannelRef).map(item => item.memberId) ?? []), [channelView, effectiveChannelRef])
   const memberSnapshotUsable = memberSnapshotLoaded && memberSnapshotError === undefined
   const threadMemberIds = useMemo(() => new Set(threadMembers.map(member => member.memberId)), [threadMembers])
@@ -870,7 +870,7 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   // change bursts that leave the roster itself untouched.
   const rosterKey = useMemo(() => [
     (channelView?.channels ?? []).map(channel => `${channel.channelRef}=${channel.name}=${channel.state}`).join(','),
-    members.map(status => `${status.member.memberId}=${status.member.handle}=${status.member.sessionId}=${status.availability}`).join(','),
+    members.map(status => `${status.member.memberId}=${status.member.handle}=${status.availability}=${(status.channels ?? []).map(row => `${row.channelRef}:${row.state}:${row.sessionId ?? ''}`).join('|')}`).join(','),
     channelView?.humanMemberId ?? '',
   ].join(';'), [channelView, members])
   const channelNameOf = useMemo(() => {
@@ -1256,34 +1256,42 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
   return <main className={css.surface} data-team-thread={threadRef}>
     <div className={css.surfaceHeader}>
       <div className={css.backRow}><Button size="sm" icon={<IconChevronLeftOutlineRegular />} onClick={backToWorkspace}>{backLabel}</Button></div>
-      <header className={css.headerRow}>
-        <div className={css.headerCopy}>
+      <header className={threadCss.headerStack}>
+        <div className={threadCss.headerTop}>
           <div className={threadCss.titleLine}>
             <h1>{task === undefined ? t('threadLabel') : t('taskLabel', { number: resolvedTaskNumber ?? '…' })}</h1>
             {task !== undefined && <Pill><TeamStateDot size={8} state={taskStatusDot(task.status)} />{formatTaskStatus(task.status, t)}</Pill>}
           </div>
-          {taskTitle !== undefined && taskTitle !== '' && <p className={threadCss.taskTitle} title={taskTitle}>{taskTitle}</p>}
+          <div className={threadCss.headerToolbar}>
+            {memberManager}
+            {task === undefined && thread !== undefined && <>
+              <span className={threadCss.toolbarDivider} aria-hidden="true" />
+              <div className={css.headerActions}>
+                <Button size="sm" variant="primary" disabled={pending} onClick={() => { void convertToTask() }}>{mutating === 'promote' ? t('promotingTask') : t('promoteToTask')}</Button>
+              </div>
+            </>}
+            {/* Open tasks act here; an accepted Thread keeps its header reopen. Reopen for a
+                closed Thread lives only in the composer-slot closed notice. */}
+            {task !== undefined && thread !== undefined && task.resolution !== 'closed' && <>
+              <span className={threadCss.toolbarDivider} aria-hidden="true" />
+              <div className={css.headerActions}>
+                {task.resolution === 'open'
+                  ? <Button size="sm" variant="outline" disabled={pending} onClick={() => { void mutateTask('close') }}>{t('closeTask')}</Button>
+                  : <Button size="sm" variant="primary" disabled={pending} onClick={() => { void mutateTask('reopen') }}>{t('reopenTask')}</Button>}
+                {(() => {
+                  const activeClaims = projection?.claims.filter(claim => claim.taskRef === task.taskRef && claim.state === 'active') ?? []
+                  const earlyAccept = task.resolution === 'open' && task.status === 'in_progress' && activeClaims.length > 0
+                  // todo Tasks accept directly: the work finished outside the
+                  // ledger, so there is nothing to confirm and no Claims to list.
+                  if (!(task.status === 'in_review' || task.status === 'todo' || earlyAccept) || task.resolution !== 'open') return null
+                  return <Button size="sm" variant="primary" disabled={pending}
+                    onClick={() => { if (earlyAccept) { setConfirmingAccept(true) } else { void mutateTask('accept') } }}>{t('acceptTask')}</Button>
+                })()}
+              </div>
+            </>}
+          </div>
         </div>
-        {task === undefined && thread !== undefined && <div className={css.headerActions}>
-          <Button size="sm" variant="primary" disabled={pending} onClick={() => { void convertToTask() }}>{mutating === 'promote' ? t('promotingTask') : t('promoteToTask')}</Button>
-        </div>}
-        {/* Open tasks act here; an accepted Thread keeps its header reopen. Reopen for a
-            closed Thread lives only in the composer-slot closed notice. */}
-        {task !== undefined && thread !== undefined && task.resolution !== 'closed' && <div className={css.headerActions}>
-          {(() => {
-            const activeClaims = projection?.claims.filter(claim => claim.taskRef === task.taskRef && claim.state === 'active') ?? []
-            const earlyAccept = task.resolution === 'open' && task.status === 'in_progress' && activeClaims.length > 0
-            // todo Tasks accept directly: the work finished outside the
-            // ledger, so there is nothing to confirm and no Claims to list.
-            if (!(task.status === 'in_review' || task.status === 'todo' || earlyAccept) || task.resolution !== 'open') return null
-            return <Button size="sm" variant="primary" disabled={pending}
-              onClick={() => { if (earlyAccept) { setConfirmingAccept(true) } else { void mutateTask('accept') } }}>{t('acceptTask')}</Button>
-          })()}
-          {task.resolution === 'open'
-            ? <Button size="sm" variant="outline" disabled={pending} onClick={() => { void mutateTask('close') }}>{t('closeTask')}</Button>
-            : <Button size="sm" variant="primary" disabled={pending} onClick={() => { void mutateTask('reopen') }}>{t('reopenTask')}</Button>}
-        </div>}
-        <div className={css.headerActions}>{memberManager}</div>
+        {taskTitle !== undefined && taskTitle !== '' && <p className={threadCss.taskTitle} title={taskTitle}>{taskTitle}</p>}
       </header>
       {risks.length > 0 && <section className={threadCss.riskSection} aria-label={t('runtimeRisk')}>
         <h2>{t('runtimeRisk')}</h2>
@@ -1324,15 +1332,16 @@ export function TeamThreadPage(props: TeamThreadPageProps) {
         >
           <div className={threadCss.claimList}>
             {taskClaims.length === 0 && <p className={threadCss.emptyClaims}>{t('noClaims')}</p>}
-            {taskClaims.map(claim => {
-              const ownerStatus = members.find(status => status.member.memberId === claim.owner)
-              return <article className={`${threadCss.claimRow}${claim.state === 'done' ? ` ${threadCss.claimRowDone}` : ''}`} key={claim.claimRef}>
-                {ownerStatus === undefined ? <span /> : <TeamPresenceDot status={ownerStatus} t={t} />}
+            {taskClaims.map(claim => (
+              <article className={`${threadCss.claimRow}${claim.state !== 'active' ? ` ${threadCss.claimRowDone}` : ''}`} key={claim.claimRef}>
+                <span className={threadCss.claimDot} data-claim-state={claim.state} aria-hidden="true">
+                  <TeamStateDot state={claimStateDot(claim.state)} size={claim.state === 'active' ? 12 : 10} />
+                </span>
                 <strong className={threadCss.claimOwner} title={memberName(claim.owner)}>{memberName(claim.owner)}</strong>
                 <span className={threadCss.claimDirection}>{claim.direction}</span>
                 <small className={threadCss.claimState}>{formatClaimState(claim.state, t)}</small>
               </article>
-            })}
+            ))}
           </div>
         </DisclosureRow>
       </section>}

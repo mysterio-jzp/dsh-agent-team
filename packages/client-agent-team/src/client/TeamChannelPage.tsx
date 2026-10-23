@@ -3,7 +3,7 @@ import type { AgentTeamClientMemberStatus, AgentTeamChannelRef, AgentTeamInbox, 
   AgentTeamTaskRef, AgentTeamThreadRef,
 } from '@contexera/dsh-agent-team/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-import { Button, IconChevronLeftOutlineRegular, IconChevronRightOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronLeftOutlineRegular, IconChevronRightOutlineRegular, IconUserOutlineRegular, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TeamConversationProps } from './slots.ts'
 import { mintRequestId, uploadComposerFiles } from './requests.ts'
 import type { TeamDraftKey, TeamDraftStore } from './drafts.ts'
@@ -12,6 +12,8 @@ import { TeamMessage } from './TeamMessage.tsx'
 import type { TeamMemberAvatars } from './member-avatars.ts'
 import { namedAvatarOwners, TeamAvatarStack, type TeamAvatarHuman, type TeamAvatarOwner } from './TeamAvatarStack.tsx'
 import { TeamCountBadge } from './TeamCountBadge.tsx'
+import { TeamMemberIdentity } from './TeamMemberRow.tsx'
+import { presenceDotState, presenceLabel } from './TeamPresenceDot.tsx'
 import { TeamRunDivider } from './TeamRunDivider.tsx'
 import { claimersLabel, formatAbsoluteTime, formatInboxTime, formatTaskStatus, taskStatusDot, mentionNamesOf, mentionsHuman } from './team-formatters.ts'
 import { TeamStateDot } from './TeamStateDot.tsx'
@@ -114,6 +116,8 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
   const [pending, setPending] = useState(false)
   const [asTask, setAsTask] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
+  const [membersOpen, setMembersOpen] = useState(false)
+  const memberTriggerRef = useRef<HTMLButtonElement>(null)
   // The composer draft lives in the keyed draft cache: view switches unmount
   // this page, and a refresh must not cost the half-written message either.
   // The composer owns the subscription — this page only reads a snapshot when
@@ -168,7 +172,7 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
   // leave the roster itself untouched.
   const rosterKey = useMemo(() => [
     (view?.channels ?? []).map(channel => `${channel.channelRef}=${channel.name}=${channel.state}`).join(','),
-    members.map(status => `${status.member.memberId}=${status.member.handle}=${status.member.sessionId}=${status.availability}`).join(','),
+    members.map(status => `${status.member.memberId}=${status.member.handle}=${status.availability}=${(status.channels ?? []).map(row => `${row.channelRef}:${row.state}:${row.sessionId ?? ''}`).join('|')}`).join(','),
     view?.humanMemberId ?? '',
   ].join(';'), [view, members])
   const channelNameOf = useMemo(() => {
@@ -199,8 +203,13 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
   const channel = view?.channels.find(item => item.channelRef === channelRef)
   const channelMemberIds = new Set(view?.members.filter(item => item.channelRef === channelRef).map(item => item.memberId) ?? [])
   const channelMembers = members.filter(status => channelMemberIds.has(status.member.memberId) && status.member.state !== 'inactive' && status.member.state !== 'archived')
+  const channelMemberOwners = channelMembers.map(status => ({ memberId: status.member.memberId, name: status.member.handle }))
   // Presence counts ride the header meta line; error and unavailable do not count as online.
   const onlineCount = channelMembers.filter(status => status.presence === 'available' || status.presence === 'working').length
+  const closeMembers = (): void => {
+    setMembersOpen(false)
+    requestAnimationFrame(() => { memberTriggerRef.current?.focus({ preventScroll: true }) })
+  }
   const messageSender = (item: AgentTeamViewItem): AgentTeamMemberId => item.message.sender
   const handleByMember = new Map(members.map(status => [status.member.memberId, status.member.handle.replace(/^@/, '')]))
   // The inline mention chip names a Member by canonical handle and nothing
@@ -268,6 +277,7 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
     setView(undefined)
     setLoadError(undefined)
     setLoading(true)
+    setMembersOpen(false)
     void refresh()
     const disposers = [
       subscribeChanges({ kind: 'channel', channelRef }, update => {
@@ -381,7 +391,63 @@ export function TeamChannelPage({ workspaceId, channelRef, humanName, humanAvata
             <span>{t('onlineCount', { count: onlineCount })}</span>
           </div>}
         </div>
+        {channel !== undefined && <div className={css.headerActions}>
+          <button
+            ref={memberTriggerRef}
+            type="button"
+            className={channelCss.memberTrigger}
+            aria-haspopup="dialog"
+            aria-expanded={membersOpen}
+            onClick={() => { setMembersOpen(true) }}
+          >
+            {channelMemberOwners.length > 0
+              ? <TeamAvatarStack owners={channelMemberOwners} />
+              : <IconUserOutlineRegular size={15} aria-hidden="true" />}
+            <span>{t('channelMembersCount', { count: channelMembers.length })}</span>
+            <span className={channelCss.memberTriggerAction}>{t('channelMembersView')}</span>
+          </button>
+        </div>}
       </header>
+      {channel !== undefined && <Modal
+        open={membersOpen}
+        onClose={closeMembers}
+        title={t('channelMembersTitle', { count: channelMembers.length })}
+        closeLabel={t('close')}
+        contentClassName={channelCss.modalBody!}
+        footer={<Button variant="outline" onClick={closeMembers}>{t('close')}</Button>}
+      >
+        <p className={channelCss.memberHint}>{t('channelMembersHint')}</p>
+        {channelMembers.length === 0
+          ? <p className={channelCss.memberEmpty}>{t('channelMembersEmpty')}</p>
+          : <div className={channelCss.memberList}>
+            {channelMembers.map(status => {
+              const channelRow = status.channels?.find(row => row.channelRef === channelRef)
+              const targetSessionId = channelRow?.state === 'ready' ? channelRow.sessionId : undefined
+              const openable = targetSessionId !== undefined
+              const statusWord = status.presence === 'available' ? t('statusAvailable')
+                : status.presence === 'working' ? t('statusWorking')
+                  : status.presence === 'error' ? t('statusError') : t('statusUnavailable')
+              return <button
+                key={status.member.memberId}
+                type="button"
+                className={channelCss.memberItem}
+                data-channel-member={status.member.memberId}
+                disabled={!openable}
+                onClick={() => {
+                  if (targetSessionId === undefined) return
+                  setMembersOpen(false)
+                  openMemberSession(targetSessionId)
+                }}
+              >
+                <TeamMemberIdentity status={status} t={t} memberAvatars={memberAvatars} />
+                <span className={channelCss.memberStatusTag} title={presenceLabel(status, t)}>
+                  <TeamStateDot state={presenceDotState(status.presence)} />
+                  <span>{statusWord}</span>
+                </span>
+              </button>
+            })}
+          </div>}
+      </Modal>}
     </div>
 
     <section ref={timeline.ref} onScroll={timeline.onScroll} className={css.timeline} aria-label={t('timelineLabel')}>

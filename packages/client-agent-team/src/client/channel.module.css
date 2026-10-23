@@ -14,12 +14,98 @@
   margin-right: 6px;
 }
 
-/* The roster is a scrollable window of shared Member rows; the row owns its
-   own identity, action and failure line. */
+.memberTrigger {
+  align-items: center;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm, 8px);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  flex: none;
+  font: inherit;
+  font-size: 12px;
+  gap: 7px;
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.memberTrigger:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.memberTrigger:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.memberTriggerAction {
+  border-left: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  padding-left: 7px;
+}
+
+.memberHint,
+.memberEmpty {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  margin: 0 0 10px;
+}
+
+/* The roster is a scrollable window of shared Member rows; each row opens that
+   Member's Session and displays its current live presence. */
 .memberList {
   display: grid;
   gap: 2px;
   margin: 0 -6px;
+}
+
+.memberItem {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--dsw-radius-md, 12px);
+  color: inherit;
+  cursor: pointer;
+  display: grid;
+  font: inherit;
+  gap: 0 10px;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  min-height: 44px;
+  padding: 8px 10px;
+  text-align: left;
+  width: 100%;
+}
+
+.memberItem:not(:disabled):hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.memberItem:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.memberItem:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -2px;
+}
+
+.memberStatusTag {
+  align-items: center;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  display: inline-flex;
+  font-size: 11px;
+  gap: 5px;
+  line-height: 16px;
+  padding: 2px 8px;
+  white-space: nowrap;
 }
 
 .modalBody {
